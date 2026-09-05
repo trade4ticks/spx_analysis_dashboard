@@ -189,7 +189,76 @@
 
     <!-- ── Left rail: the configuration, always in view ────────────────── -->
     <div class="ft-rail">
+      {#- Signal / Portfolio. ONE panel, not two: everything below this
+          section — exits, sizing, window, baselines, grid, suite — is
+          identical in both modes and applies to whatever trade set the
+          selection resolves to. The toggle replaces only the pickers.
+
+          The argument for portfolio mode: exit policy is a PORTFOLIO-level
+          decision. When several signals put the same ticker on today's list
+          it is traded once, with one exit policy, so a per-signal exit is not
+          something that could actually be traded. Signals therefore carry no
+          exit information, and none is invented for them here. -#}
       <div class="ft-sec">
+        <div class="ft-sec-h">Selection</div>
+        <div class="ft-toggle">
+          <span :class="{on: selMode==='signal'}" @click="setSelMode('signal')">Signal</span>
+          <span :class="{on: selMode==='portfolio'}" @click="setSelMode('portfolio')">Portfolio</span>
+        </div>
+      </div>
+
+      <div class="ft-sec" x-show="isPortfolio">
+        <div class="ft-sec-h">Saved signals</div>
+        {#- Saved on the Factor Analysis page. There is no second save
+            mechanism here on purpose: one store, no drift. -#}
+        <div class="ft-note" x-show="signalsError" style="color:#e84393"
+             x-text="signalsError"></div>
+        <div class="ft-note" x-show="!signals.length && !signalsError">
+          No saved signals found.
+        </div>
+        <div class="ft-note" style="margin-bottom:6px"
+             x-show="selectedSignalIds.length"
+             x-text="selectedSignalIds.length + ' selected — traded as one deduped set '
+                     + '(one trade per ticker + date, normal size)'"></div>
+        <div style="max-height:340px;overflow-y:auto;margin:0 -2px">
+          <template x-for="s in signals" :key="'sig-'+s.id">
+            {#- INELIGIBLE SIGNALS ARE SHOWN, NOT HIDDEN. A signal that
+                silently vanished is indistinguishable from one that was
+                deleted; the reason is what turns "where did it go" into
+                "of course". -#}
+            <div class="ft-rule" :class="{on: signalSelected(s.id)}"
+                 :style="s.eligible ? 'cursor:pointer' : 'opacity:.45;cursor:not-allowed'"
+                 :title="s.eligible ? (s.primary_metric + ' × ' + s.secondary_metric) : s.reason"
+                 @click="toggleSignal(s)"
+                 style="display:block;padding:5px 6px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <div class="ft-sw" :class="{on: signalSelected(s.id)}"
+                     :style="s.eligible ? '' : 'opacity:.4'"></div>
+                <div class="ft-rule-name" style="flex:1;min-width:0"
+                     x-text="s.name"></div>
+                <span class="ft-note" style="flex:0 0 auto"
+                      x-text="s.n_cells + 'c'"></span>
+              </div>
+              <div class="ft-note" style="padding-left:27px;line-height:1.35"
+                   x-text="s.primary_metric + ' × ' + s.secondary_metric"></div>
+              <div class="ft-note" style="padding-left:27px;line-height:1.35"
+                   {#- agg_n is the FACTOR ANALYSIS count: daily_features
+                       universe, train window. This page's n is lower — the
+                       trade_paths subset, after max_strike — so it is
+                       labelled rather than shown as a bare number that will
+                       not match the stat bar. -#}
+                   :title="'Factor Analysis n — daily_features universe, train window. This page reports fewer: only ticker-days with a resolved trade path, after the max-strike filter.'"
+                   x-text="'n(FA) ' + (s.agg_n ?? '—') + ' · ' + s.n_bins + ' bins'
+                           + (s.selection_cutoff ? ' · split ' + s.selection_cutoff : '')"></div>
+              <div class="ft-note" x-show="!s.eligible"
+                   style="padding-left:27px;line-height:1.35;color:#e8a33d"
+                   x-text="s.reason"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div class="ft-sec" x-show="!isPortfolio">
         <div class="ft-sec-h">Mode</div>
         <div class="ft-toggle">
           <span :class="{on: mode==='2f'}" @click="mode='2f'">2-factor</span>
@@ -219,11 +288,24 @@
             </select>
           </div>
         </template>
+      </div>
+
+      {#- Entry anchor is page-level, so it sits outside the mode-specific
+          section. In portfolio mode it is pinned to `open`: the selectable
+          signals are exactly the ones whose outcome enters at the open
+          (`_oc`), so any other anchor would enter at a different time than
+          the one the signals were selected under. Disabled and explained
+          rather than silently overridden. -#}
+      <div class="ft-sec">
         <label>Entry anchor</label>
-        <select x-model="entryAnchor">
+        <select x-model="entryAnchor" :disabled="isPortfolio"
+                :title="isPortfolio ? 'Portfolio mode enters at the open: only signals selected on an _oc outcome can be combined here.' : ''">
           <option value="open">open</option>
           <option value="t1000">t1000</option>
         </select>
+        <div class="ft-note" x-show="isPortfolio" style="margin-top:4px">
+          Pinned to open — saved signals enter at the open of trade_date.
+        </div>
       </div>
 
       <!-- Exit rules. Four groups driven by `side`; trailing and breakeven
@@ -308,7 +390,7 @@
       <button class="ft-btn" @click="clearAll()">Clear all</button>
       <button class="ft-btn primary" @click="run()" :disabled="loading"
               x-text="loading ? 'Running…' : 'Run'"></button>
-      <button class="ft-btn" @click="runBaseline(false, 'entry')" :disabled="loading || !selectedCells.length"
+      <button class="ft-btn" @click="runBaseline(false, 'entry')" :disabled="loading || !hasSelection"
               style="border-left:3px solid #3498db"
               title="Same exit policy, same anchor, same max strike, same window and the same per-date trade counts — against randomly chosen tickers. Isolates one thing: does the metric pick better names than chance on the same days. Needs a selected zone, because the zone is the distribution being matched.">
         Random entries
@@ -322,12 +404,12 @@
           rules than entry+exit is, because it asks it against the trades
           actually being taken. Shares its exit salt with entry+exit, so the
           only difference between those two runs is entry selection. -#}
-      <button class="ft-btn" @click="runBaseline(false, 'exit')" :disabled="loading || !selectedCells.length"
+      <button class="ft-btn" @click="runBaseline(false, 'exit')" :disabled="loading || !hasSelection"
               style="border-left:3px solid #e84393"
               title="Your real zone entries, but the exit rules replaced by a holding period drawn from your policy's own distribution. Isolates whether your exit rules add value on your actual trade selection. Draws from the same rule as the random entries + exits baseline, so those two differ only by entry selection.">
         Random exits
       </button>
-      <button class="ft-btn" @click="runBaseline(false, 'entry_exit')" :disabled="loading || !selectedCells.length"
+      <button class="ft-btn" @click="runBaseline(false, 'entry_exit')" :disabled="loading || !hasSelection"
               style="border-left:3px solid #1abc9c"
               title="Random tickers AND a random holding period drawn from your policy's own distribution, instead of applying the exit rules. Isolates whether the exit rules add anything over simply being in the market for a similar duration. Shares its entry draw with the random-entries baseline at the same seed, so the difference between the two is the exit rules alone.">
         Random entries + exits
@@ -342,14 +424,14 @@
           md5(ticker|date|seed|exit). Said on the button rather than left to
           be inferred from the fact that they share a seed. -#}
       <button class="ft-btn" @click="runBaseline(true, runData?.baseline_kind || 'entry')"
-              :disabled="loading || !selectedCells.length"
+              :disabled="loading || !hasSelection"
               style="margin-top:4px;font-size:11px"
               title="New seed for the active baseline — re-rolls BOTH the entry draw and the exit draw, since both derive from the one seed. Shows how much of the baseline's numbers are sampling noise.">
         ↻ Re-sample (re-rolls entry + exit draws)
       </button>
-      <div class="ft-note" x-show="!selectedCells.length" style="margin-top:4px">
-        Baseline needs a selected zone.
-      </div>
+      <div class="ft-note" x-show="!hasSelection" style="margin-top:4px"
+           x-text="isPortfolio ? 'Baseline needs at least one selected signal.'
+                               : 'Baseline needs a selected zone.'"></div>
 
       <div class="ft-sec-h" style="margin-top:12px">Baseline suite</div>
       <div style="display:flex;gap:6px;align-items:center">
@@ -404,12 +486,12 @@
                style="flex:0 0 62px;width:62px">
       </div>
       <button class="ft-btn" @click="runGrid()"
-              :disabled="gridRunning || loading || !selectedCells.length || !gridSweep.length"
+              :disabled="gridRunning || loading || !hasSelection || !gridSweep.length"
               title="Full cross product of the selected families' catalog values, plus the null combination. Shows each parameter's MARGINAL effect — averaged across every setting of the others — with a spread band, because a one-at-a-time sweep only describes the slice it was run on."
               x-text="gridRunning ? ('Running… ' + gridElapsed + 's') : 'Run parameter grid'"></button>
 
       <button class="ft-btn primary" @click="runSuite()"
-              :disabled="suiteRunning || loading || !selectedCells.length"
+              :disabled="suiteRunning || loading || !hasSelection"
               title="Policy plus all three baseline types, N seeds each, train and test, in one batch. Reports mean / sd / min / max per run type and — the number that answers the question — how many of the N draws the policy beat."
               x-text="suiteRunning ? ('Running… ' + suiteElapsed + 's')
                                    : ('Run baseline suite (' + (3 * (+suiteN || 10) + 1) + ' queries)')"></button>
@@ -452,8 +534,27 @@
             <div class="p" x-show="r.baseline?.hold"
                  title="Holding period drawn per trade from your policy's own distribution, snapped to the max_days periods that exist in the catalog."
                  x-text="'hold ~' + (r.baseline?.hold?.avg_sessions ?? 0) + ' sess drawn'"></div>
-            <div class="p" x-text="r.primary_metric"></div>
-            <div class="p" x-text="r.secondary_metric || '(single)'"></div>
+            {#- A portfolio card names its signals; a zone card names its
+                metric pair. Same card, and the difference is the first thing
+                on it, because "which trade set is this" is the question every
+                other number on the card depends on. -#}
+            <template x-if="r.mode === 'portfolio'">
+              <div>
+                <div class="p" style="font-weight:700;color:#1abc9c"
+                     x-text="'PORTFOLIO — ' + (r.signals || []).length + ' signals'"></div>
+                <template x-for="sg in (r.signals || [])" :key="'rs-'+i+'-'+sg.id">
+                  <div class="p" :title="sg.primary_metric + ' × ' + sg.secondary_metric"
+                       x-text="'· ' + sg.name"></div>
+                </template>
+                <div class="p" title="One trade per ticker + trade_date, at normal size, however many signals fired it.">deduped ticker+date</div>
+              </div>
+            </template>
+            <template x-if="r.mode !== 'portfolio'">
+              <div>
+                <div class="p" x-text="r.primary_metric"></div>
+                <div class="p" x-text="r.secondary_metric || '(single)'"></div>
+              </div>
+            </template>
             <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
             <div class="p" x-show="r.max_strike"
                  title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
@@ -474,8 +575,13 @@
       <!-- 3. Heatmap. ONE grid, three-way toggle. Header names the policy —
            these cells are avg return UNDER THAT POLICY, not the fixed-horizon
            return the Factor Analysis heatmap shows. Same grid, different
-           meaning. -->
-      <div class="chart-box" x-show="runData">
+           meaning.
+
+           Hidden in portfolio mode, and not merely empty: a heatmap is a
+           binning of ONE metric pair, and a portfolio spans several pairs at
+           several resolutions. There is no single grid to draw, and the cell
+           selection it exists to provide is replaced by the signal list. -->
+      <div class="chart-box" x-show="runData && !isPortfolio">
         <div class="chart-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span>Heatmap</span>
           <div class="ft-toggle">

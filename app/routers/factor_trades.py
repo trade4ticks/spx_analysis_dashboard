@@ -339,9 +339,311 @@ async def _bin_columns(conn) -> set[str]:
     return {r["column_name"] for r in rows}
 
 
+# ── Portfolio mode ────────────────────────────────────────────────────────
+#
+# A portfolio is the deduped union of several saved signals, traded under ONE
+# exit policy. The argument for it is that exit policy is a portfolio-level
+# decision: when three signals put the same ticker on today's list you trade
+# it once, so a per-signal exit is not a thing that could be traded.
+#
+# The union is expressed as an OR of per-signal cell predicates against the
+# SAME tt_bins row, which is what makes dedup structural rather than a pass
+# someone has to remember: one trade_paths row joins one tt_bins row, so an OR
+# over that row cannot emit it twice. There is no dedup step to forget.
+#
+# Signals carry no exit information and none is invented for them here.
+
+# JS bitwise operators are 32-bit and signed, so bit 31 would go negative in
+# the client. 31 signals is the hard ceiling; the practical use is 8-10.
+MAX_PORTFOLIO_SIGNALS = 31
+
+# The only entry the exit paths can honour. daily_features forward returns are
+# either _oc (enter at T's 9:30 open) or _cc (enter at T-1's close); trade_paths
+# has anchors 'open' and 't1000' and nothing at the prior close. A _cc signal
+# would silently be entered a half-session later than it was selected under, so
+# it is refused rather than quietly re-anchored.
+_OC_OUTCOME_SUFFIX = "_oc"
+
+# Metric names are interpolated into SQL (they are column names, which cannot
+# be parameters), so they are whitelisted rather than trusted. Same character
+# set the Factor Analysis side validates against.
+_SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
+
+_SIGNAL_COLUMNS = """id, name, primary_metric, secondary_metric, outcome,
+                     n_bins, cell_set, agg_n, selection_mode, selection_cutoff"""
+
+
+def _collapse_expr(col: str, n_bins: int) -> str:
+    """bin20 column -> 0-based cell index at n_bins resolution.
+
+    THE definition, in one place. It is the exact integer formula the Factor
+    Analysis heatmap renderer and /secondary-zone-analyze use, so a zone drawn
+    there addresses the same cells here. LEAST is a no-op for bin20 in 1..20
+    and exists only to make an out-of-range stored bin fail closed.
+    """
+    return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+
+
+def _signal_cells(sig) -> list:
+    """cell_set as a list of [ix, iy], tolerating asyncpg's two JSONB shapes."""
+    raw = sig["cell_set"]
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    return raw or []
+
+
+def _signal_ineligible(sig, tt_cutoff: str, bin_cols: set) -> Optional[str]:
+    """Why this saved signal cannot be traded on this page, or None if it can.
+
+    ONE definition of eligibility, server-side, so the checkbox the user sees
+    disabled and the request the server would refuse cannot disagree. The
+    reason is returned as prose because it is shown next to the signal — an
+    older signal missing from the list is otherwise indistinguishable from a
+    signal that was deleted.
+    """
+    mode = sig["selection_mode"] or "in_sample"
+    if mode != "train_test":
+        # is_bins edges are full-history quantiles re-derived on every pipeline
+        # run; tt_bins edges are frozen at the cutoff. Same cell coordinates,
+        # different boundaries, so the zone would resolve to a different set of
+        # entries here than on the page it was saved from. Silent, and wrong.
+        return (f"selected on {mode} bins — only train/test signals resolve to "
+                f"the same trades on this page")
+
+    cut = sig["selection_cutoff"]
+    cut = cut.isoformat() if hasattr(cut, "isoformat") else (str(cut) if cut else None)
+    if not cut:
+        return "train/test signal with no stored split — cannot be verified against tt_bins"
+    if cut != tt_cutoff:
+        # The stored cutoff and the live one agree today. They stop agreeing
+        # the moment the pipeline re-freezes tt_bins, and then the cells this
+        # signal was drawn on are not the cells that would be resolved.
+        return (f"saved against split {cut}, but tt_bins is now frozen at "
+                f"{tt_cutoff} — the bins have been rebuilt since it was saved")
+
+    outcome = sig["outcome"] or ""
+    if not outcome.endswith(_OC_OUTCOME_SUFFIX):
+        return (f"selected on {outcome}, which does not enter at the open — "
+                f"this page can only enter at the open of trade_date")
+
+    n_bins = int(sig["n_bins"] or 0)
+    if n_bins not in (3, 5, 10, 20):
+        return f"unsupported bin resolution {n_bins}"
+
+    prim, sec = sig["primary_metric"], sig["secondary_metric"]
+    if not sec:
+        return "single-metric signal — this page's portfolio mode expects a metric pair"
+    for m in (prim, sec):
+        if any(c not in _SAFE_METRIC_NAME for c in (m or "")):
+            return f"unsafe metric name {m!r}"
+        if f"bin20_{m}" not in bin_cols:
+            return f"no stored bins for {m!r} in tt_bins"
+
+    cells = _signal_cells(sig)
+    if not cells:
+        return "empty cell set"
+    for c in cells:
+        if (not c or len(c) < 2 or not (0 <= int(c[0]) < n_bins)
+                or not (0 <= int(c[1]) < n_bins)):
+            return f"cell {c} out of range for n_bins={n_bins}"
+    return None
+
+
+def _portfolio_selection(sigs: list, base: int) -> tuple:
+    """(where_bins, cell_pred, mask_sql, params) for a set of saved signals.
+
+    `base` is how many placeholders the caller has already used ($1 anchor,
+    $2 cutoff), so this numbers its own from base+1 rather than assuming.
+
+    THE SAME PREDICATE STRING is used twice: once in the OR chain that selects
+    rows, once in the CASE arm that tags them. That is deliberate and is the
+    whole reason the mask can be trusted — there is one definition of "signal i
+    fired here", so the tag cannot come to disagree with the filter.
+
+    The tag is a BITMASK, not one column per signal. Signal i owns bit i, so
+    the mask carries three things the client would otherwise need three
+    queries for: membership (mask & 1<<i), how many signals fired
+    (popcount), and WHICH combination fired (the mask value itself is the
+    combination's identity). One small int per row instead of N columns.
+    """
+    preds, arms, params = [], [], []
+    p = base
+    for bit, sig in enumerate(sigs):
+        n = int(sig["n_bins"])
+        prim, sec = sig["primary_metric"], sig["secondary_metric"]
+        cells = _signal_cells(sig)
+        xs = [int(c[0]) for c in cells]
+        ys = [int(c[1]) for c in cells]
+        params.append(xs); params.append(ys)
+        ix, iy = p + 1, p + 2
+        p += 2
+        pred = (f"(bt.bin20_{prim} > 0 AND bt.bin20_{sec} > 0"
+                f" AND ({_collapse_expr(f'bin20_{prim}', n)},"
+                f" {_collapse_expr(f'bin20_{sec}', n)})"
+                f" IN (SELECT * FROM unnest(${ix}::int[], ${iy}::int[])))")
+        preds.append(pred)
+        arms.append(f"CASE WHEN {pred} THEN {1 << bit} ELSE 0 END")
+
+    # The per-signal bin-present guards live inside each disjunct, because in a
+    # portfolio they differ per signal. where_bins is therefore already
+    # satisfied and stays TRUE rather than being dropped, so every call site
+    # that interpolates it is untouched.
+    return "TRUE", "(" + " OR ".join(preds) + ")", "(" + " + ".join(arms) + ")", params
+
+
+async def _load_signals(conn, ids: list) -> dict:
+    rows = await conn.fetch(
+        f"SELECT {_SIGNAL_COLUMNS} FROM signals WHERE id = ANY($1::int[])", ids)
+    return {r["id"]: r for r in rows}
+
+
+@router.get("/signals")
+async def list_portfolio_signals(pool=Depends(get_oi_pool)):
+    """Saved signals, annotated with whether this page can trade them.
+
+    EVERY signal is returned, including the ones that cannot be selected, each
+    carrying the reason. A signal that simply vanished from the list is
+    indistinguishable from one that was deleted, and the difference matters:
+    the first is a property of this page, the second is a thing the user did.
+
+    Eligibility is decided HERE and not in the client, so the disabled checkbox
+    and the request the server would refuse cannot come to disagree.
+    """
+    if not pool:
+        return {"error": "OI database not configured", "signals": []}
+
+    from app.routers.oi_analysis import _get_tt_cutoff
+
+    cutoff = await _get_tt_cutoff(pool)
+    if not cutoff:
+        return {"error": "tt_bins has no cutoff_date", "signals": []}
+
+    async with pool.acquire() as conn:
+        bin_cols = await _bin_columns(conn)
+        rows = await conn.fetch(
+            f"SELECT {_SIGNAL_COLUMNS} FROM signals ORDER BY created_at DESC")
+
+    out = []
+    for r in rows:
+        reason = _signal_ineligible(r, cutoff, bin_cols)
+        cut = r["selection_cutoff"]
+        out.append({
+            "id":               r["id"],
+            "name":             r["name"],
+            "primary_metric":   r["primary_metric"],
+            "secondary_metric": r["secondary_metric"],
+            "outcome":          r["outcome"],
+            "n_bins":           r["n_bins"],
+            "n_cells":          len(_signal_cells(r)),
+            # The Factor Analysis n: daily_features universe, train window.
+            # NOT this page's n, which is the trade_paths subset after
+            # max_strike. Named so it reads as a picking aid and cannot be
+            # mistaken for a promise about what the stat bar will say.
+            "agg_n":            int(r["agg_n"]) if r["agg_n"] is not None else None,
+            "selection_mode":   r["selection_mode"] or "in_sample",
+            "selection_cutoff": (cut.isoformat() if hasattr(cut, "isoformat")
+                                 else (str(cut) if cut else None)),
+            "eligible":         reason is None,
+            "reason":           reason,
+        })
+    return {"signals": out, "cutoff_date": cutoff,
+            "max_selectable": MAX_PORTFOLIO_SIGNALS}
+
+
+async def _resolve_selection(conn, req, bin_cols, base: int, cutoff: str) -> tuple:
+    """(where_bins, cell_pred, mask_sql, params, provenance) for either mode.
+
+    ONE resolver for /zone, /grid and /suite, so the three cannot come to
+    disagree about what the selected population is. Returns a dict as the
+    fifth element on success, or a string as the sole element of a 1-tuple on
+    failure -- callers check `len(...) == 1`.
+
+    mask_sql is None in signal mode: there is only one signal, so there is
+    nothing to attribute and no column is emitted.
+    """
+    if req.signal_ids:
+        ids = list(dict.fromkeys(int(i) for i in req.signal_ids))
+        if len(ids) > MAX_PORTFOLIO_SIGNALS:
+            return (f"{len(ids)} signals selected; the maximum is "
+                    f"{MAX_PORTFOLIO_SIGNALS}",)
+
+        by_id = await _load_signals(conn, ids)
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            return (f"saved signal(s) {missing} no longer exist",)
+
+        # Ordered by the REQUEST, not by the table, because bit i of the mask
+        # is signal i of this list and the client reads it positionally.
+        sigs = [by_id[i] for i in ids]
+        for sig in sigs:
+            reason = _signal_ineligible(sig, cutoff, bin_cols)
+            if reason:
+                return (f"signal {sig['name']!r} cannot be traded here: {reason}",)
+
+        where_bins, cell_pred, mask_sql, params = _portfolio_selection(sigs, base)
+        prov = {
+            "mode": "portfolio",
+            "signals": [{"id": s["id"], "name": s["name"], "bit": b,
+                         "primary_metric": s["primary_metric"],
+                         "secondary_metric": s["secondary_metric"],
+                         "n_bins": s["n_bins"], "n_cells": len(_signal_cells(s))}
+                        for b, s in enumerate(sigs)],
+        }
+        return where_bins, cell_pred, mask_sql, params, prov
+
+    # ── Signal mode: exactly what existed before ──────────────────────────
+    if not req.primary_metric:
+        return ("no selection: send primary_metric for a single zone, or "
+                "signal_ids for a portfolio",)
+    p_col = f"bin20_{req.primary_metric}"
+    if p_col not in bin_cols:
+        return (f"no stored bins for {req.primary_metric!r} in tt_bins",)
+    two_factor = bool(req.secondary_metric)
+    s_col = f"bin20_{req.secondary_metric}" if two_factor else None
+    if two_factor and s_col not in bin_cols:
+        return (f"no stored bins for {req.secondary_metric!r} in tt_bins",)
+
+    n_bins = max(2, min(20, int(req.n_bins)))
+    bps, bss = [], []
+    for c in req.cells:
+        if not c:
+            continue
+        bp = int(c[0])
+        bs = int(c[1]) if (two_factor and len(c) > 1) else 0
+        if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
+            return (f"cell out of range for n_bins={n_bins}: {c}",)
+        bps.append(bp); bss.append(bs)
+    if not bps:
+        return ("no valid cells",)
+
+    if two_factor:
+        cell_pred = (f"({_collapse_expr(p_col, n_bins)}, "
+                     f"{_collapse_expr(s_col, n_bins)}) "
+                     f"IN (SELECT * FROM unnest(${base+1}::int[], ${base+2}::int[]))")
+        params = [bps, bss]
+    else:
+        cell_pred = f"{_collapse_expr(p_col, n_bins)} = ANY(${base+1}::int[])"
+        params = [bps]
+    where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+    return where_bins, cell_pred, None, params, {
+        "mode": "2f" if two_factor else "1f", "signals": []}
+
+
 class RunReq(BaseModel):
-    primary_metric:   str
+    # Optional because portfolio mode selects by signal instead. Exactly one of
+    # (primary_metric, signal_ids) is expected; the handlers say which they got
+    # rather than defaulting, so a request that supplies neither is an error
+    # with a name and not an empty grid.
+    primary_metric:   Optional[str] = None
     secondary_metric: Optional[str] = None      # None => single-metric mode
+    # PORTFOLIO MODE. Non-empty => the trade set is the deduped union of these
+    # saved signals and the metric pickers are ignored. The signals are the
+    # ones saved on the Factor Analysis page; there is no second save
+    # mechanism here, so there is one store and nothing to drift.
+    signal_ids:       list[int] = []
     entry_anchor:     str = "open"
     rule_keys:        list[str] = []
     n_bins:           int = 20
@@ -376,6 +678,15 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     """
     if not pool:
         return {"error": "OI database not configured"}
+    # /run exists to build the 20x20 grid, and a grid is a property of ONE
+    # metric pair. A portfolio spans several pairs at several resolutions, so
+    # there is no single grid to draw and portfolio mode goes straight to
+    # /zone instead. Refused by name rather than served an empty heatmap.
+    if req.signal_ids:
+        return {"error": "portfolio mode has no heatmap — call /zone with "
+                         "signal_ids instead of /run"}
+    if not req.primary_metric:
+        return {"error": "primary_metric is required"}
 
     from app.routers.oi_analysis import _get_tt_cutoff
 
@@ -425,9 +736,9 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
 
         n_bins = max(2, min(20, int(req.n_bins)))
         # Canonical bin20 collapse, identical to every other stored-bin
-        # surface in this codebase.
+        # surface in this codebase -- now literally the same function.
         def _collapse(col: str) -> str:
-            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+            return _collapse_expr(col, n_bins)
 
         sel_bins = f"{_collapse(p_col)} AS bp"
         grp = "bp"
@@ -925,13 +1236,6 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         meta_by_key = {r["rule_key"]: r for r in rules}
 
         bin_cols = await _bin_columns(conn)
-        p_col = f"bin20_{req.primary_metric}"
-        if p_col not in bin_cols:
-            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
-        two_factor = bool(req.secondary_metric)
-        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
-        if two_factor and s_col not in bin_cols:
-            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
 
         try:
             combine_sql, combine_meta = build_combine_sql(
@@ -947,34 +1251,12 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
-        n_bins = max(2, min(20, int(req.n_bins)))
-
-        def _collapse(col: str) -> str:
-            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
-
-        # Cells arrive as ints from the client but are interpolated into SQL,
-        # so they are coerced and range-checked here rather than trusted.
-        bps, bss = [], []
-        for c in req.cells:
-            if not c:
-                continue
-            bp = int(c[0])
-            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
-            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
-                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
-            bps.append(bp); bss.append(bs)
-        if not bps:
-            return {"error": "no valid cells"}
-
-        if two_factor:
-            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
-                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
-            args = [req.entry_anchor, cutoff_d, bps, bss]
-        else:
-            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
-            args = [req.entry_anchor, cutoff_d, bps]
-
-        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+        # $1 anchor, $2 cutoff, then the selection's own placeholders.
+        sel = await _resolve_selection(conn, req, bin_cols, 2, cutoff_iso)
+        if len(sel) == 1:
+            return {"error": sel[0]}
+        where_bins, cell_pred, mask_sql, sel_params, prov = sel
+        args = [req.entry_anchor, cutoff_d, *sel_params]
 
         # Same population filter as /run. The placeholder index depends on how
         # many args the cell predicate already consumed, so it is computed
@@ -984,13 +1266,22 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
             args = args + [float(req.max_strike)]
 
+        # Portfolio mode only. Rides along in the row that already exists, so
+        # it adds no rows, no joins and no second query -- see
+        # _portfolio_selection for why it is a bitmask rather than one column
+        # per signal.
+        # A baseline replaces the entries, so only a real portfolio run carries
+        # attribution. Resolved once here rather than probed per row.
+        emits_mask = bool(mask_sql) and not req.randomize
+        mask_sel = f",\n               {mask_sql} AS sig_mask" if emits_mask else ""
+
         sql = f"""
         WITH c AS (
 {combine_sql}
         )
         SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule,
                tp.entry_price,
-               (c.trade_date < $2::date) AS is_train
+               (c.trade_date < $2::date) AS is_train{mask_sel}
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
         -- entry_price is not exposed by build_combine_sql's outer SELECT, and
@@ -1198,6 +1489,11 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             "entry_price":    float(_px) if _px is not None else None,
             "spot_entry_raw": float(_px) if _px is not None else None,
         }
+        # Portfolio mode only, and deliberately absent on a BASELINE run: those
+        # rows are randomly drawn tickers, so no signal claimed them and a mask
+        # of 0 would read as "all signals declined" rather than "not asked".
+        if emits_mask:
+            _rec["sig_mask"] = int(r["sig_mask"] or 0)
         series_trades.append(_rec)
         if win != active:
             continue          # everything below is single-window only
@@ -1252,6 +1548,24 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "baseline": baseline,
         "entry_anchor": req.entry_anchor,
         "cutoff_date": cutoff_iso,
+        # Provenance echoed so PORTFOLIO MODE can drive the run card straight
+        # off this payload. There is no /run in portfolio mode -- /run exists
+        # to build the 20x20 grid, and a portfolio has no single grid to build
+        # -- so these are the fields the card would otherwise have taken from
+        # a run that never happens. Harmless in signal mode, where they simply
+        # echo the request.
+        "mode":             prov["mode"],
+        "signals":          prov["signals"],
+        "primary_metric":   req.primary_metric,
+        "secondary_metric": req.secondary_metric,
+        "max_strike":       req.max_strike,
+        "n_bins":           max(2, min(20, int(req.n_bins))),
+        "baseline_kind":    req.baseline_kind if req.randomize else None,
+        "seed":             (DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)) if req.randomize else None,
+        # True when every row carries sig_mask. The client must not infer
+        # attribution from mode alone: a portfolio BASELINE is mode=portfolio
+        # with no mask.
+        "has_sig_mask":     emits_mask,
         # Recall chart contracts — same field names, same shapes.
         # window_trades: the single-window population. series_trades: what
         # the three time-series panes draw. combined_trades is kept as an
@@ -1685,13 +1999,6 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         by_key = by_key_from_rows(rules)
 
         bin_cols = await _bin_columns(conn)
-        p_col = f"bin20_{req.primary_metric}"
-        if p_col not in bin_cols:
-            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
-        two_factor = bool(req.secondary_metric)
-        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
-        if two_factor and s_col not in bin_cols:
-            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
 
         cutoff_iso = await _get_tt_cutoff(pool)
         if not cutoff_iso:
@@ -1701,32 +2008,15 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
-        n_bins = max(2, min(20, int(req.n_bins)))
-
-        def _collapse(col: str) -> str:
-            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
-
-        bps, bss = [], []
-        for c in req.cells:
-            if not c:
-                continue
-            bp = int(c[0])
-            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
-            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
-                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
-            bps.append(bp); bss.append(bs)
-        if not bps:
-            return {"error": "no valid cells"}
-
-        if two_factor:
-            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
-                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
-            args = [req.entry_anchor, cutoff_d, bps, bss]
-        else:
-            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
-            args = [req.entry_anchor, cutoff_d, bps]
-
-        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+        # Same resolver /zone uses, so a suite or a grid cannot come to
+        # disagree with the zone it is sweeping around. The mask is discarded:
+        # these paths aggregate to stats and never emit a trade row, so there
+        # is nothing to attribute.
+        sel = await _resolve_selection(conn, req, bin_cols, 2, cutoff_iso)
+        if len(sel) == 1:
+            return {"error": sel[0]}
+        where_bins, cell_pred, _mask_sql, sel_params, _prov = sel
+        args = [req.entry_anchor, cutoff_d, *sel_params]
 
         strike_pred = ""
         if req.max_strike and req.max_strike > 0:
@@ -1954,13 +2244,6 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         by_key = by_key_from_rows(rules)
 
         bin_cols = await _bin_columns(conn)
-        p_col = f"bin20_{req.primary_metric}"
-        if p_col not in bin_cols:
-            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
-        two_factor = bool(req.secondary_metric)
-        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
-        if two_factor and s_col not in bin_cols:
-            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
 
         cutoff_iso = await _get_tt_cutoff(pool)
         if not cutoff_iso:
@@ -1970,32 +2253,15 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
-        n_bins = max(2, min(20, int(req.n_bins)))
-
-        def _collapse(col: str) -> str:
-            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
-
-        bps, bss = [], []
-        for c in req.cells:
-            if not c:
-                continue
-            bp = int(c[0])
-            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
-            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
-                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
-            bps.append(bp); bss.append(bs)
-        if not bps:
-            return {"error": "no valid cells"}
-
-        if two_factor:
-            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
-                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
-            args = [req.entry_anchor, cutoff_d, bps, bss]
-        else:
-            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
-            args = [req.entry_anchor, cutoff_d, bps]
-
-        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+        # Same resolver /zone uses, so a suite or a grid cannot come to
+        # disagree with the zone it is sweeping around. The mask is discarded:
+        # these paths aggregate to stats and never emit a trade row, so there
+        # is nothing to attribute.
+        sel = await _resolve_selection(conn, req, bin_cols, 2, cutoff_iso)
+        if len(sel) == 1:
+            return {"error": sel[0]}
+        where_bins, cell_pred, _mask_sql, sel_params, _prov = sel
+        args = [req.entry_anchor, cutoff_d, *sel_params]
 
         strike_pred = ""
         if req.max_strike and req.max_strike > 0:

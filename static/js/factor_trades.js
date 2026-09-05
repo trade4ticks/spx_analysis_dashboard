@@ -75,6 +75,28 @@ document.addEventListener('alpine:init', () => {
     // FactorCharts._seriesAxis; pages that omit it keep data-driven bounds.
     seriesAxis: { from: '2019-01-01', to: null },
     mode: '2f', primaryMetric: '', secondaryMetric: '', entryAnchor: 'open',
+
+    // ── Signal / Portfolio ───────────────────────────────────────────────
+    // ONE control panel, one toggle. In portfolio mode the metric pickers are
+    // replaced by the saved-signal list and NOTHING ELSE CHANGES: exits,
+    // sizing, window, baselines, grid and suite all apply to the combined
+    // deduped set exactly as they apply to a zone. A portfolio is just a
+    // trade set, so every pane below reads it without knowing the difference.
+    //
+    // The signals are the ones saved on Factor Analysis. There is no second
+    // save mechanism here -- one store, nothing to drift.
+    selMode: 'signal',            // 'signal' | 'portfolio'
+    signals: [], signalsError: '', maxSelectable: 31,
+    selectedSignalIds: [],
+    get isPortfolio() { return this.selMode === 'portfolio'; },
+    get eligibleSignals() { return this.signals.filter(s => s.eligible); },
+    // The gate every action shares: a zone in signal mode, at least one
+    // signal in portfolio mode. Stated once so a button cannot enable itself
+    // under a selection the server would refuse.
+    get hasSelection() {
+      return this.isPortfolio ? this.selectedSignalIds.length > 0
+                              : this.selectedCells.length > 0;
+    },
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
     loading: false, error: '',
@@ -122,11 +144,19 @@ document.addEventListener('alpine:init', () => {
 
     async init() {
       try {
-        const [cols, rules, tt] = await Promise.all([
+        const [cols, rules, tt, sigs] = await Promise.all([
           fetch('/api/factor-analysis/columns').then(r => r.ok ? r.json() : null),
           fetch('/api/factor-trades/rules').then(r => r.ok ? r.json() : null),
           fetch('/api/factor-analysis/tt-cutoff').then(r => r.ok ? r.json() : null),
+          // Eligibility is decided server-side and arrives per signal, so the
+          // disabled checkbox and the request the server would refuse cannot
+          // disagree. Ineligible signals are LISTED, not hidden: a signal that
+          // silently vanished is indistinguishable from one that was deleted.
+          fetch('/api/factor-trades/signals').then(r => r.ok ? r.json() : null),
         ]);
+        this.signals = sigs?.signals || [];
+        this.signalsError = sigs?.error || '';
+        if (sigs?.max_selectable) this.maxSelectable = sigs.max_selectable;
         this.metrics = cols?.features || [];
         for (const g of (cols?.feature_families || [])) {
           for (const mm of g.metrics) {
@@ -315,6 +345,23 @@ document.addEventListener('alpine:init', () => {
     },
     setGridView(v) { this.gridView = v; this._refreshGrid(); },
 
+    // Switching Signal <-> Portfolio CLEARS the current run rather than
+    // leaving it on screen. A zone's charts and stat bar sitting under a
+    // panel that says "Portfolio" is exactly the population confusion the
+    // rest of this page is built to prevent: every number would be the old
+    // trade set, and nothing on screen would say so. The signal selection and
+    // the cell selection are both kept, so toggling back is free.
+    setSelMode(m) {
+      if (m === this.selMode) return;
+      this.selMode = m;
+      this.runData = null; this.zoneData = null; this.secDetail = null;
+      this.lockedRun = null; this.lockedZone = null; this.lockedIdx = -1;
+      this.suiteData = null; this.gridData = null; this.gridError = '';
+      this.heatmapData = null; this._hmRange = null;
+      this.error = '';
+      if (m === 'portfolio') this.entryAnchor = 'open';
+    },
+
     setWindow(w) {
       if (w === this.window) return;
       this.window = w;
@@ -344,10 +391,56 @@ document.addEventListener('alpine:init', () => {
     clearAll() {
       this.selected = {};
       this.selectedCells = [];
+      this.selectedSignalIds = [];
       this.zoneData = null; this.lockedZone = null;
       this.error = '';
     },
     ruleKeys() { return Object.values(this.selected).filter(Boolean); },
+
+    // ── The selection half of every request body ─────────────────────────
+    // ONE builder, used by /zone, /grid, /suite and the baselines. The four
+    // call sites previously each spelled out the metric pair and the cells,
+    // which is four places for a portfolio to be forgotten in. Now there is
+    // one, and it mirrors the server's single _resolve_selection.
+    //
+    // `src` is the run the request descends from (runData or a locked run) so
+    // a locked card refetches under ITS OWN selection, not the rail's current
+    // one.
+    selectionBody(src) {
+      const s = src || {};
+      if ((s.mode || (this.isPortfolio ? 'portfolio' : '2f')) === 'portfolio') {
+        return { signal_ids: (s.signals || []).length
+                   ? s.signals.map(x => x.id) : this.selectedSignalIds.slice() };
+      }
+      return {
+        primary_metric:   s.primary_metric   ?? this.primaryMetric,
+        secondary_metric: s.secondary_metric ?? (this.mode === '2f' ? this.secondaryMetric : null),
+        n_bins:           s.n_bins ?? 20,
+        cells:            this.selectedCells,
+      };
+    },
+
+    toggleSignal(sig) {
+      if (!sig.eligible) return;
+      // Every selectable signal enters at the open by construction (the
+      // server only marks an _oc outcome eligible), so the anchor is not
+      // a free choice here. Pinned on selection rather than at request
+      // time, so the rail shows what will actually be traded.
+      this.entryAnchor = 'open';
+      const i = this.selectedSignalIds.indexOf(sig.id);
+      if (i >= 0) { this.selectedSignalIds.splice(i, 1); return; }
+      if (this.selectedSignalIds.length >= this.maxSelectable) {
+        this.error = `at most ${this.maxSelectable} signals can be combined`;
+        return;
+      }
+      this.selectedSignalIds.push(sig.id);
+    },
+    signalSelected(id) { return this.selectedSignalIds.includes(id); },
+
+    // Bit i of sig_mask is signal i of the run's OWN ordered signal list, not
+    // of the rail's current selection — those diverge as soon as a run is
+    // locked and the selection is edited underneath it.
+    signalLegend(src) { return (src || this.runData || {}).signals || []; },
 
     policyLabel() {
       const ks = this.ruleKeys();
@@ -616,7 +709,11 @@ document.addEventListener('alpine:init', () => {
 
     async runGrid() {
       if (!this.runData) { this.error = 'run a policy first'; return; }
-      if (!this.selectedCells.length) { this.error = 'select a zone first'; return; }
+      if (!this.hasSelection) {
+        this.error = this.isPortfolio ? 'select at least one signal first'
+                                      : 'select a zone first';
+        return;
+      }
       if (!this.gridSweep.length) { this.error = 'pick at least one family to sweep'; return; }
       const src = this.runData;
       this.gridRunning = true; this.error = ''; this.gridError = '';
@@ -625,10 +722,10 @@ document.addEventListener('alpine:init', () => {
       try {
         const { data: d, error: err } = await this._postJson(
           '/api/factor-trades/grid', {
-            primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+            ...this.selectionBody(src),
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
-            n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
-            window: this.window, cells: this.selectedCells,
+            max_strike: src.max_strike ?? this.maxStrike,
+            window: this.window,
             sweep_families: this.gridSweep,
             sweep_values: this.gridSweep.reduce((o, f) => {
               if (this.gridValues[f]) o[f] = this.gridValues[f];
@@ -1275,6 +1372,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap']);
       out.push(['# cutoff', d.cutoff_date]);
       out.push(['# entry_anchor', d.entry_anchor, 'max_strike', d.max_strike ?? '']);
+      for (const r of this._csvSelectionRows(this.runData)) out.push(r);
       out.push(['# cells', JSON.stringify(d.cells)]);
       out.push(['# held rules', (d.held || []).join(' | ')]);
       out.push(['# combinations', d.n_combos, 'trades each', d.n_trades]);
@@ -1317,8 +1415,10 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
 
     async runSuite() {
       if (!this.runData) { this.error = 'run a policy first'; return; }
-      if (!this.selectedCells.length) {
-        this.error = 'select a zone first — the suite matches every baseline '
+      if (!this.hasSelection) {
+        this.error = (this.isPortfolio ? 'select at least one signal first'
+                                       : 'select a zone first')
+                   + ' — the suite matches every baseline '
                    + 'to its trade count and date distribution';
         return;
       }
@@ -1331,10 +1431,10 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       try {
         const { data: d, error: err } = await this._postJson(
           '/api/factor-trades/suite', {
-            primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+            ...this.selectionBody(src),
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
-            n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
-            window: this.window, cells: this.selectedCells,
+            max_strike: src.max_strike ?? this.maxStrike,
+            window: this.window,
             seed: this.baselineSeed, n_draws: +this.suiteN || 10,
           });
         if (err) { this.error = err; return; }
@@ -1506,6 +1606,28 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       return f >= 1 ? 'sb-win' : (f === 0 ? 'sb-loss' : 'sb-mid');
     },
 
+    // Selection provenance for a CSV. A table of numbers with no record of
+    // WHICH trade set produced it is not reusable a week later, and in
+    // portfolio mode the metric pair alone no longer identifies that set.
+    _csvSelectionRows(src) {
+      const out = [];
+      const s = src || {};
+      if ((s.mode || '') === 'portfolio') {
+        out.push(['# selection', 'portfolio', (s.signals || []).length + ' signals']);
+        for (const sig of (s.signals || [])) {
+          out.push(['# signal', 'bit ' + sig.bit, sig.id, sig.name,
+                    sig.primary_metric, sig.secondary_metric,
+                    'n_bins ' + sig.n_bins, sig.n_cells + ' cells']);
+        }
+        out.push(['# dedup', 'one trade per ticker+date across all signals']);
+      } else {
+        out.push(['# selection', 'zone', s.primary_metric ?? '',
+                  s.secondary_metric ?? '(single)']);
+        out.push(['# cells', (this.selectedCells || []).length]);
+      }
+      return out;
+    },
+
     suiteCsv() {
       const d = this.suiteData;
       if (!d) return;
@@ -1521,6 +1643,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       out.push(['# cutoff', d.cutoff_date]);
       out.push(['# entry_anchor', d.entry_anchor]);
       out.push(['# max_strike', d.max_strike ?? '']);
+      for (const r of this._csvSelectionRows(this.runData)) out.push(r);
       out.push(['# cells', JSON.stringify(d.cells)]);
       out.push(['# rules', (d.rule_keys || []).join(' | ')]);
       out.push(['# draws', d.n_draws, 'base_seed', d.base_seed]);
@@ -1561,9 +1684,13 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
 
     async runBaseline(resample = false, kind = 'entry') {
       if (!this.runData) { this.error = 'run a policy first'; return; }
-      if (!this.selectedCells.length) {
-        this.error = 'select a zone first — the baseline matches its trade '
-                   + 'count and date distribution, so it needs one to match';
+      if (!this.hasSelection) {
+        this.error = this.isPortfolio
+          ? 'select at least one signal first — the baseline matches the '
+            + 'portfolio\'s trade count and date distribution, so it needs '
+            + 'one to match'
+          : 'select a zone first — the baseline matches its trade '
+            + 'count and date distribution, so it needs one to match';
         return;
       }
       // Fixed by default so the baseline does NOT move under you while you
@@ -1576,10 +1703,10 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       try {
         const src = this.runData;
         const body = {
-          primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+          ...this.selectionBody(src),
           entry_anchor: src.entry_anchor, rule_keys: src.rules,
-          n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
-          window: this.window, cells: this.selectedCells,
+          max_strike: src.max_strike ?? this.maxStrike,
+          window: this.window,
           randomize: true, seed: this.baselineSeed, baseline_kind: kind,
         };
         const r = await fetch('/api/factor-trades/zone', {
@@ -1616,6 +1743,13 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     async run(random = false) {
       // Kept for the old call signature; the baseline is its own path now.
       if (random) return this.runBaseline(false);
+      // PORTFOLIO MODE HAS NO /run. /run exists to build the 20x20 heatmap,
+      // and a heatmap is a property of one metric pair -- a portfolio spans
+      // several pairs at several resolutions, so there is no single grid to
+      // draw. The signal checkboxes ARE the selection, so there is also
+      // nothing for a second step to select. /zone alone, and runData is the
+      // zone payload: it already carries every field the run card reads.
+      if (this.isPortfolio) return this.runPortfolio();
       this.loading = true; this.error = '';
       const prev = this.runData;
       try {
@@ -1662,6 +1796,43 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       finally { this.loading = false; }
     },
 
+    // One request, not two: the zone payload IS the run payload here, minus
+    // the grid a portfolio does not have. Pushed onto `runs` by the same code
+    // that pushes a signal run, so lock / delete / compare are unchanged.
+    async runPortfolio() {
+      if (!this.selectedSignalIds.length) {
+        this.error = 'select at least one saved signal';
+        return;
+      }
+      this.loading = true; this.error = '';
+      try {
+        const body = {
+          signal_ids: this.selectedSignalIds.slice(),
+          entry_anchor: this.entryAnchor,
+          rule_keys: this.ruleKeys(),
+          max_strike: this.maxStrike,
+          window: this.window,
+        };
+        const r = await fetch('/api/factor-trades/zone', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        // Both, deliberately. runData drives the card and the panels gated on
+        // a run existing; zoneData drives the charts. They are the same object
+        // here, which is exactly what "a portfolio is just a trade set" means.
+        this.runData = d;
+        this.zoneData = d;
+        this.secDetail = d;
+        this.heatmapData = null; this._hmRange = null;
+        this.runs.push(d);
+        this.currentIdx = this.runs.length - 1;
+        this.$nextTick(() => { this._scrollRunsRight(); this.renderCharts(); });
+      } catch (e) { this.error = String(e); }
+      finally { this.loading = false; }
+    },
+
     _scrollRunsRight() {
       // New runs append, so the strip must anchor RIGHT or Current scrolls
       // out of view exactly when it becomes the thing you want to see.
@@ -1685,7 +1856,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       this.lockedRun = this.lockedIdx >= 0 ? this.runs[this.lockedIdx] : null;
       this.lockedZone = null;
       this._refreshGrid();
-      if (!this.lockedRun || !this.selectedCells.length) return;
+      if (!this.lockedRun || !this.hasSelection) return;
       // Fetch the locked run's OWN zone series, using ITS parameters and ITS
       // window -- not the rail's current state. A locked TRAIN run compared
       // against a TEST run would otherwise cross populations with nothing on
@@ -1695,10 +1866,10 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         const resp = await fetch('/api/factor-trades/zone', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            primary_metric: r.primary_metric, secondary_metric: r.secondary_metric,
+            ...this.selectionBody(r),
             entry_anchor: r.entry_anchor, rule_keys: r.rules,
-            n_bins: r.n_bins, max_strike: r.max_strike,
-            window: r.window || 'train', cells: this.selectedCells,
+            max_strike: r.max_strike,
+            window: r.window || 'train',
             // Deterministic seed: locking a baseline refetches the identical
             // sample, so the LOCKED column is the draw that was on screen
             // when it was locked, not a fresh one.
@@ -1760,18 +1931,15 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     },
 
     async loadZone() {
-      if (!this.runData || !this.selectedCells.length) { this.zoneData = null; return; }
+      if (!this.runData || !this.hasSelection) { this.zoneData = null; return; }
       try {
         const body = {
-          primary_metric: this.runData.primary_metric,
-          secondary_metric: this.runData.secondary_metric,
+          ...this.selectionBody(this.runData),
           entry_anchor: this.runData.entry_anchor,
           rule_keys: this.runData.rules,
-          n_bins: this.runData.n_bins,
           // Must match the run's population or the zone is a different trade set.
           max_strike: this.runData.max_strike ?? this.maxStrike,
           window: this.window,
-          cells: this.selectedCells,
           // A baseline run stays a baseline when the zone is refetched --
           // clicking a cell or switching window must not silently turn it
           // back into a real-entry run under the same card.
@@ -2199,16 +2367,45 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     exportCsv() {
       const t = this.zoneData?.combined_trades || [];
       if (!t.length) return;
-      const head = ['ticker', 'trade_date', 'entry_price', 'ret_pct', 'exit_bar', 'exit_rule', 'window'];
-      const rows = t.map(x => [x.ticker, x.trade_date,
-        x.entry_price ?? '', (x.ret * 100).toFixed(6), x.exit_bar,
-        x.exit_rule, x.window].join(','));
+      // Attribution columns only when the rows actually carry a mask. A
+      // portfolio BASELINE is mode=portfolio with randomly drawn tickers and
+      // no mask, so `mode` alone is the wrong thing to branch on.
+      const tagged = !!this.zoneData?.has_sig_mask;
+      const legend = this.signalLegend(this.zoneData);
+      const head = ['ticker', 'trade_date', 'entry_price', 'ret_pct',
+                    'exit_bar', 'exit_rule', 'window'];
+      if (tagged) {
+        // Both the raw mask and one column per signal: the mask is the exact
+        // combination's identity (group by it), the named columns are what a
+        // spreadsheet pivot actually filters on.
+        head.push('sig_mask', 'n_signals', ...legend.map(s => 'sig_' + s.id));
+      }
+      const rows = t.map(x => {
+        const base = [x.ticker, x.trade_date, x.entry_price ?? '',
+                      (x.ret * 100).toFixed(6), x.exit_bar, x.exit_rule, x.window];
+        if (tagged) {
+          const m = x.sig_mask | 0;
+          base.push(m, this._popcount(m), ...legend.map(s => (m >> s.bit) & 1));
+        }
+        return base.join(',');
+      });
       const blob = new Blob([[head.join(','), ...rows].join(String.fromCharCode(10))],
                             { type: 'text/csv' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `factor_trades_${this.runData?.primary_metric || 'run'}.csv`;
+      const stem = this.isPortfolio ? 'portfolio'
+                                    : (this.runData?.primary_metric || 'run');
+      a.download = `factor_trades_${stem}.csv`;
       a.click(); URL.revokeObjectURL(a.href);
     },
+
+    // How many signals claimed one trade. Bit-twiddling popcount rather than
+    // a string count, because it runs once per row on sets of ~25k.
+    _popcount(v) {
+      v = v - ((v >> 1) & 0x55555555);
+      v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+      return (((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+    },
+
   }));
 });
