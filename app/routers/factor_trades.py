@@ -62,62 +62,126 @@ SIDE_GROUPS = [
 ]
 
 
+def _coerce_params(params: Any) -> dict:
+    """Catalog `params` as a dict, from either JSONB shape."""
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except (ValueError, TypeError):
+            return {}
+    return params if isinstance(params, dict) else {}
+
+
+def _param_unit(name: str) -> Optional[str]:
+    """Unit implied by a PARAMETER NAME, or None if the catalog does not say.
+
+    Deliberately keyed on the parameter name and never on the family: a family
+    check is a list this file has to be told about every time the catalog
+    grows, and being told late is exactly how a new family renders wrong.
+
+    These are the same conventions the rail applies client-side
+    (factor_trades.js `_dimUnit`), so a value cannot read as 2% in the split
+    dropdown and 2.0 in the sweep chip for the same rule.
+
+    An unrecognised name returns None and the caller shows the raw value with
+    its parameter name attached -- the name is then the only claim being made,
+    rather than a unit being guessed onto it.
+    """
+    d = (name or "").lower()
+    if "pct" in d or "percent" in d:
+        return "pct"
+    if d == "k" or "atr" in d:
+        return "atr"
+    if d == "n" or d in ("days", "bars") or "day" in d:
+        return "day"
+    return None
+
+
+def _fmt_param(name: str, value: Any, alone: bool) -> str:
+    """One parameter, with its unit if the name declares one.
+
+    The name is dropped ONLY when this is the family's single parameter AND
+    the name declares a unit -- the unit is then what carries the meaning
+    ("2%", "2x ATR"). A unitless parameter keeps its name even when alone,
+    because a bare "1" for breakeven's activation says neither what it is nor
+    what it is measured in. That also leaves every existing single-parameter
+    label exactly as it was.
+    """
+    unit = _param_unit(name)
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return f"{name}={value}"
+    if unit == "pct":
+        shown = f"{num:g}%"
+    elif unit == "atr":
+        shown = f"{num:g}x ATR"
+    elif unit == "day":
+        # Bare number, no "d". The family name beside the control already
+        # says these are days, and the suffix made the values look like
+        # strings to sort as strings.
+        shown = f"{num:g}"
+    else:
+        shown = f"{num:g}"
+    return shown if (alone and unit) else f"{name}={shown}"
+
+
 def _rule_label(family: str, params: Any) -> str:
     """Human label for a rule option, derived from its params JSON.
 
     Never parses the rule_key — the key's encoding (2p5 for 2.5) is a column
-    naming artefact, not a display format. An unrecognised family falls back
-    to rendering the params dict, which degrades to something readable rather
-    than raising on a rule this UI has not seen.
+    naming artefact, not a display format.
+
+    EVERY parameter is rendered, which is the whole point. The previous
+    version returned on the first recognised parameter it found, so a
+    two-parameter family sharing that parameter collapsed: {k, activation}
+    rendered as "1.5x ATR" for every activation of a given k, and the rail,
+    the sweep chips and the grid axis all showed several different rules under
+    one identical label. A label that cannot distinguish two rules is worse
+    than a raw params dict, because it looks correct.
+
+    Single-parameter families whose parameter declares a unit still render the
+    value alone, exactly as before — "2%", "2x ATR", "20".
     """
-    if isinstance(params, str):
-        try:
-            params = json.loads(params)
-        except (ValueError, TypeError):
-            params = {}
-    params = params or {}
-    pct = params.get("pct")
-    k = params.get("k")
-    n = params.get("n") or params.get("days") or params.get("bars")
-    if pct is not None:
-        return f"{float(pct):g}%"
-    if k is not None:
-        return f"{float(k):g}x ATR"
-    if n is not None:
-        # Bare number, no "d". The family name beside the control already
-        # says these are days, and the suffix made the values look like
-        # strings to sort as strings.
-        return f"{int(n)}"
+    params = _coerce_params(params)
     if not params:
         return family
-    return ", ".join(f"{a}={b}" for a, b in sorted(params.items()))
+    alone = len(params) == 1
+    return ", ".join(_fmt_param(a, params[a], alone) for a in sorted(params))
 
 
 def _rule_sort_key(params: Any) -> tuple:
-    """Numeric sort key for a family's options.
+    """Sort key for a family's options, over ALL of its parameters.
 
     The catalog is read ORDER BY rule_key, which is a STRING sort: max_days
-    came out 1, 10, 15, 20, 3, 5, 7. Dropping the "d" from the label does
-    not fix that -- the ordering never came from the label -- so the options
-    are sorted here on the numeric parameter instead.
+    came out 1, 10, 15, 20, 3, 5, 7. The ordering never came from the label,
+    so the options are sorted here on the numeric parameters instead.
 
-    Falls back to (1, 0.0) for a rule with no numeric parameter, which sorts
-    those after the numeric ones rather than interleaving them.
+    ALL parameters, in sorted-name order — not the first recognised one. A
+    single parameter is unaffected; a two-parameter family previously tied on
+    every rule and fell back to whatever order the catalog query happened to
+    emit. That was already live: all 16 `trail` rules shared one key, as did
+    every `breakeven`, `no_progress` and `ma_close_below` rule.
+
+    Sorted-name order is the SAME order the sweep panel groups by
+    (factor_trades.js `famDims`), so the chip groups and the axis ordering
+    agree by construction rather than by coincidence.
+
+    Each value is tagged (0, float) when numeric and (1, str) otherwise, so a
+    non-numeric parameter sorts after the numeric ones without making the
+    tuples incomparable.
     """
-    if isinstance(params, str):
+    params = _coerce_params(params)
+    if not params:
+        return (1, ())
+    out = []
+    for name in sorted(params):
+        v = params[name]
         try:
-            params = json.loads(params)
-        except (ValueError, TypeError):
-            params = {}
-    params = params or {}
-    for k in ("pct", "k", "n", "days", "bars"):
-        v = params.get(k)
-        if v is not None:
-            try:
-                return (0, float(v))
-            except (TypeError, ValueError):
-                pass
-    return (1, 0.0)
+            out.append((0, float(v), ""))
+        except (TypeError, ValueError):
+            out.append((1, 0.0, str(v)))
+    return (0, tuple(out))
 
 
 # Participation ratio. The implementation moved to _stat_shared so the
