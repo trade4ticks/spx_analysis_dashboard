@@ -39,6 +39,7 @@ from app.trade_path_rules import (
     # the vendored module rather than restated here, so the numpy path and
     # the SQL cannot come to disagree about which rule wins a same-bar tie.
     SIDE_PRIORITY,
+    backstop_for,
     build_combine_sql,
     by_key_from_rows,
 )
@@ -2317,30 +2318,30 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     free rather than a doubling.
 
     Returns per-trade RETURNS per combination against ONE shared skeleton.
-    This path's row filter is `path_status = 'ok'`, which does not depend on
-    which rules are selected, so every combination sees the same trades in the
-    same order -- only the exit changes. Shipping the skeleton once instead of
-    per combination is a ~30x reduction, and the invariant is asserted per
-    combination rather than trusted.
+    Shipping the skeleton once instead of per combination is a ~30x reduction.
 
-    KNOWN DIVERGENCE FROM THE ORACLE, not yet resolved. Since source 48aeb5b
-    build_combine_sql filters on the SHORTEST SELECTED max_days rather than on
-    path_status, so its population IS now selection-dependent and this scan's
-    is not. Consequences, both in the direction of this path being too tight:
+    POPULATION IS PER COMBINATION, and the skeleton still is not. Since source
+    48aeb5b each combination's eligible rows are those its own backstop -- the
+    shortest max_days it selects -- can resolve, so one filter no longer serves
+    the sweep. It does not need to: those populations are NESTED, because a
+    trade resolvable to 20 sessions is resolvable to 5. The scan therefore uses
+    the LOOSEST backstop in the sweep and every combination masks down to its
+    own in numpy, where each backstop's column is already fetched.
 
-      - today, a swept or held max_days shorter than 20 resolves more rows on
-        the zone/stat-bar path than the grid will show for the same rules;
-      - after a rebuild at MAX_HORIZON_SESSIONS = 40, `path_status = 'ok'`
-        means 40 resolvable sessions while the oracle asks only for the
-        selection's own, so the gap widens to nearly every selection.
+    Masking is free downstream: an unresolved row becomes NaN, which is
+    already how this path says "no return here" -- the window stats mask on
+    ~isnan and the wire format ships null.
 
-    The exits themselves still agree -- see _ordered, which tracks the oracle's
-    rule set exactly -- so this is a population difference, not a wrong exit.
-    Fixing it means making the shared scan the LOOSEST population across the
-    sweep and applying each combination's own resolution mask in numpy, where
-    every backstop column is already in `bars`. Deliberately not done blind:
-    scripts/check_grid_equivalence.py is the gate for this path and it needs a
-    database.
+    The previous `path_status = 'ok'` filter was wrong in one direction, and
+    increasingly so: it asks for the BUILD's longest horizon, so after a
+    rebuild at 40 sessions it would have dropped the last 39 sessions from
+    combinations that only ever needed 5.
+
+    build_combine_sql REMAINS THE ORACLE, including for which rule is the
+    backstop -- _ordered and _resolve both CALL backstop_for rather than
+    transcribing it. verify= diffs the two paths per trade, on population as
+    well as on (exit_bar, exit_return, exit_rule); see also
+    scripts/check_grid_equivalence.py.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -2482,6 +2483,31 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     # skeleton and the reference digest have to exist before any other
     # combination can be checked against them.
 
+    # ── The shared scan's population ─────────────────────────────────────
+    #
+    # LOOSEST ACROSS THE SWEEP, then masked per combination.
+    #
+    # Since source 48aeb5b every combination has its OWN resolution filter --
+    # its backstop's exit_bar IS NOT NULL, where the backstop is the shortest
+    # max_days it selects. A single scan can therefore no longer use one
+    # filter for everything, which is what `path_status = 'ok'` was.
+    #
+    # It does not have to. Those populations are NESTED: a trade resolvable to
+    # 20 sessions is resolvable to 5, so the shortest backstop in the sweep has
+    # the loosest population and every other combination's is a subset of it.
+    # Scan that one, and each combination masks down to its own below.
+    #
+    # Scanning `path_status = 'ok'` instead is not merely different, it is
+    # WRONG IN ONE DIRECTION: after a rebuild at 40 sessions it would drop
+    # every trade in the last 39 sessions from combinations that only ever
+    # needed 5, under-reporting population on nearly every selection.
+    combo_backstops = {backstop_for(m["rule_keys"], by_key)[0]
+                       for m in combos_meta}
+    scan_backstop = min(combo_backstops,
+                        key=lambda k: (by_key[k].params or {}).get("n", 10 ** 9))
+    scan_col = by_key[scan_backstop].bar_col
+    resolution_pred = f"tp.{scan_col} IS NOT NULL"
+
     # ── Pre-flight: how big is this actually going to be? ────────────────
     #
     # The combination cap alone was the wrong guard. It counts combinations
@@ -2492,14 +2518,10 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     # the thing that actually scales: combinations x trades.
     #
     # One cheap COUNT buys that. It deliberately does NOT go through
-    # build_combine_sql: the population is `path_status = 'ok'` intersected
-    # with the zone predicate, and none of that depends on which rules are
-    # selected -- the same fact that makes the sweep comparable cell to cell.
-    #
-    # That last clause stopped being true of the ORACLE at source 48aeb5b,
-    # which filters on the shortest selected max_days. This count still
-    # measures this path's own population, so it remains the right guard for
-    # the fan-out it is protecting; see the divergence note on _grid_scan_sql.
+    # build_combine_sql -- it counts the SCAN's population (the loosest in the
+    # sweep) intersected with the zone predicate, which is the number of rows
+    # the fan-out will actually hold. Per-combination masking only ever removes
+    # rows from that, so this is an upper bound and the guard stays honest.
     #
     # Routing it through a combine also made an empty rule list fatal.
     # build_combine_sql rightly refuses `[]` (a combine with no rules has no
@@ -2511,7 +2533,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     SELECT COUNT(*) AS k
     FROM tt_bins bt
     JOIN trade_paths tp USING (ticker, trade_date)
-    WHERE tp.entry_anchor = $1 AND tp.path_status = 'ok'
+    WHERE tp.entry_anchor = $1 AND {resolution_pred}
           AND $2::date IS NOT NULL
           AND {where_bins} AND {cell_pred}{strike_pred}
     """
@@ -2567,6 +2589,14 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
                 union_keys.append(v["rule_key"])
     if HORIZON_RULE_KEY not in union_keys:
         union_keys.append(HORIZON_RULE_KEY)
+    # Every combination's backstop column has to be fetched, because each one
+    # masks its own population with it. They are all max_days rules that are
+    # held or swept (or the appended horizon), so this adds nothing in
+    # practice -- stated rather than relied on, since a missing column here
+    # would be a KeyError at mask time rather than a wrong number.
+    for _b in combo_backstops:
+        if _b not in union_keys:
+            union_keys.append(_b)
 
     sel = []
     for k in union_keys:
@@ -2580,7 +2610,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
            {", ".join(sel)}
     FROM tt_bins bt
     JOIN trade_paths tp USING (ticker, trade_date)
-    WHERE tp.entry_anchor = $1 AND tp.path_status = 'ok'
+    WHERE tp.entry_anchor = $1 AND {resolution_pred}
           AND {where_bins} AND {cell_pred}{strike_pred}
     -- Row order is part of the contract: max_dd is a running peak-to-trough
     -- over np.cumsum, so every combination must fold the same trades in the
@@ -2614,17 +2644,24 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
                            dtype=np.int8, count=n_tr).astype(bool)
     holds_all = None      # filled per combination from the winning bar
 
-    # The Q1 invariant the backstop depends on: path_status='ok' must imply
-    # the horizon bar exists, or LEAST could still be NULL and a trade would
-    # never exit. Asserted rather than inherited.
-    hz = bars[key_ix[HORIZON_RULE_KEY]]
+    # The invariant the backstop depends on: every row the SCAN returned must
+    # have the scan backstop's bar, or LEAST could be NULL and a trade would
+    # never exit. It is the scan's own filter column, so this is a check on
+    # trade_paths rather than on the SQL -- asserted, not inherited.
+    #
+    # It is asserted on the SCAN backstop, not on HORIZON_RULE_KEY. Those were
+    # the same rule while every combination shared one filter; now a sweep of
+    # short max_days scans a shorter column, and the last sessions legitimately
+    # have no max_days__20 bar at all. Checking max_days__20 here would report
+    # an upstream data problem for rows that are perfectly resolved.
+    hz = bars[key_ix[scan_backstop]]
     n_unbounded = int(np.isinf(hz).sum())
     if n_unbounded:
-        return {"error": f"{n_unbounded} of {n_tr} trades have "
-                         f"path_status='ok' but no {HORIZON_RULE_KEY} exit "
-                         f"bar. The horizon backstop cannot guarantee an "
-                         f"exit for them, so no combination is trustworthy. "
-                         f"This is an upstream trade_paths problem.",
+        return {"error": f"{n_unbounded} of {n_tr} trades matched "
+                         f"{scan_col} IS NOT NULL but carry no {scan_backstop} "
+                         f"exit bar. The backstop cannot guarantee an exit for "
+                         f"them, so no combination is trustworthy. This is an "
+                         f"upstream trade_paths problem.",
                 "invariant": "backstop_null"}
 
     def _ordered(rule_keys: list[str]) -> list[str]:
@@ -2636,16 +2673,17 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         resolve by the caller's order, which a non-stable sort would silently
         reassign.
 
-        The append condition tracks the oracle, which stopped appending a fixed
-        backstop when the selection already caps the hold (source 48aeb5b).
-        Appending it unconditionally is not cosmetic once the catalog runs past
-        20 sessions: for a swept max_days__40 it puts a 20-session bar into the
+        The append condition is not transcribed -- it CALLS backstop_for, the
+        same function build_combine_sql calls, so this cannot come to a
+        different answer about which rule is the backstop. Getting it wrong is
+        not cosmetic once the catalog runs past 20 sessions: appending a fixed
+        backstop under a swept max_days__40 puts a 20-session bar into the
         LEAST, and argmin then returns the 20-session exit for a rule that was
-        asked for 40 -- a plausible number, not a missing one, and the SQL would
-        not agree with it.
+        asked for 40 -- a plausible number, not a missing one.
         """
         keys = list(dict.fromkeys(rule_keys))
-        if not any(by_key[k].family == "max_days" for k in keys):
+        _b, appended = backstop_for(keys, by_key)
+        if appended:
             keys.append(HORIZON_RULE_KEY)
         return sorted(keys, key=lambda k: SIDE_PRIORITY[by_key[k].side])
 
@@ -2662,7 +2700,24 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         B = bars[ix]                       # (K, n_tr)
         w = np.argmin(B, axis=0)           # first minimum == CASE order
         eb = B[w, np.arange(n_tr)]
-        er = rets[ix][w, np.arange(n_tr)]
+        er = rets[ix][w, np.arange(n_tr)].copy()
+
+        # THIS COMBINATION'S OWN POPULATION.
+        #
+        # The scan is the loosest population in the sweep; the SQL for THIS
+        # combination would filter on its own backstop's column. Rows that
+        # combination cannot resolve are marked NaN, which is already how this
+        # path represents "no return here": the per-window stats mask on
+        # ~isnan, and the wire format ships null. So masking costs nothing
+        # downstream and the population matches the oracle's row for row.
+        #
+        # Nested, so this only ever removes rows: the scan backstop is the
+        # shortest in the sweep, and a trade it resolved may still be short of
+        # what a longer combination needs.
+        bkey = backstop_for(rule_keys, by_key)[0]
+        unresolved = np.isinf(bars[key_ix[bkey]])
+        if unresolved.any():
+            er = np.where(unresolved, np.nan, er)
         return order, w, eb, er
 
     combos_out = []
@@ -2725,7 +2780,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     if req.verify:
         verify_report = await _grid_verify(
             pool, combos_meta, held, by_key, prows, key_ix, bars, rets,
-            _ordered, where_bins, cell_pred, strike_pred, args,
+            _resolve, where_bins, cell_pred, strike_pred, args,
             max(1, min(int(req.verify), len(combos_meta))))
         if verify_report.get("mismatches"):
             return {"error": "VERIFY FAILED — the vectorised path disagrees "
@@ -2762,7 +2817,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
 
 
 async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
-                       bars, rets, ordered_fn, where_bins, cell_pred,
+                       bars, rets, resolve_fn, where_bins, cell_pred,
                        strike_pred, args, sample: int) -> dict:
     """Diff the vectorised path against build_combine_sql, per trade.
 
@@ -2772,6 +2827,11 @@ async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
 
     Samples evenly across the combination list rather than taking the first
     N, so a sweep whose late combinations differ in shape is still covered.
+
+    Checks POPULATION as well as values. Since source 48aeb5b each combination
+    resolves its own subset of the shared scan, so "the SQL returned a
+    different number of rows" is a real failure mode with its own name rather
+    than a symptom that shows up as a misaligned trade comparison.
     """
     n = len(combos_meta)
     step = max(1, n // sample)
@@ -2781,6 +2841,9 @@ async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
 
     checked, mismatches = 0, []
     key_of = [(r["ticker"], r["trade_date"]) for r in prows]
+    # Identity -> skeleton index, because the SQL for one combination now
+    # returns a SUBSET of the scan and cannot be zipped positionally.
+    row_ix = {k: i for i, k in enumerate(key_of)}
     async with pool.acquire() as conn:
         for pi in picks:
             m = combos_meta[pi]
@@ -2800,25 +2863,40 @@ async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
             ORDER BY c.trade_date, c.ticker
             """, *args)
 
-            order = ordered_fn(rk)
-            ix = [key_ix[k] for k in order]
-            B = bars[ix]
-            w = np.argmin(B, axis=0)
-            ar = np.arange(B.shape[1])
-            eb = B[w, ar]
-            er = rets[ix][w, ar]
+            # THE SHIPPED FUNCTION, not a re-derivation of it. This used to
+            # inline its own copy of LEAST + argmin, which meant the gate could
+            # pass while the code the grid actually returns disagreed with the
+            # SQL -- and it would have missed the per-combination resolution
+            # mask entirely, since that lives in _resolve.
+            order, w, eb, er = resolve_fn(rk)
             rule_of = np.array(order, dtype=object)[w]
 
-            if len(rows) != len(key_of):
-                mismatches.append({"combo": pi, "field": "row_count",
-                                   "sql": len(rows), "numpy": len(key_of)})
+            # POPULATION IS PART OF THE CONTRACT NOW, so it is checked rather
+            # than assumed. The scan is the loosest population in the sweep and
+            # each combination masks down to its own; the SQL for that
+            # combination returns exactly that subset. Matching positionally
+            # was correct only while every combination shared one population --
+            # it would now read a row-count difference as a mismatch on every
+            # short-max_days combination, and it would compare misaligned
+            # trades if it did not.
+            resolved = {k for k, keep in zip(key_of, ~np.isnan(er)) if keep}
+            sql_keys = {(r["ticker"], r["trade_date"]) for r in rows}
+            if sql_keys != resolved:
+                only_sql = sorted(sql_keys - resolved)[:3]
+                only_np = sorted(resolved - sql_keys)[:3]
+                mismatches.append({
+                    "combo": pi, "field": "population",
+                    "sql": f"{len(sql_keys)} rows", "numpy": f"{len(resolved)} rows",
+                    "only_in_sql": [f"{t} {d}" for t, d in only_sql],
+                    "only_in_numpy": [f"{t} {d}" for t, d in only_np]})
                 continue
-            for j, row in enumerate(rows):
+            for row in rows:
                 checked += 1
-                if (row["ticker"], row["trade_date"]) != key_of[j]:
-                    mismatches.append({"combo": pi, "row": j, "field": "identity",
+                j = row_ix.get((row["ticker"], row["trade_date"]))
+                if j is None:
+                    mismatches.append({"combo": pi, "field": "identity",
                                        "sql": f"{row['ticker']} {row['trade_date']}",
-                                       "numpy": f"{key_of[j][0]} {key_of[j][1]}"})
+                                       "numpy": "not in the scan skeleton"})
                     break
                 sb = row["exit_bar"]
                 if sb is None or float(sb) != float(eb[j]):

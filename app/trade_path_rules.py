@@ -157,6 +157,43 @@ def by_key_from_rows(rows) -> dict[str, RuleMeta]:
     return out
 
 
+def backstop_for(rule_keys, by_key: Mapping[str, RuleMeta]) -> "tuple[str, bool]":
+    """(backstop_rule_key, was_appended) for a selection.
+
+    LOCAL ADDITION, not present upstream, and a pure extraction: the source
+    inlines this inside build_combine_sql. It is a separate function here
+    because this project has a SECOND implementation of the combine -- the
+    grid's vectorised path -- and that path needs the same answer. Two copies
+    of "which rule is the backstop" is precisely the drift this module exists
+    to prevent, and the numpy path already transcribes enough.
+
+    Under LEAST the shortest selected max_days decides every otherwise
+    unresolved trade, so it IS the backstop and nothing is appended. With no
+    max_days selected at all, HORIZON_RULE_KEY is appended and is the backstop.
+
+    Worth pushing upstream on the next sync, alongside include_exit_rule.
+    """
+    time_keys = [k for k in rule_keys if _is_max_days(by_key.get(k))]
+
+    # A max_days rule whose params carry no usable `n` cannot be compared, and
+    # picking the shortest is the whole mechanism -- guessing here would write
+    # the resolution filter against the wrong column and quietly change which
+    # rows resolve. The dashboard fills params from the catalog table, so this
+    # is a malformed catalog row, and it fails by name rather than by symptom.
+    unreadable = [k for k in time_keys if _max_days_n(by_key[k]) is None]
+    if unreadable:
+        raise CombineError(
+            f"max_days rule(s) {unreadable} carry no numeric 'n' in the "
+            f"catalog, so the shortest selected horizon cannot be determined. "
+            f"The resolution filter is written against that rule's column; "
+            f"choosing one arbitrarily would silently change which rows count "
+            f"as resolved."
+        )
+    if not time_keys:
+        return HORIZON_RULE_KEY, True
+    return min(time_keys, key=lambda k: _max_days_n(by_key[k])), False
+
+
 def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
                       table: str = "trade_paths",
                       include_unresolved: bool = False,
@@ -235,29 +272,9 @@ A backstop is therefore present in every combine. When the selection contains
     # This REPLACES the guard mirrored from c3fbd56, which raised when a
     # selected max_days ran past a fixed backstop. That guard's own message
     # said to make the backstop a function of the selection; this is that.
-    time_keys = [k for k in keys if _is_max_days(by_key.get(k))]
-
-    # A max_days rule whose params carry no usable `n` cannot be compared, and
-    # picking the shortest is the whole mechanism -- guessing here would write
-    # the resolution filter against the wrong column and quietly change which
-    # rows resolve. The dashboard fills params from the catalog table, so this
-    # is a malformed catalog row, and it fails by name rather than by symptom.
-    unreadable = [k for k in time_keys if _max_days_n(by_key[k]) is None]
-    if unreadable:
-        raise CombineError(
-            f"max_days rule(s) {unreadable} carry no numeric 'n' in the "
-            f"catalog, so the shortest selected horizon cannot be determined. "
-            f"The resolution filter is written against that rule's column; "
-            f"choosing one arbitrarily would silently change which rows count "
-            f"as resolved."
-        )
-
-    horizon_added = not time_keys
+    backstop, horizon_added = backstop_for(keys, by_key)
     if horizon_added:
         keys.append(HORIZON_RULE_KEY)
-        backstop = HORIZON_RULE_KEY
-    else:
-        backstop = min(time_keys, key=lambda k: _max_days_n(by_key[k]))
 
     unknown_sides = sorted({by_key[k].side for k in keys} - set(SIDE_PRIORITY))
     if unknown_sides:
