@@ -7,6 +7,9 @@ app/split_factors.py.
   first vendored  2026-08-15
   re-synced       2026-09-05, against source commit c3fbd56
                   (per-horizon resolution filter + the backstop-length guard)
+  re-synced       2026-09-05, against source commit 48aeb5b
+                  (143-rule catalog, 40-session horizon; the backstop became
+                   a function of the selection and the guard went away)
 
 The re-sync exists because the source moved and nothing noticed: the copy sat
 on `WHERE path_status = 'ok'` for as long as it took someone to read both
@@ -34,9 +37,8 @@ the horizon backstop, tie-break ordering, the resolution filter, the emitted
 SQL shape — is unchanged.
 
 RuleMeta therefore carries `family` and `params` as well as the columns: the
-backstop-length guard mirrored from c3fbd56 compares a selected max_days
-rule's `n` against the backstop's, and the source reads those off its own
-Rule dataclass.
+selection-dependent backstop mirrored from 48aeb5b picks the SHORTEST selected
+max_days, and the source reads those fields off its own Rule dataclass.
 
 LOCAL ADDITION, not present upstream
 ------------------------------------
@@ -121,14 +123,22 @@ def _coerce_params(params: Any) -> dict:
     return params if isinstance(params, dict) else {}
 
 
-def _max_days_n(meta) -> "int | None":
-    """Sessions for a max_days rule, or None if this is not one.
+def _is_max_days(meta) -> bool:
+    """Whether this rule is a holding-period cap.
 
-    The horizon guard needs to compare holding lengths, and `family` is what
-    says a rule is a time rule at all -- the rule KEY is not consulted, per
-    this module's standing rule that the key's encoding is a naming artefact.
+    `family` is what says so -- the rule KEY is never consulted, per this
+    module's standing rule that the key's encoding is a naming artefact.
+
+    A RuleMeta built without family (the four-argument form) answers False for
+    everything, which degrades the selection-dependent backstop below to the
+    fixed HORIZON_RULE_KEY -- i.e. exactly the behaviour that preceded it.
     """
-    if meta is None or getattr(meta, "family", None) != "max_days":
+    return meta is not None and getattr(meta, "family", None) == "max_days"
+
+
+def _max_days_n(meta) -> "int | None":
+    """Sessions for a max_days rule, or None if it does not carry a usable n."""
+    if not _is_max_days(meta):
         return None
     n = (meta.params or {}).get("n")
     try:
@@ -161,14 +171,17 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
     plausible-looking return rather than an error. That is the failure mode
     this function exists to make impossible.
 
-    HORIZON_RULE_KEY is therefore appended to every combine unconditionally.
-    It is a no-op whenever any selected rule fires earlier (LEAST picks the
-    smaller), and it is the guaranteed exit when none does. There is no code
-    path through this function that produces an unbounded exit.
+A backstop is therefore present in every combine. When the selection contains
+    no max_days rule at all, HORIZON_RULE_KEY is appended and is that backstop.
+    When it does, the SHORTEST selected max_days already plays the role and
+    nothing is appended -- under LEAST that rule is what decides every
+    otherwise-unresolved trade, so adding a longer default underneath it would
+    change nothing, and adding a shorter one would truncate the selection. There
+    is no code path through this function that produces an unbounded exit.
 
-    Note that max_days rules other than the backstop are ordinary selectable
-    policy — the backstop is a floor underneath whatever the user picks, not
-    a substitute for picking.
+    Note that max_days rules are ordinary selectable policy as well as the
+    structural floor -- the two roles coincide, which is why `horizon_auto_added`
+    exists to say which one applied.
 
     Ties are broken by side priority — stop, then target, then trend, then
     time — implementing the documented same-bar convention that a stop is
@@ -204,9 +217,47 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
         )
 
     keys = list(dict.fromkeys(rule_keys))
-    horizon_added = HORIZON_RULE_KEY not in keys
+
+    # MIRRORED from the source (48aeb5b). The backstop is the rule guaranteed
+    # to fire, and it is a function of the SELECTION, not a constant.
+    #
+    # Under LEAST, the shortest max_days selected is the one that decides every
+    # otherwise-unresolved trade -- a 5-session cap fires at session 5 whether
+    # or not a 40 is also selected. So that rule, not the catalog's longest and
+    # not a fixed default, is what the trade actually waits on, and it is what
+    # the resolution filter must be written against.
+    #
+    # Appending a fixed max_days__20 here instead would be wrong in both
+    # directions once the catalog runs past it: it would truncate a selected
+    # max_days__40 to the backstop's earlier exit, and it would demand 20
+    # resolvable sessions from a selection that only ever needed 5.
+    #
+    # This REPLACES the guard mirrored from c3fbd56, which raised when a
+    # selected max_days ran past a fixed backstop. That guard's own message
+    # said to make the backstop a function of the selection; this is that.
+    time_keys = [k for k in keys if _is_max_days(by_key.get(k))]
+
+    # A max_days rule whose params carry no usable `n` cannot be compared, and
+    # picking the shortest is the whole mechanism -- guessing here would write
+    # the resolution filter against the wrong column and quietly change which
+    # rows resolve. The dashboard fills params from the catalog table, so this
+    # is a malformed catalog row, and it fails by name rather than by symptom.
+    unreadable = [k for k in time_keys if _max_days_n(by_key[k]) is None]
+    if unreadable:
+        raise CombineError(
+            f"max_days rule(s) {unreadable} carry no numeric 'n' in the "
+            f"catalog, so the shortest selected horizon cannot be determined. "
+            f"The resolution filter is written against that rule's column; "
+            f"choosing one arbitrarily would silently change which rows count "
+            f"as resolved."
+        )
+
+    horizon_added = not time_keys
     if horizon_added:
         keys.append(HORIZON_RULE_KEY)
+        backstop = HORIZON_RULE_KEY
+    else:
+        backstop = min(time_keys, key=lambda k: _max_days_n(by_key[k]))
 
     unknown_sides = sorted({by_key[k].side for k in keys} - set(SIDE_PRIORITY))
     if unknown_sides:
@@ -214,32 +265,6 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
             f"rule(s) carry unknown side(s) {unknown_sides}; tie-break order "
             f"is undefined. Known sides: {sorted(SIDE_PRIORITY)}."
         )
-
-    # MIRRORED from the source (c3fbd56). The backstop is the rule GUARANTEED
-    # to fire, and the resolution filter below is written against its column,
-    # so it must never be shorter than a selected time rule. If it were, the
-    # damage would not stop at the filter: LEAST would return the backstop's
-    # earlier bar and silently truncate the selection to the backstop's
-    # horizon, answering a different question than the one asked. Unreachable
-    # while max_days__20 is the longest rule in the catalog -- it becomes
-    # reachable the moment a longer horizon is added, which is exactly when it
-    # must fail loudly instead of quietly.
-    #
-    # Reads family/params off RuleMeta, which the dashboard fills from the
-    # catalog table's own columns. A rule whose params do not carry a numeric
-    # `n` is skipped rather than guessed at.
-    h_n = _max_days_n(by_key.get(HORIZON_RULE_KEY))
-    if h_n is not None:
-        longer = [k for k in keys
-                  if (_max_days_n(by_key[k]) or 0) > h_n]
-        if longer:
-            raise CombineError(
-                f"selected time rule(s) {longer} run past the horizon backstop "
-                f"{HORIZON_RULE_KEY} ({h_n} sessions). LEAST would truncate them "
-                f"to the backstop's exit, and the resolution filter would "
-                f"understate the sessions they need. Make the backstop a function "
-                f"of the selection before adding horizons longer than {h_n}."
-            )
 
     ordered = sorted(keys, key=lambda k: SIDE_PRIORITY[by_key[k].side])
 
@@ -277,7 +302,7 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
     # the row the catalog table supplied. Writing 'xb_max_days__20' here would
     # be the one thing this module's docstring forbids -- a column name
     # constructed from a rule key rather than read from the table.
-    backstop_col = by_key[HORIZON_RULE_KEY].bar_col
+    backstop_col = by_key[backstop].bar_col
     where = ("" if include_unresolved
              else f"\n    WHERE {backstop_col} IS NOT NULL")
 
@@ -314,7 +339,8 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
         # filter is written against, and the column it resolved to. Both are
         # derived, so a reader can see WHICH horizon defined "resolved" for
         # this combine rather than having to know the backstop by heart.
-        "backstop_rule": HORIZON_RULE_KEY,
+        "backstop_rule": backstop,
+        "backstop_sessions": _max_days_n(by_key[backstop]),
         "resolution_column": backstop_col,
     }
     return sql, meta

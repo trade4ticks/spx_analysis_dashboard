@@ -89,8 +89,8 @@ FINGERPRINT = [
         "source":   "lib/trade_path_rules.py",
         "symbol":   "build_combine_sql",
         # The source commit this copy was last read against and mirrored from.
-        "synced":   "c3fbd5650f9592316b7dff674ca2a1746545207c",
-        "sha256":   "43af392f0310377542707004e19f507a14d7d367eb5795c523e5923db3c11c87",
+        "synced":   "48aeb5bbb2447cbb3934572ef1a6f029a6029502",
+        "sha256":   "09ba2311cc22529d57c779ee71323617e37c54872fdcdbb8eff6a6f4d637af1a",
     },
 ]
 

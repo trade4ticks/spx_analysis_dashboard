@@ -2317,11 +2317,30 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     free rather than a doubling.
 
     Returns per-trade RETURNS per combination against ONE shared skeleton.
-    The combine's only row filter is `path_status = 'ok'`, which does not
-    depend on which rules are selected, so every combination sees the same
-    trades in the same order -- only the exit changes. Shipping the skeleton
-    once instead of per combination is a ~30x reduction, and the invariant
-    is asserted per combination rather than trusted.
+    This path's row filter is `path_status = 'ok'`, which does not depend on
+    which rules are selected, so every combination sees the same trades in the
+    same order -- only the exit changes. Shipping the skeleton once instead of
+    per combination is a ~30x reduction, and the invariant is asserted per
+    combination rather than trusted.
+
+    KNOWN DIVERGENCE FROM THE ORACLE, not yet resolved. Since source 48aeb5b
+    build_combine_sql filters on the SHORTEST SELECTED max_days rather than on
+    path_status, so its population IS now selection-dependent and this scan's
+    is not. Consequences, both in the direction of this path being too tight:
+
+      - today, a swept or held max_days shorter than 20 resolves more rows on
+        the zone/stat-bar path than the grid will show for the same rules;
+      - after a rebuild at MAX_HORIZON_SESSIONS = 40, `path_status = 'ok'`
+        means 40 resolvable sessions while the oracle asks only for the
+        selection's own, so the gap widens to nearly every selection.
+
+    The exits themselves still agree -- see _ordered, which tracks the oracle's
+    rule set exactly -- so this is a population difference, not a wrong exit.
+    Fixing it means making the shared scan the LOOSEST population across the
+    sweep and applying each combination's own resolution mask in numpy, where
+    every backstop column is already in `bars`. Deliberately not done blind:
+    scripts/check_grid_equivalence.py is the gate for this path and it needs a
+    database.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -2477,6 +2496,11 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     # with the zone predicate, and none of that depends on which rules are
     # selected -- the same fact that makes the sweep comparable cell to cell.
     #
+    # That last clause stopped being true of the ORACLE at source 48aeb5b,
+    # which filters on the shortest selected max_days. This count still
+    # measures this path's own population, so it remains the right guard for
+    # the fan-out it is protecting; see the divergence note on _grid_scan_sql.
+    #
     # Routing it through a combine also made an empty rule list fatal.
     # build_combine_sql rightly refuses `[]` (a combine with no rules has no
     # exit), so ANY caller holding nothing fixed -- which is what a sweep of
@@ -2606,13 +2630,22 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     def _ordered(rule_keys: list[str]) -> list[str]:
         """Exactly build_combine_sql's ordering, transcribed.
 
-        dedup preserving first occurrence -> append the backstop if absent ->
-        STABLE sort by side priority. Stability is load-bearing: two rules of
-        the SAME side tying on a bar resolve by the caller's order, which a
-        non-stable sort would silently reassign.
+        dedup preserving first occurrence -> append the backstop ONLY when the
+        selection contains no max_days at all -> STABLE sort by side priority.
+        Stability is load-bearing: two rules of the SAME side tying on a bar
+        resolve by the caller's order, which a non-stable sort would silently
+        reassign.
+
+        The append condition tracks the oracle, which stopped appending a fixed
+        backstop when the selection already caps the hold (source 48aeb5b).
+        Appending it unconditionally is not cosmetic once the catalog runs past
+        20 sessions: for a swept max_days__40 it puts a 20-session bar into the
+        LEAST, and argmin then returns the 20-session exit for a rule that was
+        asked for 40 -- a plausible number, not a missing one, and the SQL would
+        not agree with it.
         """
         keys = list(dict.fromkeys(rule_keys))
-        if HORIZON_RULE_KEY not in keys:
+        if not any(by_key[k].family == "max_days" for k in keys):
             keys.append(HORIZON_RULE_KEY)
         return sorted(keys, key=lambda k: SIDE_PRIORITY[by_key[k].side])
 
