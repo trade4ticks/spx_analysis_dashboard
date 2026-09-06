@@ -176,17 +176,38 @@ body {
 .dd select option { background: var(--raised); color: var(--text); }
 
 /* ── Range slider ────────────────────────────────────────────────────────── */
+/* -webkit-appearance is NOT redundant with appearance. Without the prefixed
+   form the track keeps its native rendering in WebKit/Blink, and `background`
+   is then ignored -- which is a light grey track on a dark page, not the
+   var(--bg) asked for here. Firefox needs its own track/thumb pseudo-elements
+   for the same reason. */
 input[type=range] {
   height: 4px;
   border-radius: 2px;
   outline: none;
   border: 1px solid var(--border);
+  -webkit-appearance: none;
   appearance: none;
   background: var(--bg);
   cursor: pointer;
 }
+input[type=range]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px; background: var(--bg);
+}
+input[type=range]::-moz-range-track {
+  height: 4px; border-radius: 2px; background: var(--bg);
+  border: 1px solid var(--border);
+}
 input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
   appearance: none;
+  width: 13px; height: 13px;
+  margin-top: -5px;              /* centre on a 4px track once un-nativised */
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+input[type=range]::-moz-range-thumb {
   width: 13px; height: 13px;
   border-radius: 50%;
   background: var(--accent);

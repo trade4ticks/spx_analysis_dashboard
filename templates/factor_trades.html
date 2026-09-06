@@ -22,9 +22,24 @@
        from that width — the checkbox claims the whole row, the family label
        collapses to one character, and the parameter dropdown is pushed out
        of view entirely. */
-    .ft-rail select, .ft-rail input:not([type=checkbox]) {
-      width:100%; background:var(--raised); border:1px solid var(--border);
+    /* PAGE-WIDE, not rail-only. The panels (sweep config, the 2D matrix
+       header, the signal picker) carry their own selects, number fields and
+       checkboxes, and anything not matched here falls back to the browser's
+       light default -- a white box on a dark page. Colour and chrome are set
+       for every control; WIDTH is not, because 100% is a rail decision. */
+    .ft-body select,
+    .ft-body input:not([type=checkbox]):not([type=range]) {
+      background:var(--raised); border:1px solid var(--border);
       color:var(--text); font-size:12px; padding:4px 6px; border-radius:3px;
+    }
+    /* The dropdown LIST, which is a separate surface from the closed control
+       and stays light on some platforms even when the control is dark. */
+    .ft-body select option { background:var(--raised); color:var(--text); }
+    /* Checkboxes are excluded above (the width rule below is why), so their
+       tick is coloured here rather than left as the browser's blue-on-white. */
+    .ft-body input[type=checkbox] { accent-color:var(--accent); }
+    .ft-rail select, .ft-rail input:not([type=checkbox]) {
+      width:100%;
     }
     /* Two lines per rule: toggle + family name, then the parameter select
        full width beneath. A 290px rail cannot fit a readable family name and
@@ -156,11 +171,15 @@
     .ft-cfg-glbl { flex:0 0 130px; font-size:10px; color:var(--dim);
                    font-family:monospace; padding-top:5px; }
     .ft-chips    { display:flex; flex-wrap:wrap; gap:6px; }
+    /* Fixed width, so anything longer must be CLIPPED rather than allowed
+       outside the box. The full label is on the chip's title attribute. */
     .ft-chip     { flex:0 0 auto; width:88px; text-align:center; cursor:pointer;
                    font-family:monospace; font-size:11px; padding:4px 0;
                    border-radius:3px; border:1px solid var(--border);
                    color:var(--dim); background:transparent;
-                   user-select:none; transition:background .1s, color .1s; }
+                   user-select:none; transition:background .1s, color .1s;
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                   box-sizing:border-box; }
     .ft-chip:hover { border-color:var(--muted); color:var(--text); }
     .ft-chip.on  { background:#2a5a82; border-color:#3a7ab0; color:#fff;
                    font-weight:600; }
@@ -180,7 +199,7 @@
   <script src={{ asset('js/factor_trades.js') }}></script>
 </head>
 
-<body x-data="factorTrades" x-init="init()">
+<body class="ft-body" x-data="factorTrades" x-init="init()">
 
   <div class="topbar">
     <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
@@ -354,14 +373,24 @@
 
       <div class="ft-sec">
         <div class="ft-sec-h">Sizing</div>
+        {#- .lazy binds to `change`, not `input`: the model updates on blur or
+            Enter, never per keystroke and never on a partially-typed number.
+            Sizing feeds _computeDollarSeries for every combination and every
+            suite run, so an intermediate "1" on the way to "10000" used to
+            re-price the whole panel. -#}
         <label>$ / trade</label>
-        <input type="number" x-model.number="perTrade" step="500">
+        <input type="number" x-model.number.lazy="perTrade" step="500"
+               @change="renderCharts()">
         <label>Daily cap</label>
-        <input type="number" x-model.number="dailyCap" step="1000">
+        <input type="number" x-model.number.lazy="dailyCap" step="1000"
+               @change="renderCharts()">
         <!-- Max strike: a trade on a ticker priced above this is not taken
              at all. Default $1,000. -->
+        {#- Also .lazy, though max strike is a SERVER-side population filter
+            and does not re-price anything client-side: a half-typed value
+            would still be what the next Run sent. -#}
         <label>Max strike ($)</label>
-        <input type="number" x-model.number="maxStrike" step="50">
+        <input type="number" x-model.number.lazy="maxStrike" step="50">
       </div>
 
       <!-- Page state belongs with the page's controls, not in the nav bar,
@@ -1319,10 +1348,14 @@
                     <span class="ft-cfg-glbl" x-show="g.label" x-text="g.label"></span>
                     <div class="ft-chips">
                       <template x-for="r in g.rules" :key="'cc-'+r.rule_key">
+                        {#- r.chip is the row-relative label (see
+                            _chipLabel); r.label is the full one and stays on
+                            the tooltip so nothing is lost. -#}
                         <span class="ft-chip"
                               :class="gridValueOn(f.family, r.rule_key) ? 'on' : ''"
                               @click="gridChipClick(f.family, r.rule_key, $event)"
-                              x-text="r.label"></span>
+                              :title="r.label"
+                              x-text="r.chip ?? r.label"></span>
                       </template>
                     </div>
                   </div>

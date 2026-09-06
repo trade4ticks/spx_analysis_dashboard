@@ -39,6 +39,7 @@ let _gridHeatData = null;
 // It depends on the DATA and the DOLLAR SIZING only. Not on metric or window:
 // _gridStats returns every metric for both windows in one object, so switching
 // either is a re-read of a different field, not a recompute.
+let _suiteTableKey = null, _suiteTableData = null, _suiteTableVal = null;
 let _gridStatsKey = null, _gridStatsVal = null, _gridStatsData = null;
 
 // ── TEMPORARY DIAGNOSTIC (remove once the matrix stale-value bug is closed) ──
@@ -749,7 +750,30 @@ document.addEventListener('alpine:init', () => {
       }
       return [...out.entries()]
         .sort((a, b) => (+a[0]) - (+b[0]))
-        .map(([k, rules]) => ({ label: `${d0} ${this.famValLabel(d0, k)}`, rules }));
+        .map(([k, rules]) => ({
+          label: `${d0} ${this.famValLabel(d0, k)}`,
+          // Chips carry only what VARIES inside the row. The row header
+          // already states d0, and every chip in the row shares it, so
+          // repeating it is redundant -- and it is what pushed a
+          // two-parameter label ("activation_atr=2x ATR, k=1.5x ATR") past
+          // the chip's fixed width and out of its box.
+          rules: rules.map(r => ({ ...r, chip: this._chipLabel(r, dims, d0) })),
+        }));
+    },
+
+    // The label for one chip: the dimensions its row does NOT already name.
+    // Falls back to the server label when there is nothing to strip, so
+    // single-parameter families are untouched.
+    _chipLabel(r, dims, d0) {
+      const rest = dims.filter(d => d !== d0);
+      if (!rest.length) return r.label;
+      const p = r.params || {};
+      // One remaining dimension is the common case (trail, no_progress,
+      // atr_trail): show its value alone, since the row names the other.
+      // More than one keeps the names, because two bare numbers side by side
+      // say nothing about which is which.
+      if (rest.length === 1) return this.famValLabel(rest[0], p[rest[0]]);
+      return rest.map(d => `${d} ${this.famValLabel(d, p[d])}`).join(' · ');
     },
     gridSummary(fam) {
       const sel = this.gridValues[fam];
@@ -1593,9 +1617,24 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // Derived, not stored: sizing lives in the rail, so changing $/trade or
     // the daily cap must re-price a suite already on screen rather than
     // leave it showing figures from the previous sizing.
+    // MEMOISED on the same terms as gridStats. Without this, every reactivity
+    // tick re-ran _suiteRunStats for every row x every draw x both windows,
+    // and each of those calls _computeDollarSeries over the run's full trade
+    // list -- ~80 full dollar-series passes for a 10-draw suite, on a getter
+    // the template reads freely. That is the multi-second pause on touching a
+    // sizing field.
+    //
+    // The August memo audit (6d8ec2c) covered the parameter panel and added
+    // sizing to gridStats and gridHeat; the suite panel was never in scope and
+    // has never had a memo. So this is not a regression from that work -- it
+    // is the case that work did not reach.
     get suiteTable() {
       const d = this.suiteData;
       if (!d) return null;
+      const key = `${this.perTrade}|${this.dailyCap}`;
+      if (key === _suiteTableKey && _suiteTableData === d && _suiteTableVal) {
+        return _suiteTableVal;
+      }
       const metrics = d.metrics || [];
       const policyRow = (d.rows || []).find(r => r.kind === null);
       const polStats = {};
@@ -1632,7 +1671,10 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         }
         return { ...row, train: cells.train, test: cells.test };
       });
-      return { rows, policy: polStats };
+      _suiteTableVal = { rows, policy: polStats };
+      _suiteTableKey = key;
+      _suiteTableData = d;
+      return _suiteTableVal;
     },
 
     // The check the port-to-server option could only ever approximate: the
