@@ -2062,8 +2062,18 @@ async def candidates(
     # through, because a sort that quietly ignores its key is worse than one
     # that refuses.
     by_symbol = (sort == "symbol")
-    sort_key = sort if sort in col_map else ("ratio" if "ratio" in col_map
-                                             else order[0])
+    # DERIVED KEYS ARE SORTABLE KEYS. They are not in col_map -- that maps
+    # role keys to METRIC columns, and a derived value has no single metric
+    # behind it -- but they ARE in row["values"], which is assembled as
+    # {**vals, **drow} above. So the value was always there and only this
+    # guard refused to name it: clicking "$ vol/min" fell through to the
+    # `ratio` fallback and reordered the table by a column the user had not
+    # clicked, while the header still drew its sort arrow. Same failure the
+    # `symbol` case above was fixed for, and the same reason it is handled
+    # explicitly rather than left to fall through.
+    sortable = sort in col_map or sort in derived_map
+    sort_key = sort if sortable else ("ratio" if "ratio" in col_map
+                                      else order[0])
     # Nulls sort last in BOTH directions. A missing measurement is not a small
     # value, and letting it float to the top of an ascending sort would put the
     # names with no data where the best ones belong.
