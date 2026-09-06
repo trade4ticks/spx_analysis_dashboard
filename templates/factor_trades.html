@@ -393,6 +393,68 @@
         <input type="number" x-model.number.lazy="maxStrike" step="50">
       </div>
 
+      {#- ── Save this zone as a signal ─────────────────────────────────
+           Signal mode only: a portfolio has no single zone to save, and its
+           members are already saved signals.
+
+           Writes to the SAME signals table the Factor Analysis page writes
+           to, by POSTing that page's own endpoint. One store, two front
+           doors -- a signal saved here IS an FA signal, not a lookalike.
+           ---------------------------------------------------------------- -#}
+      <div class="ft-sec" x-show="!isPortfolio"
+           style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <div class="ft-sec-h">Save as signal</div>
+        <input type="text" x-model="signalName" placeholder="signal name"
+               @keydown.enter="saveSignal()">
+
+        {#- REQUIRED, and deliberately not defaulted. The outcome is the
+            forward return the zone is claimed to be about, and this page
+            never shows one -- it shows returns under an exit policy. A
+            default would put a number in agg_avg_ret and a colour in the
+            saved thumbnail describing a return nobody looked at. Only _oc
+            values, because this page enters at the open. -#}
+        <label>Outcome</label>
+        <select x-model="signalOutcome">
+          <option value="">— pick a forward return —</option>
+          <template x-for="o in ocOutcomes" :key="'oc-'+o">
+            <option :value="o" x-text="o"></option>
+          </template>
+        </select>
+        <div class="ft-note" style="margin-top:3px;line-height:1.35">
+          What the zone is about. Not derived from the exit policy — the stats
+          and the thumbnail stored with this signal are computed from it.
+        </div>
+
+        {#- Optional, exactly as on the FA page: the four canonical
+            corner_direction strings, or nothing. -#}
+        <label>Corner (optional)</label>
+        <select x-model="signalCorner">
+          <option value="">corner…</option>
+          <option value="low-low">low-low</option>
+          <option value="low-high">low-high</option>
+          <option value="high-low">high-low</option>
+          <option value="high-high">high-high</option>
+        </select>
+
+        <div class="ft-note" style="margin-top:6px;line-height:1.4"
+             x-show="!isPortfolio && runData && !runData.randomize"
+             x-text="'saves as train/test · split ' + (cutoffDate || '?')
+                     + ' · ' + selectedCells.length + ' cell'
+                     + (selectedCells.length === 1 ? '' : 's')
+                     + ' · ' + (runData?.n_bins ?? 20) + ' bins'"></div>
+
+        <button class="ft-btn" @click="saveSignal()"
+                :disabled="!canSaveSignal || signalSaving"
+                :title="saveDisabledReason"
+                x-text="signalSaving ? 'Saving…' : 'Save signal'"></button>
+        {#- The reason is shown, not just used to grey the button out. -#}
+        <div class="ft-note" x-show="saveDisabledReason && !signalSaving"
+             style="margin-top:3px" x-text="saveDisabledReason"></div>
+        <div class="ft-note" x-show="signalSaveMsg" style="margin-top:4px"
+             :style="signalSaveMsg.startsWith('✓') ? 'color:#2ecc71' : 'color:#e84393'"
+             x-text="signalSaveMsg"></div>
+      </div>
+
       <!-- Page state belongs with the page's controls, not in the nav bar,
            which is for moving between pages. Bottom of the rail so it is
            always in view beside everything else that shapes a run. -->

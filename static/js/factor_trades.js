@@ -108,6 +108,19 @@ document.addEventListener('alpine:init', () => {
       return this.isPortfolio ? this.selectedSignalIds.length > 0
                               : this.selectedCells.length > 0;
     },
+    // ── Saving a signal ──────────────────────────────────────────────────
+    // Writes to the SAME signals table the Factor Analysis page writes to, by
+    // POSTing the SAME endpoint. Not a second store and not a second save
+    // path: one record type, two front doors, and the server derives the
+    // stats, the status and the colour slot exactly as it does for an
+    // FA-saved signal.
+    signalName: '', signalOutcome: '', signalCorner: '',
+    signalSaving: false, signalSaveMsg: '',
+    // The forward returns this page can honestly claim. _oc only: those enter
+    // at the open of trade_date, which is the only entry this page trades.
+    // Populated from the same /columns endpoint the FA page reads, so the list
+    // is the catalog's rather than a copy of it.
+    ocOutcomes: [],
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
     loading: false, error: '',
@@ -169,6 +182,7 @@ document.addEventListener('alpine:init', () => {
         this.signalsError = sigs?.error || '';
         if (sigs?.max_selectable) this.maxSelectable = sigs.max_selectable;
         this.metrics = cols?.features || [];
+        this.ocOutcomes = (cols?.outcomes || []).filter(o => o.endsWith('_oc'));
         for (const g of (cols?.feature_families || [])) {
           for (const mm of g.metrics) {
             this.metricFamilyLookup[mm] = { family_num: g.family_num,
@@ -505,6 +519,93 @@ document.addEventListener('alpine:init', () => {
         const ok = new Set(this.signals.filter(s => s.eligible).map(s => s.id));
         this.selectedSignalIds = this.selectedSignalIds.filter(id => ok.has(id));
       } catch (e) { this.signalsError = String(e); }
+    },
+
+    // ── Save this zone as a signal ───────────────────────────────────────
+    //
+    // POSTs /api/factor-analysis/signals -- the Factor Analysis page's own
+    // endpoint, not a copy of it here. That is what makes the record the same
+    // record: the same Pydantic model validates it, the same code computes
+    // agg_avg_ret / agg_n / per_cell_stats / stats_updated_at from the same
+    // bin table, and status / color_slot / created_at are set by the same
+    // construction (always 'Test', always NULL, always NOW()).
+    //
+    // What this page supplies, and why each is the same thing the FA page
+    // would have supplied:
+    //
+    //   primary/secondary_metric  the run's own pair
+    //   n_bins                    20 -- this page's heatmap IS the bin20 grid
+    //   cell_set                  [[ix, iy], ...], ix = primary, iy =
+    //                             secondary. Identical orientation to
+    //                             hmCellSet(): both pages' heatmap macro
+    //                             iterates grid[iy][ix] and both hand the
+    //                             click (ix, iy) in that order.
+    //   selection_mode            'train_test' BY CONSTRUCTION -- tt_bins is
+    //                             the only bin table this page reads.
+    //   selection_cutoff          the same /tt-cutoff value the FA page sends
+    //   outcome                   THE ONE FIELD THIS PAGE CANNOT DERIVE, so
+    //                             it is asked for. See saveDisabledReason.
+    get canSaveSignal() { return !this.saveDisabledReason; },
+
+    // Why the Save button is off, in the user's terms. One place, so the
+    // disabled state and the explanation cannot disagree.
+    get saveDisabledReason() {
+      if (this.isPortfolio) return 'portfolio mode has no zone to save';
+      if (!this.runData) return 'run a policy first';
+      if (this.runData.randomize) return 'this is a baseline draw, not a zone';
+      if (!this.runData.secondary_metric)
+        return 'single-metric mode — a signal needs a metric pair';
+      if (!this.selectedCells.length) return 'select at least one cell';
+      if (!this.signalName.trim()) return 'name it';
+      // Required and unguessed. The outcome is the forward return the zone is
+      // claimed to be about, and this page never showed one -- it shows exit
+      // policy returns. Defaulting it would put a number in agg_avg_ret and a
+      // colour in the thumbnail that describe a return nobody looked at.
+      if (!this.signalOutcome) return 'pick the outcome this zone is about';
+      if (!this.cutoffDate) return 'no tt_bins cutoff — cannot stamp the split';
+      return '';
+    },
+
+    async saveSignal() {
+      if (!this.canSaveSignal) return;
+      this.signalSaving = true;
+      this.signalSaveMsg = '';
+      try {
+        const body = {
+          name:             this.signalName.trim(),
+          primary_metric:   this.runData.primary_metric,
+          secondary_metric: this.runData.secondary_metric,
+          outcome:          this.signalOutcome,
+          n_bins:           this.runData.n_bins,
+          cell_set:         this.selectedCells.map(c => [c[0], c[1]]),
+          selection_mode:   'train_test',
+          selection_cutoff: this.cutoffDate,
+        };
+        // Omitted rather than sent empty, matching the FA page: the column is
+        // nullable and '' is not one of the four valid corner values.
+        if (this.signalCorner) body.corner = this.signalCorner;
+
+        const r = await fetch('/api/factor-analysis/signals', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) {
+          this.signalSaveMsg = '✗ ' + (d.error || ('HTTP ' + r.status));
+        } else {
+          this.signalSaveMsg = '✓ Saved as #' + (d.id ?? '?');
+          this.signalName = '';
+          this.signalCorner = '';
+          // Reload the picker so it shows up immediately, which is also the
+          // proof that it went into the shared store rather than somewhere
+          // this page keeps of its own.
+          await this.reloadSignals();
+        }
+      } catch (e) {
+        this.signalSaveMsg = '✗ ' + String(e);
+      }
+      this.signalSaving = false;
+      setTimeout(() => { this.signalSaveMsg = ''; }, 6000);
     },
 
     toggleSignal(sig) {
