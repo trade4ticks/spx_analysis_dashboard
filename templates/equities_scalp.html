@@ -96,6 +96,42 @@
     .sc-state.bad { border-color:rgba(232,67,147,0.45); }
     .sc-state.bad .sc-state-date { color:#e84393; }
 
+
+    /* ── Replay ────────────────────────────────────────────────────────
+       Prefixed .rp- and kept apart from the .sc- rules: it shares this page
+       and nothing else. */
+    .rp-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+              margin-bottom:8px; font-size:11px; }
+    .rp-lab { color:var(--muted); }
+    .rp-sel { background:var(--raised); border:1px solid var(--border);
+              color:var(--text); font-size:11px; padding:3px 7px;
+              border-radius:4px; color-scheme:dark; min-width:120px; }
+    .rp-chk { display:flex; align-items:center; gap:4px; color:var(--muted);
+              cursor:pointer; }
+    .rp-spacer { flex:1; }
+    .rp-hint { font-size:10px; color:var(--muted); }
+    .rp-err { background:rgba(232,67,147,0.14); border:1px solid #e84393;
+              color:#e84393; font-size:11px; padding:6px 10px;
+              border-radius:5px; margin-bottom:8px; }
+    .rp-status { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+                 font-size:11px; margin-bottom:6px; }
+    /* THE MODE IS STATED. A dense field of dots and a dense field of candles
+       look alike at a glance and mean entirely different things. */
+    .rp-mode { font-weight:700; color:#e0a800; letter-spacing:0.2px; }
+    .rp-mode.prints { color:#6bd6a0; }
+    .rp-width { color:var(--text); font-variant-numeric:tabular-nums; }
+    .rp-readout { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .rp-readout b { color:var(--text); }
+    .rp-hover { color:#e84393; font-weight:700; min-width:74px;
+                text-align:right; font-variant-numeric:tabular-nums; }
+    .rp-stage { position:relative; height:520px; border:1px solid var(--border);
+                border-radius:6px; overflow:hidden; background:#12161b; }
+    .rp-stage canvas { display:block; width:100%; height:100%; cursor:crosshair; }
+    .rp-stage.dragging canvas { cursor:grabbing; }
+    .rp-loading { position:absolute; inset:0; display:flex;
+                  align-items:center; justify-content:center;
+                  color:var(--muted); font-size:12px; pointer-events:none; }
+
     /* ── panels ────────────────────────────────────────────────────────── */
     .sc-panel {
       background:var(--surface); border:1px solid var(--border);
@@ -2075,9 +2111,99 @@
 
       </div><!-- /research panels -->
     </div><!-- /sc-mode-research -->
+
+    <!-- ── Replay ──────────────────────────────────────────────────────────
+         The tape for a past session, read straight from parquet. Its OWN
+         Alpine scope rather than additions to equitiesScalp: it shares this
+         page and nothing else, and the scalp bundle is 83 KB with no reason
+         to grow. It is read-only, touches no database, and has no connection
+         to the live service or the scan grid.
+
+         NOT A METRIC. Four metric families have failed to identify a
+         tradeable name, each by formalising a description into something
+         subtly different. This exists so specific windows can be pointed at
+         and labelled, so the next metric is built against examples. -->
+    <div class="sc-panel" x-data="replayScope()" x-init="initReplay()">
+      <div class="sc-panel-hdr">
+        <span class="sc-panel-title">Replay</span>
+        <span class="sc-panel-sub">the tape as it happened — parquet, RTH
+          only, read-only</span>
+      </div>
+      <div class="sc-panel-body">
+
+        <div class="rp-bar">
+          <span class="rp-lab">session</span>
+          <select class="rp-sel" @change="pickDate($event.target.value)">
+            <template x-for="s in sessions" :key="s.date">
+              <option :value="s.date" :selected="s.date === date"
+                      x-text="dateLabel(s)"></option>
+            </template>
+          </select>
+          <span class="rp-lab">symbol</span>
+          <select class="rp-sel" @change="pickSymbol($event.target.value)">
+            <option value="">choose…</option>
+            <template x-for="s in symbols" :key="s">
+              <option :value="s" :selected="s === symbol" x-text="s"></option>
+            </template>
+          </select>
+          <label class="rp-chk">
+            <input type="checkbox" x-model="showNbbo" @change="fetchWindow()">
+            <span>bid / ask</span>
+          </label>
+          <span class="rp-spacer"></span>
+          <span class="rp-hint">scroll = zoom time · shift+scroll = price ·
+            drag = pan · double-click = whole session</span>
+        </div>
+
+        <template x-if="error">
+          <div class="rp-err" x-text="error"></div>
+        </template>
+
+        <div class="rp-status">
+          <span class="rp-mode" :class="mode === 'prints' ? 'prints' : ''"
+                x-text="modeLabel()"></span>
+          <span class="rp-width" x-text="widthLabel()"></span>
+          <span class="rp-spacer"></span>
+          <template x-if="stats">
+            <span class="rp-readout">
+              <span x-text="fmtInt(stats.trades_per_min)"></span> trades/min
+              &middot;
+              <span x-text="fmtInt(stats.shares_per_min)"></span> sh/min
+              &middot; p10-p90
+              <b x-text="fmt(stats.p10_p90_cents, 1)"></b>c
+              &middot; spread
+              <b x-text="fmt(stats.spread_cents_tw, 2)"></b>c
+            </span>
+          </template>
+          <span class="rp-hover" x-text="hoverLabel()"></span>
+        </div>
+
+        <div class="rp-stage" :class="dragging ? 'dragging' : ''">
+          <canvas x-ref="cv"
+                  @wheel="onWheel($event)"
+                  @mousedown="onDown($event)"
+                  @mousemove="onMove($event)"
+                  @mouseup="onUp()"
+                  @mouseleave="onLeave()"
+                  @dblclick="onDouble()"></canvas>
+          <template x-if="loading">
+            <div class="rp-loading">reading the session…</div>
+          </template>
+          <template x-if="!symbol && !loading">
+            <div class="rp-loading">pick a symbol</div>
+          </template>
+        </div>
+      </div>
+    </div>
   </div><!-- /sc-body -->
 
   <script src={{ asset('js/equities_scalp.js') }}></script>
+  <!-- Replay's own bundle, and NOT deferred. Alpine is loaded with `defer` in
+       the head; a deferred bundle here runs after Alpine has already
+       dispatched alpine:init, so the scope would never register and every
+       expression above would throw. That shipped once on the scan page and is
+       now gated in check_rendered_assets.py. -->
+  <script src={{ asset('js/replay_chart.js') }}></script>
   <!-- ── the bundle has to prove it loaded ────────────────────────────────
        This page shipped with a mangled script tag: `<script src=` with an
        empty attribute, which swallowed the following </div> and made the
