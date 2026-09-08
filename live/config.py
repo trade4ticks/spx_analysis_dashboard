@@ -77,6 +77,59 @@ def feed_is_delayed() -> bool:
 # records of six numbers, which is still nothing next to Postgres on this box.
 MAX_SYMBOLS = int(os.environ.get("LIVE_MAX_SYMBOLS", "8"))
 
+# ── the scan tier ───────────────────────────────────────────────────────────
+#
+# A SECOND CLASS OF HOLDER ON THE SAME SOCKET, and not a preference.
+#
+# Measured: the account permits ONE concurrent websocket. A second one
+# authenticates, is accepted for every subscription, and is then closed with
+# 1008 and `max_connections` -- while the service that already held the
+# connection reconnects and evicts the newcomer in turn. Two processes on one
+# key do not share the feed, they trade it back and forth, and both show a
+# plausible partial tape while doing it. So the scan cannot have a socket of
+# its own; it holds symbols on this one.
+#
+# The two tiers want different things from the same connection, which is why
+# they are counted separately rather than sharing MAX_SYMBOLS:
+#
+#   a pane   wants trades AND quotes, and fifteen minutes of both, for one of
+#            eight symbols it is drawing in full detail.
+#   the scan wants trades ONLY, for six minutes, across hundreds of symbols it
+#            is reducing to one number each.
+#
+# Measured at the open on the VPS, trades only: 600 symbols is 3,850 records
+# and 579 KB a second, 30% of one core, with the ingest loop busy 6% of
+# wall-clock. Nothing there is close to binding. The ceiling is set at 600
+# because the universe holds 740 names and the box carries it comfortably, not
+# because anything broke -- and going wide is cheap, since 50 symbols already
+# carry most of the volume and the other 550 add under half as much again.
+SCAN_MAX_SYMBOLS = int(os.environ.get("LIVE_SCAN_MAX_SYMBOLS", "600"))
+
+# SIX MINUTES, not fifteen. The longest thing the scan computes is a
+# five-minute range, and the retention only has to cover it with a margin.
+# Fifteen would be two and a half times the memory for data nothing reads.
+SCAN_RETAIN_S = float(os.environ.get("LIVE_SCAN_RETAIN_S", "360"))
+
+# Ring sizing. Symbols START at the small figure and grow toward the large one
+# as their own rate demands -- see the note in scan.py. The measured mistake
+# was a single assumed rate for every symbol, which truncated the busy names
+# and over-allocated the quiet ones by 3x at the same time.
+#
+# 512 records is a minute at 8 trades/sec, which covers most of the universe
+# outright. 72,000 is six minutes at 200/sec, which is more than the busiest
+# name printed at the open; at 1.7 MB it is affordable for the handful that
+# ever reach it.
+SCAN_RING_START = int(os.environ.get("LIVE_SCAN_RING_START", "512"))
+SCAN_RING_MAX = int(os.environ.get("LIVE_SCAN_RING_MAX", "72000"))
+
+# The scan's two lookbacks, which are deliberately different from each other.
+# See rollup_one: quiet has to be responsive because it is what changes;
+# range and volume must not be, because a bar that jumps while you glance at
+# it is worse than no bar.
+SCAN_QUIET_WINDOW_S = float(os.environ.get("LIVE_SCAN_QUIET_WINDOW_S", "60"))
+SCAN_SLOW_WINDOW_S = float(os.environ.get("LIVE_SCAN_SLOW_WINDOW_S", "300"))
+
+
 # ── the persistent watchlist ────────────────────────────────────────────────
 #
 # Symbols held whether or not a pane is watching them, so closing the browser

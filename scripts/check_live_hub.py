@@ -327,6 +327,279 @@ async def case_status_states_the_feed():
           "status does not carry configuration problems")
 
 
+# -- the scan tier -----------------------------------------------------------
+#
+# The scan holds hundreds of symbols on the SAME socket as the tape, because
+# the account permits exactly one -- measured: a second connection
+# authenticates, is accepted for every subscription, and is then closed with
+# 1008 while the incumbent reconnects and evicts it in turn.
+#
+# That makes the two tiers share a subscription set, and every case below is
+# some way that sharing goes wrong QUIETLY. None of them raises; each one
+# produces a page that looks like it is working.
+
+
+class SpySock:
+    """The upstream socket, recording what the hub sends it."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, s):
+        self.sent.append(json.loads(s))
+
+    def params(self, action=None):
+        return [m["params"] for m in self.sent
+                if action is None or m.get("action") == action]
+
+
+def _spy_hub():
+    h = Hub()
+    h._ws = SpySock()
+    return h, h._ws
+
+
+async def case_scan_subscribes_trades_only():
+    """A scan symbol takes trades and NOT quotes.
+
+    The single largest saving on the socket, and free: measured at 200
+    symbols, quotes were 68% of all records and the full subscription was 2.4x
+    the message volume of trades alone. quiet.py is trades-only by
+    construction -- a 29-share bid pulled on a thin book moves the midpoint 19
+    cents while the stock does not move -- so a quote the scan subscribed to
+    is bandwidth spent on a number it must not use.
+    """
+    h, ws = _spy_hub()
+    added, _, refused = await h.scan_set(["AAPL", "MSFT"])
+    check(sorted(added) == ["AAPL", "MSFT"], f"scan_set added {added}")
+    check(not refused, f"ordinary symbols were refused: {refused}")
+    params = ",".join(ws.params("subscribe"))
+    check("T.AAPL" in params and "T.MSFT" in params,
+          f"the scan did not subscribe to trades: {params}")
+    check("Q." not in params,
+          f"the scan subscribed to QUOTES: {params} -- 68% of the message "
+          f"volume, for records quiet.py must not look at")
+    check(len(ws.params("subscribe")) == 1,
+          f"{len(ws.params('subscribe'))} subscribe frames for two symbols; "
+          f"a 600-symbol set must go out as one message, not six hundred")
+
+
+async def case_scan_does_not_allocate_pane_buffers():
+    """A scan-only symbol gets a ring, not a fifteen-minute deque of dicts.
+
+    THE MEMORY FAILURE, and the box has been OOM-killed twice. A pane's buffer
+    keeps every field of every record because a pane draws them; at 600
+    symbols and 3,850 trades a second that shape is gigabytes, where three
+    float64 arrays are 33 MB. Nothing about a scan symbol landing in
+    self.trades would look wrong until the box died.
+    """
+    h, _ = _spy_hub()
+    await h.scan_set(["AAPL"])
+    check("AAPL" in h.scan, "the scan symbol got no ring")
+    check("AAPL" not in h.trades,
+          "a scan-only symbol allocated a pane trade deque -- at 600 symbols "
+          "that is the buffer shape that OOMs the box")
+    check("AAPL" not in h.quotes,
+          "a scan-only symbol allocated a quote deque, for quotes it never "
+          "subscribed to")
+
+
+async def case_scan_and_pane_share_a_symbol():
+    """A pane opening on a scan symbol UPGRADES it; closing DOWNGRADES it.
+
+    Both directions are silent when wrong, in opposite ways. Miss the upgrade
+    and the pane draws a tape with no quotes and no spread, which looks like a
+    thin book rather than a missing subscription. Unsubscribe both channels on
+    the pane closing and the scan row stops updating -- and a symbol that has
+    stopped printing is indistinguishable from one that has gone quiet, which
+    is the single thing the grid exists to tell apart.
+    """
+    h, ws = _spy_hub()
+    await h.scan_set(["AAPL"])
+    ws.sent.clear()
+
+    err = await h.acquire("AAPL")
+    check(err is None, f"a pane could not open on a scan symbol: {err}")
+    up = ",".join(ws.params("subscribe"))
+    check("Q.AAPL" in up,
+          f"the pane did not add quotes to a scan-held symbol: {up}")
+    check("AAPL" in h.trades, "the pane got no trade buffer of its own")
+    ws.sent.clear()
+
+    await h.release("AAPL")
+    down = ",".join(ws.params("unsubscribe"))
+    check("Q.AAPL" in down, f"the pane closing did not drop quotes: {down}")
+    check("T.AAPL" not in down,
+          f"the pane closing unsubscribed TRADES on a symbol the scan still "
+          f"holds ({down}) -- the row goes dead and reads as gone quiet")
+    check("AAPL" in h.scan, "the scan lost its symbol when a pane closed")
+    check("AAPL" not in h.trades, "the pane's deque outlived the pane")
+
+
+async def case_scan_removal_spares_a_watched_symbol():
+    """Dropping a symbol from the scan must not unsubscribe a pane's."""
+    h, ws = _spy_hub()
+    await h.scan_set(["AAPL"])
+    await h.acquire("AAPL")
+    ws.sent.clear()
+
+    _, dropped, _ = await h.scan_set([])
+    check(dropped == ["AAPL"], f"scan_set([]) dropped {dropped}")
+    check("AAPL" not in h.scan, "the scan kept a symbol it was told to drop")
+    check(not ws.params("unsubscribe"),
+          f"the scan unsubscribed a symbol a pane is watching: "
+          f"{ws.params('unsubscribe')}")
+    check("AAPL" in h.refs, "the pane lost its reference")
+
+
+async def case_scan_cap_refuses_with_a_reason():
+    """Past the cap is refused and SAID, never silently truncated."""
+    h, _ = _spy_hub()
+    n = config.SCAN_MAX_SYMBOLS
+    _, _, refused = await h.scan_set([f"S{i}" for i in range(n + 5)])
+    check(len(h.scan) == n,
+          f"{len(h.scan)} symbols held against a cap of {n}")
+    check(len(refused) == 5,
+          f"{len(refused)} refusals for 5 symbols past the cap")
+    check(all("cap" in r.lower() for r in refused),
+          f"a refusal past the cap does not say why: {refused[:2]}")
+
+
+async def case_scan_reconnect_restores_both_tiers():
+    """A reconnect restores the scan too, and with the right channels.
+
+    The server remembers nothing after a drop. Restore only the panes and the
+    grid freezes with every row looking quiet; restore the scan with quotes
+    and the saving that justifies the tier is gone. Both are invisible from
+    the page.
+    """
+    sent = []
+
+    class FakeWS:
+        async def send(self, s): sent.append(json.loads(s))
+        def __aiter__(self): return self
+        async def __anext__(self): raise StopAsyncIteration
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    h = Hub()
+    await h.scan_set(["AAPL", "MSFT"])
+    await h.acquire("FDX")
+    sent.clear()
+
+    import live.hub as hubmod
+    real = hubmod.websockets.connect
+    hubmod.websockets.connect = lambda *a, **k: FakeWS()
+    try:
+        await h._session()
+    finally:
+        hubmod.websockets.connect = real
+
+    params = ",".join(m["params"] for m in sent
+                      if m.get("action") == "subscribe")
+    for sym in ("AAPL", "MSFT"):
+        check(f"T.{sym}" in params,
+              f"the scan symbol {sym} was not resubscribed after a drop -- "
+              f"the grid freezes and every row reads as quiet")
+        check(f"Q.{sym}" not in params,
+              f"the scan symbol {sym} came back WITH quotes: {params}")
+    check("T.FDX" in params and "Q.FDX" in params,
+          f"the pane symbol lost a channel on reconnect: {params}")
+
+
+async def case_scan_ingest_routes_to_both_stores():
+    """A trade reaches every tier holding its symbol, and only those."""
+    h, _ = _spy_hub()
+    await h.scan_set(["AAPL", "MSFT"])
+    await h.acquire("AAPL")                    # held by both
+    await h.acquire("FDX")                     # pane only
+    now = time.time() * 1000
+    h._ingest(json.dumps([trade("AAPL", now, 100.0, 5),
+                          trade("MSFT", now, 200.0, 7),
+                          trade("FDX", now, 300.0, 9)]))
+
+    check(h.scan["AAPL"].n == 1 and len(h.trades["AAPL"]) == 1,
+          f"a symbol held by both tiers reached {h.scan['AAPL'].n} rings and "
+          f"{len(h.trades['AAPL'])} deques; both must see it")
+    check(h.scan["MSFT"].n == 1,
+          "a scan-only symbol's trade did not reach its ring")
+    check("MSFT" not in h.trades,
+          "a scan-only trade allocated a pane deque on arrival")
+    check("FDX" not in h.scan and len(h.trades["FDX"]) == 1,
+          "a pane-only trade leaked into the scan store")
+    check(h.scan["AAPL"].p[0] == 100.0 and h.scan["AAPL"].s[0] == 5,
+          f"the ring stored the wrong fields: p={h.scan['AAPL'].p[0]} "
+          f"s={h.scan['AAPL'].s[0]}")
+
+
+async def case_scan_state_computes_something():
+    """scan_state returns a real ratio, not a column of NaN.
+
+    THE FAILURE THIS EXISTS FOR has happened in this project before: a
+    computation that quietly returns nothing is faster than one that works, so
+    nothing downstream complains and the grid renders every cell the same
+    colour -- which on a quietness grid reads as a market with nothing
+    happening in it.
+
+    So the tape is synthetic and the answer is known: a name whose level is
+    still must score lower than one that shifted twenty cents.
+    """
+    h, _ = _spy_hub()
+    await h.scan_set(["STILL", "MOVED"])
+    now = time.time()
+    msgs = []
+    for k in range(400):
+        age = 300.0 * (1.0 - k / 400.0)
+        t_ms = (now - age) * 1000.0
+        jitter = 0.01 * ((k % 7) - 3)
+        msgs.append(trade("STILL", t_ms, 100.0 + jitter, 100))
+        msgs.append(trade("MOVED", t_ms,
+                          100.0 + jitter + (0.20 if age < 20.0 else 0.0), 100))
+    h._ingest(json.dumps(msgs))
+
+    st = h.scan_state(now)
+    check(set(st) == {"STILL", "MOVED"}, f"scan_state returned {sorted(st)}")
+    for sym in ("STILL", "MOVED"):
+        ratio, range_c, dollars, n = st[sym]
+        check(ratio == ratio,
+              f"{sym} produced a NaN quiet ratio -- the rollup is computing "
+              f"nothing and every cell would render identically")
+        check(range_c == range_c and range_c > 0,
+              f"{sym} produced range {range_c}, want a positive span")
+        check(dollars == dollars and dollars > 0,
+              f"{sym} produced {dollars} dollars/min, want positive")
+        check(n >= 10, f"{sym} saw {n} trades in the slow window")
+    check(st["MOVED"][0] > st["STILL"][0],
+          f"a tape that shifted 20 cents scored {st['MOVED'][0]:.3f}, no "
+          f"louder than one that did not ({st['STILL'][0]:.3f}) -- the ratio "
+          f"is not responding to the shift it exists to measure")
+    check(st["STILL"][0] < 1.0,
+          f"an unmoved tape scored {st['STILL'][0]:.3f}; a still name must "
+          f"read quiet or the grid lights up on nothing")
+
+
+async def case_scan_status_names_a_truncated_window():
+    """A ring at its ceiling losing live records must be REPORTED.
+
+    A short range bar is indistinguishable from a narrow one. This was the
+    actual finding of the capacity run -- every step evicted live records
+    against an assumed rate 2.6x too low -- and only a counter said so.
+    """
+    h, _ = _spy_hub()
+    await h.scan_set(["AAPL"])
+    buf = h.scan["AAPL"]
+    buf.cap_max = buf.cap                      # already at its ceiling
+    now = time.time() * 1000
+    for i in range(buf.cap + 20):
+        buf.push(now + i, 100.0, 1.0)          # all inside the window
+    st = h.scan_status()
+    check(st["truncated_count"] == 1 and st["truncated"] == ["AAPL"],
+          f"a truncated symbol was not named: {st}")
+    check(st["held"] == 1 and st["cap"] == config.SCAN_MAX_SYMBOLS,
+          f"scan status does not report what it holds: {st}")
+    check(st["buffer_mb"] > 0, "scan status reports no memory held")
+
+
 CASES = [
     ("no aggregation",          case_no_aggregation),
     ("odd lots survive",        case_odd_lots_survive),
@@ -339,6 +612,15 @@ CASES = [
     ("resubscribe on connect",  case_resubscribe_on_reconnect),
     ("snapshot honours window", case_snapshot_window),
     ("status names the feed",   case_status_states_the_feed),
+    ("scan takes trades only",  case_scan_subscribes_trades_only),
+    ("scan buffers are rings",  case_scan_does_not_allocate_pane_buffers),
+    ("pane up/downgrades scan", case_scan_and_pane_share_a_symbol),
+    ("scan drop spares a pane", case_scan_removal_spares_a_watched_symbol),
+    ("scan cap refuses",        case_scan_cap_refuses_with_a_reason),
+    ("reconnect: both tiers",   case_scan_reconnect_restores_both_tiers),
+    ("ingest routes by tier",   case_scan_ingest_routes_to_both_stores),
+    ("scan state computes",     case_scan_state_computes_something),
+    ("scan names truncation",   case_scan_status_names_a_truncated_window),
 ]
 
 

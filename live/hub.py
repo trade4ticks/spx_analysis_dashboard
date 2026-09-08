@@ -25,9 +25,28 @@ from collections import deque
 
 import websockets
 
+from app import scalp_quiet as quiet
 from live import config
+from live.scan import SymbolBuf, rollup_one
 
 log = logging.getLogger("live.hub")
+
+
+def _channels(sym: str, pane_held: bool) -> str:
+    """The subscription params for one symbol, given who is holding it.
+
+    A PANE-HELD SYMBOL TAKES QUOTES; A SCAN-ONLY ONE DOES NOT. This is the
+    single largest saving on the socket and it is free: measured at 200
+    symbols, quotes were 68% of all records and 2.4x the total message volume,
+    and the scan has no use for a single one of them -- quiet.py is
+    trades-only by construction.
+
+    Kept as one function because the same answer is needed in three places --
+    acquiring, releasing, and resubscribing after a reconnect -- and three
+    copies of it is how a symbol ends up subscribed to quotes nobody reads, or
+    worse, resubscribed without them after a drop.
+    """
+    return f"T.{sym},Q.{sym}" if pane_held else f"T.{sym}"
 
 
 class Hub:
@@ -49,6 +68,19 @@ class Hub:
         # Memory is the whole cost and it is small: at the 15-minute ceiling a
         # busy name is ~5,100 records, and a record is six numbers.
         self.pinned: set[str] = set()
+        # THE SCAN TIER. symbol -> its trade ring, for symbols the scan holds.
+        #
+        # A SEPARATE STORE, not more entries in self.trades, and the reason is
+        # memory rather than tidiness. A pane's deque keeps every field of
+        # every record because a pane draws them; at 600 symbols and 3,850
+        # trades a second that shape is gigabytes, where three float64 arrays
+        # are 33 MB. The tape's buffer is unchanged and still holds exactly
+        # what it held.
+        #
+        # A symbol can be in BOTH: the scan holding it does not stop a pane
+        # opening on it, and the pane closing does not take it away from the
+        # scan.
+        self.scan: dict[str, SymbolBuf] = {}
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
         # obvious set-of-tuples does not survive contact with Python.
@@ -85,12 +117,20 @@ class Hub:
                 return (f"at the {config.MAX_SYMBOLS}-symbol cap "
                         f"({', '.join(sorted(self.refs))}); close a pane first.")
             first = sym not in self.refs
+            held_by_scan = sym in self.scan
             self.refs[sym] = self.refs.get(sym, 0) + 1
             self.trades.setdefault(sym, deque())
             self.quotes.setdefault(sym, deque())
         if first:
+            # ALREADY SUBSCRIBED FOR TRADES IF THE SCAN HAS IT -- so this is
+            # an UPGRADE, and asking for quotes alone is what it must send.
+            # Re-sending T as well would be harmless upstream, but writing it
+            # that way makes the release path below look wrong: the two have
+            # to be mirror images or the downgrade drops a channel the other
+            # tier is still reading.
             await self._send({"action": "subscribe",
-                              "params": f"T.{sym},Q.{sym}"})
+                              "params": f"Q.{sym}" if held_by_scan
+                              else f"T.{sym},Q.{sym}"})
         return None
 
     async def release(self, symbol: str) -> None:
@@ -103,7 +143,96 @@ class Hub:
             self.refs.pop(sym, None)
             self.trades.pop(sym, None)
             self.quotes.pop(sym, None)
-        await self._send({"action": "unsubscribe", "params": f"T.{sym},Q.{sym}"})
+            held_by_scan = sym in self.scan
+        # THE SCAN KEEPS IT. Dropping the whole subscription because the last
+        # PANE closed would blank a row in the grid -- and worse, blank it
+        # silently, since a symbol that stops printing looks exactly like a
+        # symbol that has gone quiet, which is the one thing the page exists
+        # to tell apart. Only the quote channel goes.
+        await self._send({"action": "unsubscribe",
+                          "params": f"Q.{sym}" if held_by_scan
+                          else f"T.{sym},Q.{sym}"})
+
+    # ── the scan tier ───────────────────────────────────────────────────
+    async def scan_set(self, symbols) -> tuple[list[str], list[str], list[str]]:
+        """Replace the scan's symbol set wholesale. Returns (added, removed,
+        refused).
+
+        WHOLESALE, because that is how the page behaves: a list is pasted or
+        seeded from a query, and the answer is "hold exactly these". Building
+        it out of add/remove calls would make the intermediate states
+        reachable -- and the intermediate state of a 600-symbol replacement is
+        1,200 subscriptions, which is the one thing the connection limit makes
+        expensive to get wrong.
+
+        Symbols a PANE holds are not touched by a removal here; the scan only
+        ever drops its own claim, the same rule pins already follow.
+        """
+        want = []
+        seen = set()
+        refused = []
+        for s in symbols:
+            sym = (s or "").strip().upper()
+            if not sym or not sym.isalnum():
+                refused.append(f"{s!r} is not a symbol.")
+                continue
+            if sym in seen:
+                continue
+            if len(seen) >= config.SCAN_MAX_SYMBOLS:
+                refused.append(f"{sym}: at the "
+                               f"{config.SCAN_MAX_SYMBOLS}-symbol scan cap.")
+                continue
+            seen.add(sym)
+            want.append(sym)
+
+        async with self._lock:
+            have = set(self.scan)
+            add = [s for s in want if s not in have]
+            drop = [s for s in have if s not in seen]
+            for s in add:
+                self.scan[s] = SymbolBuf(config.SCAN_RETAIN_S,
+                                         config.SCAN_RING_START,
+                                         config.SCAN_RING_MAX)
+            for s in drop:
+                self.scan.pop(s, None)
+            # A pane still holding a dropped symbol keeps it subscribed, so
+            # its trade channel must not be unsubscribed here.
+            drop_sub = [s for s in drop if s not in self.refs]
+            add_sub = [s for s in add if s not in self.refs]
+
+        # One message each way, not one per symbol: 600 subscribe frames is a
+        # burst the socket does not need to see, and the upstream answers each
+        # with a status line.
+        if add_sub:
+            await self._send({"action": "subscribe",
+                              "params": ",".join(f"T.{s}" for s in add_sub)})
+        if drop_sub:
+            await self._send({"action": "unsubscribe",
+                              "params": ",".join(f"T.{s}" for s in drop_sub)})
+        if add or drop:
+            log.info("scan set: %d held (+%d, -%d), %d refused",
+                     len(self.scan), len(add), len(drop), len(refused))
+        return add, drop, refused
+
+    def scan_state(self, now_s: float | None = None) -> dict:
+        """Every scan symbol's current (ratio, range, dollars, trades).
+
+        ONE PASS OVER EVERY SYMBOL, and it costs ~0.8 ms each -- measured, so
+        at 600 symbols this blocks for half a second. That is why the caller
+        schedules it and this does not schedule itself: run from inside the
+        ingest loop it stalls the tape, which shares this process and redraws
+        thirty times a second.
+        """
+        now_s = time.time() if now_s is None else now_s
+        return {sym: rollup_one(buf, now_s,
+                                quiet_window_s=config.SCAN_QUIET_WINDOW_S,
+                                slow_window_s=config.SCAN_SLOW_WINDOW_S,
+                                # The VENDORED guard, not a 10 written here.
+                                # It is the trade count below which the IQR is
+                                # not believed, the pipeline owns it, and a
+                                # second copy is a threshold that drifts.
+                                min_trades=quiet.MIN_TRADES)
+                for sym, buf in self.scan.items()}
 
     # ── pins ────────────────────────────────────────────────────────────
     async def pin(self, symbol: str) -> str | None:
@@ -197,9 +326,15 @@ class Hub:
             # server remembers nothing, and a reconnect that restores the
             # socket without the subscriptions is a live-looking dead plot.
             async with self._lock:
-                syms = sorted(self.refs)
+                # BOTH TIERS, each with its own channels. Restoring only the
+                # panes would leave the scan grid frozen after a drop with
+                # every row looking merely quiet, and restoring the scan with
+                # quotes would put back the 68% of the message volume that
+                # not subscribing to them is the point of.
+                syms = sorted(set(self.refs) | set(self.scan))
+                panes = set(self.refs)
             if syms:
-                params = ",".join(f"T.{s},Q.{s}" for s in syms)
+                params = ",".join(_channels(s, s in panes) for s in syms)
                 await ws.send(json.dumps({"action": "subscribe",
                                           "params": params}))
             async for raw in ws:
@@ -224,6 +359,16 @@ class Hub:
                 continue
             if ev == "T":
                 sym = m.get("sym")
+                # THE SCAN TIER FIRST, and independently of the pane tier. A
+                # symbol can be held by both, by either, or (briefly, after a
+                # release races an in-flight frame) by neither, and the two
+                # stores must not be able to make each other's records
+                # disappear.
+                buf = self.scan.get(sym)
+                if buf is not None:
+                    ts, price, size = m.get("t"), m.get("p"), m.get("s")
+                    if ts is not None and price is not None and size is not None:
+                        buf.push(float(ts), float(price), float(size))
                 if sym in self.trades:
                     rec = {"t": m.get("t"), "p": m.get("p"), "s": m.get("s"),
                            "x": m.get("x"), "z": m.get("z"),
@@ -301,6 +446,32 @@ class Hub:
         qt = [r for r in self.quotes.get(sym, ()) if (r.get("t") or 0) >= cutoff]
         return {"symbol": sym, "trades": tr, "quotes": qt}
 
+    def scan_status(self) -> dict:
+        """What the scan tier is holding, and what it is losing.
+
+        `truncated` is the one that matters and the reason this is not just a
+        count. A ring at its ceiling that is still evicting records inside the
+        retention window is drawing a SHORT range bar, and a short range bar
+        is indistinguishable from a narrow one -- the page has to be able to
+        name the symbols it is understating rather than quietly understating
+        them. It was exactly this, unreported, that the capacity run turned
+        up: every step logged overflows against an assumed rate that was 2.6x
+        too low, and nothing but a counter said so.
+        """
+        held = len(self.scan)
+        truncated = sorted(s for s, b in self.scan.items() if b.evicted_live)
+        return {
+            "held": held,
+            "cap": config.SCAN_MAX_SYMBOLS,
+            "retain_s": config.SCAN_RETAIN_S,
+            "trades_held": sum(b.n for b in self.scan.values()),
+            "buffer_mb": sum(b.bytes_held()
+                             for b in self.scan.values()) / 1048576.0,
+            "rings_grown": sum(b.grows for b in self.scan.values()),
+            "truncated": truncated[:20],
+            "truncated_count": len(truncated),
+        }
+
     def status(self) -> dict:
         return {
             "connected": self.connected,
@@ -314,11 +485,13 @@ class Hub:
                         if self.connected_at and self.connected else 0,
             "symbols": sorted(self.refs),
             "pinned": sorted(self.pinned),
+            "scan": self.scan_status(),
             "msgs_in": self.msgs_in,
             "trades_in": self.trades_in,
             "quotes_in": self.quotes_in,
             "dropped_cap": self.dropped_cap,
-            "caps": {"symbols": config.MAX_SYMBOLS,
+            "caps": {"scan_symbols": config.SCAN_MAX_SYMBOLS,
+                     "symbols": config.MAX_SYMBOLS,
                      "window_s": config.MAX_WINDOW_S,
                      "trades": config.MAX_TRADES_PER_SYMBOL,
                      "quotes": config.MAX_QUOTES_PER_SYMBOL,
