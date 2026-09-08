@@ -1,0 +1,478 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Equities Scan — render capacity</title>
+<!--
+  HOW MANY ROWS CAN THE BROWSER DRAW, and does it need a canvas?
+
+  The Equities Scan grid is N rows x 120 minute-cells, recoloured every few
+  seconds, re-sorted as the ordering changes, and expanded into three bands
+  under the cursor. "Canvas is probably necessary past a hundred rows" is a
+  guess, and the whole reason this file exists is that the guess decides
+  whether the page is a watchlist or a scanner.
+
+  WHAT IS MEASURED, and why not just "does it feel smooth":
+
+    build      first paint of the whole grid from nothing. Paid on load and
+               on every change to the symbol set.
+    tick       ONE refresh: recolour the live column for every row. This is
+               the common case -- it happens every couple of seconds forever,
+               and it is the one that decides whether the page is usable while
+               you are reading it.
+    resort     reorder every row and repaint every cell. Happens whenever the
+               qualifying-minute ordering changes, which on a live grid is
+               often. The expensive case, and the one a tick-only benchmark
+               misses entirely.
+    frame      SUSTAINED frame time across a run of ticks, taken from
+               requestAnimationFrame rather than from the mutation call. This
+               is the only number that includes layout and paint: a DOM write
+               returns long before the browser has done the work, so timing
+               the write alone reports a DOM grid as faster than a canvas one
+               right up until it drops to four frames a second.
+
+  FOUR RENDERERS, because "DOM vs canvas" is not the real choice:
+
+    dom-all      every row in the document. What the obvious implementation
+                 does, and the one that has to be measured before it is
+                 dismissed.
+    dom-window   only the rows inside the viewport, recycled on scroll. A
+                 600-row grid is 9,600 pixels tall and shows about forty at a
+                 time, so this is DOM's actual best case rather than its
+                 naive one.
+    canvas-all   one canvas, every row drawn.
+    canvas-window only the visible rows drawn.
+
+  Hatching is drawn, not faked. A volume-gated minute renders struck out, and
+  per-cell diagonals are the one thing that is nearly free in CSS and is not
+  free on a canvas -- excluding it would flatter exactly the renderer the
+  brief expects to win.
+
+  Open it in the browser that will run the page. Headless numbers on another
+  machine are a different question from "is it smooth on my monitor".
+-->
+<style>
+  :root {
+    --bg: #14181d; --panel: #1b2027; --line: #2a313a;
+    --ink: #c8d2dc; --dim: #7c8894; --blue: #3498db; --pink: #e84393;
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 13px/1.5 "SF Mono", Menlo, Consolas, monospace; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; color: #fff; }
+  header p { margin: 0; color: var(--dim); font-size: 12px; }
+  button { background: var(--blue); color: #04121c; border: 0;
+           padding: 7px 14px; border-radius: 4px; font: inherit;
+           font-weight: 600; cursor: pointer; }
+  button:disabled { background: #33414d; color: var(--dim); cursor: default; }
+  #controls { padding: 12px 18px; display: flex; gap: 14px;
+              align-items: center; border-bottom: 1px solid var(--line); }
+  label { color: var(--dim); }
+  input { background: var(--panel); color: var(--ink);
+          border: 1px solid var(--line); border-radius: 3px;
+          padding: 4px 6px; font: inherit; width: 130px; }
+  #status { padding: 10px 18px; color: var(--pink); min-height: 19px; }
+  table { border-collapse: collapse; margin: 4px 18px 28px; font-size: 12px; }
+  th, td { padding: 4px 10px; text-align: right; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  td.bad { color: #ff6b6b; }
+  td.ok { color: #6bd6a0; }
+  /* The stage is sized like the real page: a fixed-height scroller, because
+     a grid that lays out at its natural 9,600px height is not what anybody
+     looks at and would measure a paint nobody pays for. */
+  #stage { height: 620px; overflow-y: auto; overflow-x: auto;
+           margin: 0 18px 18px; border: 1px solid var(--line);
+           background: var(--panel); position: relative; }
+  .row { display: flex; align-items: center; height: 16px; }
+  .sym { width: 62px; padding-left: 6px; color: var(--ink);
+         font-size: 11px; flex: none; }
+  .cell { width: 6px; height: 12px; margin-right: 1px; flex: none; }
+  .cell.gated { background-image: repeating-linear-gradient(
+      45deg, transparent, transparent 1px, #0009 1px, #0009 2px); }
+  canvas { display: block; }
+</style>
+
+<header>
+  <h1>Equities Scan — render capacity</h1>
+  <p>N rows &times; 120 minute-cells. Four renderers, four measurements each.
+     Sustained frame time comes from requestAnimationFrame, so it includes
+     layout and paint.</p>
+</header>
+
+<div id="controls">
+  <label>rows <input id="rows" value="50,100,200,400,600"></label>
+  <label>ticks per run <input id="ticks" value="60" style="width:60px"></label>
+  <button id="go">Run</button>
+  <span id="note" style="color:var(--dim)"></span>
+</div>
+
+<div id="status"></div>
+<table id="out"><thead><tr>
+  <th>renderer</th><th>rows</th><th>build ms</th><th>tick ms</th>
+  <th>resort ms</th><th>tick frame p95</th><th>repaint frame</th>
+  <th>repaint fps</th><th>heap MB</th><th>elements</th><th>verdict</th>
+</tr></thead><tbody></tbody></table>
+
+<div id="stage"></div>
+
+<script>
+"use strict";
+
+const COLS = 120;            // one cell per minute, two hours
+const ROW_H = 16;
+const CELL_W = 7;            // 6px + 1px gap
+const SYM_W = 68;
+
+// ── the data ────────────────────────────────────────────────────────────────
+//
+// Shaped like the real thing rather than random: most minutes are ordinary,
+// a minority are quiet, and a slice of every name is volume-gated. The mix
+// matters because the gated cells are the expensive ones to draw and a
+// uniform random fill would under-represent them.
+function makeData(n) {
+  const ratio = new Float32Array(n * COLS);
+  const gated = new Uint8Array(n * COLS);
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let i = 0; i < n * COLS; i++) {
+    ratio[i] = Math.pow(rnd(), 1.6) * 2.4;
+    gated[i] = rnd() < 0.18 ? 1 : 0;
+  }
+  const syms = [];
+  for (let i = 0; i < n; i++) {
+    let s = "";
+    let v = i;
+    for (let k = 0; k < 4; k++) { s += String.fromCharCode(65 + (v % 26)); v = (v / 26) | 0; }
+    syms.push(s);
+  }
+  return { n, ratio, gated, syms, order: Uint16Array.from(syms.keys()) };
+}
+
+// ── the colour ramp ─────────────────────────────────────────────────────────
+//
+// Bright blue quieter, dark not, a distinct dark red past 1.4. Precomputed
+// into a lookup table: computing an hsl string per cell would make the ramp
+// itself part of what is being measured, and the real page would precompute
+// it too.
+const RAMP_N = 64;
+const RAMP = new Array(RAMP_N);
+const RED = "#7a1f2b";
+for (let i = 0; i < RAMP_N; i++) {
+  const r = (i / (RAMP_N - 1)) * 2.4;
+  if (r > 1.4) { RAMP[i] = RED; continue; }
+  const k = 1 - Math.min(1, r / 1.4);            // 1 quiet, 0 loud
+  const l = 12 + k * 44;
+  const s = 30 + k * 60;
+  RAMP[i] = `hsl(204 ${s.toFixed(0)}% ${l.toFixed(0)}%)`;
+}
+const rampIdx = (r) => Math.min(RAMP_N - 1, Math.max(0, (r / 2.4 * RAMP_N) | 0));
+
+// ── renderers ───────────────────────────────────────────────────────────────
+//
+// Each exposes the same four operations so the numbers compare. `windowed`
+// asks for the rows actually on screen; `all` ignores the viewport.
+
+class DomGrid {
+  constructor(stage, data, windowed) {
+    this.stage = stage; this.data = data; this.windowed = windowed;
+    this.rows = []; this.elements = 0;
+  }
+  visibleCount() {
+    return this.windowed
+      ? Math.min(this.data.n, Math.ceil(this.stage.clientHeight / ROW_H) + 2)
+      : this.data.n;
+  }
+  build() {
+    const { data } = this;
+    this.stage.textContent = "";
+    const holder = document.createElement("div");
+    // The scroller still has to be the FULL height even when only the
+    // visible rows exist, or the scrollbar lies about how much grid there is.
+    holder.style.height = (data.n * ROW_H) + "px";
+    holder.style.position = "relative";
+    const count = this.visibleCount();
+    const frag = document.createDocumentFragment();
+    this.rows = [];
+    for (let vi = 0; vi < count; vi++) {
+      const row = document.createElement("div");
+      row.className = "row";
+      if (this.windowed) {
+        row.style.position = "absolute";
+        row.style.top = (vi * ROW_H) + "px";
+      }
+      const sym = document.createElement("span");
+      sym.className = "sym";
+      row.appendChild(sym);
+      const cells = new Array(COLS);
+      for (let c = 0; c < COLS; c++) {
+        const d = document.createElement("div");
+        d.className = "cell";
+        row.appendChild(d);
+        cells[c] = d;
+      }
+      frag.appendChild(row);
+      this.rows.push({ row, sym, cells });
+    }
+    holder.appendChild(frag);
+    this.stage.appendChild(holder);
+    this.elements = count * (COLS + 2) + 1;
+    this.paintAll();
+  }
+  paintAll() {
+    const { data } = this;
+    for (let vi = 0; vi < this.rows.length; vi++) {
+      const si = data.order[vi];
+      const r = this.rows[vi];
+      r.sym.textContent = data.syms[si];
+      const base = si * COLS;
+      for (let c = 0; c < COLS; c++) {
+        const cell = r.cells[c];
+        cell.style.background = RAMP[rampIdx(data.ratio[base + c])];
+        const g = data.gated[base + c] === 1;
+        // Touching className unconditionally is a write per cell per repaint;
+        // the real page would guard it the same way and it is not a trick.
+        if (g !== (cell.dataset.g === "1")) {
+          cell.className = g ? "cell gated" : "cell";
+          cell.dataset.g = g ? "1" : "0";
+        }
+      }
+    }
+  }
+  // ONE refresh: the live column only. This is what happens every couple of
+  // seconds, and it is much cheaper than a repaint -- reporting the repaint
+  // cost as the tick cost would condemn the DOM for work it does not do.
+  tick(col) {
+    const { data } = this;
+    for (let vi = 0; vi < this.rows.length; vi++) {
+      const si = data.order[vi];
+      const cell = this.rows[vi].cells[col];
+      cell.style.background = RAMP[rampIdx(data.ratio[si * COLS + col])];
+    }
+  }
+  resort(order) { this.data.order = order; this.paintAll(); }
+  destroy() { this.stage.textContent = ""; }
+}
+
+class CanvasGrid {
+  constructor(stage, data, windowed) {
+    this.stage = stage; this.data = data; this.windowed = windowed;
+    this.elements = 1;
+  }
+  visibleCount() {
+    return this.windowed
+      ? Math.min(this.data.n, Math.ceil(this.stage.clientHeight / ROW_H) + 2)
+      : this.data.n;
+  }
+  build() {
+    const { data } = this;
+    this.stage.textContent = "";
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const h = (this.windowed ? this.visibleCount() : data.n) * ROW_H;
+    const w = SYM_W + COLS * CELL_W;
+    const cv = document.createElement("canvas");
+    cv.width = w * dpr; cv.height = h * dpr;
+    cv.style.width = w + "px"; cv.style.height = h + "px";
+    this.stage.appendChild(cv);
+    const ctx = cv.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.font = "11px monospace";
+    ctx.textBaseline = "middle";
+    this.cv = cv; this.ctx = ctx;
+    this.paintAll();
+  }
+  paintAll() {
+    const { data, ctx } = this;
+    const count = this.visibleCount();
+    ctx.fillStyle = "#1b2027";
+    ctx.fillRect(0, 0, this.cv.width, this.cv.height);
+    for (let vi = 0; vi < count; vi++) this.paintRow(vi);
+  }
+  paintRow(vi) {
+    const { data, ctx } = this;
+    const si = data.order[vi];
+    const y = vi * ROW_H;
+    ctx.fillStyle = "#c8d2dc";
+    ctx.fillText(data.syms[si], 6, y + ROW_H / 2);
+    const base = si * COLS;
+    for (let c = 0; c < COLS; c++) {
+      const x = SYM_W + c * CELL_W;
+      ctx.fillStyle = RAMP[rampIdx(data.ratio[base + c])];
+      ctx.fillRect(x, y + 2, 6, 12);
+      if (data.gated[base + c] === 1) this.hatch(x, y + 2);
+    }
+  }
+  // A struck-out minute, drawn. Three diagonals in a 6x12 cell -- cheap per
+  // cell and not free at 72,000 of them, which is exactly the sort of cost
+  // that only shows up at the row counts this file exists to find.
+  hatch(x, y) {
+    const ctx = this.ctx;
+    ctx.strokeStyle = "rgba(0,0,0,0.62)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let k = -6; k < 12; k += 4) {
+      ctx.moveTo(x, y + k + 6);
+      ctx.lineTo(x + 6, y + k);
+    }
+    ctx.stroke();
+  }
+  tick(col) {
+    const { data, ctx } = this;
+    const count = this.visibleCount();
+    const x = SYM_W + col * CELL_W;
+    for (let vi = 0; vi < count; vi++) {
+      const si = data.order[vi];
+      const y = vi * ROW_H + 2;
+      ctx.fillStyle = RAMP[rampIdx(data.ratio[si * COLS + col])];
+      ctx.fillRect(x, y, 6, 12);
+      if (data.gated[si * COLS + col] === 1) this.hatch(x, y);
+    }
+  }
+  resort(order) { this.data.order = order; this.paintAll(); }
+  destroy() { this.stage.textContent = ""; }
+}
+
+// ── timing ──────────────────────────────────────────────────────────────────
+
+const raf = () => new Promise(requestAnimationFrame);
+
+// A DOM write returns before the browser has laid anything out, so timing the
+// call alone is meaningless. Reading a geometry property forces the pending
+// layout to happen NOW, inside the measurement.
+function flush(stage) { return stage.getBoundingClientRect().height; }
+
+async function timed(stage, fn) {
+  const t0 = performance.now();
+  fn();
+  flush(stage);
+  const t1 = performance.now();
+  await raf();
+  return t1 - t0;
+}
+
+// The honest one. Work is issued one unit per animation frame and the FRAME
+// INTERVALS are what is recorded -- if the renderer cannot keep up, frames
+// stretch, and that shows here and nowhere else.
+async function sustained(grid, n, work) {
+  const gaps = [];
+  let last = performance.now();
+  await raf();
+  for (let i = 0; i < n; i++) {
+    work(i);
+    await raf();
+    const now = performance.now();
+    gaps.push(now - last);
+    last = now;
+  }
+  gaps.shift();                       // the first gap includes the warm-up
+  return gaps.sort((a, b) => a - b);
+}
+
+// WHY THE TICK TEST IS NOT ENOUGH, and why a second sustained case exists.
+//
+// One tick is one column, and it turned out to be free in all four renderers
+// at every row count -- every row of the first run came back at a flat 16.7 ms
+// and a verdict of "smooth". That is a real result, but on its own it is
+// indistinguishable from an instrument that cannot report anything else, and
+// a benchmark that has never once said "slow" has not been shown to work.
+//
+// So the grid is also driven at its WORST case: a full repaint every frame,
+// which is what a resort costs and 30x more often than one could happen. Two
+// things come out of it. The renderers separate, giving an actual headroom
+// figure rather than a shared ceiling. And the instrument demonstrates it can
+// register a stall, which is what makes the flat 16.7 ms above meaningful
+// rather than merely reassuring.
+async function sustainedRepaint(grid, n) {
+  return sustained(grid, n, () => grid.paintAll());
+}
+
+const pct = (sorted, q) =>
+  sorted.length ? sorted[Math.min(sorted.length - 1,
+                                  Math.floor(sorted.length * q))] : NaN;
+
+const RENDERERS = [
+  ["dom-all", (s, d) => new DomGrid(s, d, false)],
+  ["dom-window", (s, d) => new DomGrid(s, d, true)],
+  ["canvas-all", (s, d) => new CanvasGrid(s, d, false)],
+  ["canvas-window", (s, d) => new CanvasGrid(s, d, true)],
+];
+
+async function run() {
+  const stage = document.getElementById("stage");
+  const tbody = document.querySelector("#out tbody");
+  const status = document.getElementById("status");
+  const go = document.getElementById("go");
+  go.disabled = true;
+  tbody.textContent = "";
+  const counts = document.getElementById("rows").value
+    .split(",").map((x) => parseInt(x.trim(), 10)).filter((x) => x > 0);
+  const ticks = parseInt(document.getElementById("ticks").value, 10) || 60;
+  const results = [];
+
+  for (const [name, make] of RENDERERS) {
+    for (const n of counts) {
+      status.textContent = `${name} — ${n} rows…`;
+      await raf();
+      const data = makeData(n);
+      const grid = make(stage, data);
+      const build = await timed(stage, () => grid.build());
+      // A few throwaway ticks: the first touch of a fresh subtree pays for
+      // style resolution that steady state does not.
+      for (let i = 0; i < 3; i++) { grid.tick(COLS - 1); await raf(); }
+      const tick = await timed(stage, () => grid.tick(COLS - 1));
+      const shuffled = Uint16Array.from(data.order);
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        const t = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = t;
+      }
+      const resort = await timed(stage, () => grid.resort(shuffled));
+      const heap = (performance.memory || {}).usedJSHeapSize || 0;
+      const gaps = await sustained(grid, ticks, (i) => grid.tick(COLS - 1 - (i % 3)));
+      // Fewer frames for the repaint case: at the row counts where it hurts,
+      // one frame is a third of a second and sixty of them is a twenty-second
+      // stall for a number that is already unambiguous by the tenth.
+      const rgaps = await sustainedRepaint(grid, Math.min(24, ticks));
+      grid.destroy();
+
+      const p50 = pct(gaps, 0.5), p95 = pct(gaps, 0.95);
+      const r = { renderer: name, rows: n, build, tick, resort,
+                  frame_p50: p50, frame_p95: p95, fps: 1000 / p50,
+                  repaint_p50: pct(rgaps, 0.5), repaint_p95: pct(rgaps, 0.95),
+                  repaint_fps: 1000 / pct(rgaps, 0.5),
+                  heap_mb: heap / 1048576,
+                  elements: grid.elements };
+      results.push(r);
+      addRow(tbody, r);
+      await raf();
+    }
+  }
+  status.textContent = "";
+  go.disabled = false;
+  window.__benchResults = results;
+  window.__benchDone = true;
+}
+
+function addRow(tbody, r) {
+  // 60 fps is a 16.7 ms frame. Anything at or under it is smooth; past 33 ms
+  // (30 fps) a glance at the grid catches it mid-redraw, which for a page
+  // whose whole job is being glanceable is the point of failure.
+  const verdict = r.frame_p95 <= 17 ? "smooth"
+                : r.frame_p95 <= 34 ? "visible"
+                : r.frame_p95 <= 100 ? "choppy" : "unusable";
+  const cls = r.frame_p95 <= 17 ? "ok" : r.frame_p95 > 34 ? "bad" : "";
+  const tr = document.createElement("tr");
+  const cells = [r.renderer, r.rows, r.build.toFixed(1), r.tick.toFixed(2),
+                 r.resort.toFixed(1), r.frame_p95.toFixed(1),
+                 r.repaint_p50.toFixed(1), r.repaint_fps.toFixed(0),
+                 r.heap_mb ? r.heap_mb.toFixed(0) : "-",
+                 r.elements.toLocaleString(), verdict];
+  cells.forEach((v, i) => {
+    const td = document.createElement("td");
+    td.textContent = v;
+    if (i === 5 || i === 10) td.className = cls;
+    tr.appendChild(td);
+  });
+  tbody.appendChild(tr);
+}
+
+document.getElementById("go").addEventListener("click", run);
+if (location.search.includes("auto")) run();
+</script>

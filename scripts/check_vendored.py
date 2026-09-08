@@ -61,6 +61,18 @@ VERBATIM = [
     # anchor in METRICS.md, which is what makes every column header a link.
     # It also has to stay in step with the metric set for the same reason.
     ("app/scalp_metric_docs.py", "scalp/metric_docs.py"),
+    # quiet.py is the one the LIVE grid runs, not just a batch job. The
+    # Equities Scan page colours every cell by shift_over_range and the
+    # pipeline stores shift_over_range_median_60s from the same function; if
+    # those two ever came from separate code, a disagreement between the grid
+    # and the historical metric would be unattributable -- I could never tell
+    # whether the name had changed or the arithmetic had. Copied WHOLE for the
+    # same reason as the two above: a trimmed copy cannot be diffed.
+    #
+    # The source was written to be vendored -- numpy and pandas only, no
+    # scalp-internal imports, every constant an argument -- and upstream has
+    # its own AST test keeping it that way.
+    ("app/scalp_quiet.py", "scalp/quiet.py"),
 ]
 
 
