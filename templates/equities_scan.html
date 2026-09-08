@@ -107,6 +107,18 @@
       position:absolute; right:3px; top:0; line-height:11px; font-size:9px;
       color:#fff; font-variant-numeric:tabular-nums; text-shadow:0 0 3px #000;
     }
+    /* The spread column. Two numbers in one cell — cents then bps — because
+       they are one quantity read two ways and splitting them into two columns
+       would cost width the grid needs. */
+    .sc-spread {
+      width:84px; flex:none; text-align:right; padding-right:10px;
+      font-size:10px; font-variant-numeric:tabular-nums; color:var(--text);
+    }
+    .sc-spread .bps { color:var(--muted); margin-left:5px; }
+    /* Unknown is not the same as tight, and must not look like it. A symbol
+       whose book has not quoted yet reads dim and passes the filter; one that
+       is genuinely inside the floor is gone from the list entirely. */
+    .sc-spread.unknown { color:var(--muted); font-style:italic; }
     .sc-cells { flex:none; display:flex; height:13px; }
     .sc-cell { width:6px; margin-right:1px; height:13px; }
     /* A GATED MINUTE IS STRUCK OUT, whatever the ratio says. A dead name is
@@ -199,6 +211,22 @@
         <span class="sc-num" x-text="fmtDollars(volumeFloor) + '/min'"></span>
       </div>
 
+      <!-- THE SPREAD FLOOR, beside the volume floor, because the two are the
+           same kind of control: a minimum below which a name has nothing to
+           capture however it behaves. INTC sits near the top of the grid on
+           1-2 cents, and no amount of tuning the quiet ratio removes it —
+           quietness is not what is wrong with it. -->
+      <div class="sc-grp sep">
+        <span class="sc-lab">spread &ge;</span>
+        <input type="range" min="0" max="30" step="0.5"
+               x-model.number="minSpreadCents" @input="onSpread()">
+        <span class="sc-num" x-text="minSpreadCents.toFixed(1) + 'c'"></span>
+        <input type="range" min="0" max="40" step="0.5"
+               x-model.number="minSpreadBps" @input="onSpread()">
+        <span class="sc-num" x-text="minSpreadBps.toFixed(1) + ' bps'"></span>
+        <span class="sc-note" x-text="spreadSummary()"></span>
+      </div>
+
       <div class="sc-grp sep">
         <span class="sc-lab">quiet anchors</span>
         <input type="range" min="0" max="2.4" step="0.01"
@@ -234,6 +262,7 @@
       <div style="width:62px;text-align:right;padding-right:8px">price</div>
       <div style="width:96px">range (p10-p90)</div>
       <div style="width:96px">$/min</div>
+      <div style="width:84px;text-align:right;padding-right:10px">spread</div>
       <div :style="'width:' + gridWidth() + 'px'"
            x-text="'last ' + gridMinutes + ' minutes'"></div>
       <div style="width:34px;margin-left:8px">now</div>
@@ -268,6 +297,14 @@
                      :style="'width:' + volPct(r) + '%'"></div>
                 <div class="sc-bar-txt" x-text="fmtDollars(r.dollars)"></div>
               </div>
+            </div>
+            <!-- BOTH UNITS, because they answer different questions and the
+                 user screens on both: cents is what is captured on a round
+                 trip, bps is whether the name is wide FOR ITS PRICE. -->
+            <div class="sc-spread" :class="spreadClass(r)"
+                 :title="spreadTitle(r)">
+              <span x-text="fmtSpreadC(r.spreadC)"></span>
+              <span class="bps" x-text="fmtSpreadB(r.spreadB)"></span>
             </div>
             <div class="sc-cells" x-html="r.html"></div>
             <div class="sc-now" :style="'background:' + nowColour(r)"

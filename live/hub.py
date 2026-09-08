@@ -28,25 +28,36 @@ import websockets
 from app import scalp_quiet as quiet
 from live import config
 from live.scan import SymbolBuf, rollup_all
+from live.scan_spread import SpreadAccum
 
 log = logging.getLogger("live.hub")
 
 
-def _channels(sym: str, pane_held: bool) -> str:
-    """The subscription params for one symbol, given who is holding it.
+def _channels(sym: str) -> str:
+    """The subscription params for one symbol. Both channels, for everything.
 
-    A PANE-HELD SYMBOL TAKES QUOTES; A SCAN-ONLY ONE DOES NOT. This is the
-    single largest saving on the socket and it is free: measured at 200
-    symbols, quotes were 68% of all records and 2.4x the total message volume,
-    and the scan has no use for a single one of them -- quiet.py is
-    trades-only by construction.
+    THIS USED TO DEPEND ON WHO HELD THE SYMBOL, and the saving was real:
+    measured at 200 symbols, quotes were 68% of all records and 2.4x the
+    message volume, and a trades-only scan tier avoided all of it.
 
-    Kept as one function because the same answer is needed in three places --
-    acquiring, releasing, and resubscribing after a reconnect -- and three
-    copies of it is how a symbol ends up subscribed to quotes nobody reads, or
-    worse, resubscribed without them after a drop.
+    The scan now needs quotes, so that saving is gone -- deliberately, not by
+    accident. Quoted spread is the metric the universe is screened on and
+    there is no source for a CURRENT bid-ask width other than the quote
+    channel; a name on a 1-2 cent spread has nothing to capture however quiet
+    it is, and no amount of tuning the ratio removes it. The measured price is
+    ~3.1x the records, ingest busy from ~6% to ~19%, and CPU from ~35% to
+    ~48% of one core at 430 symbols. Nothing saturates.
+
+    What the tier still buys is the SHAPE: three float64 arrays per symbol
+    instead of a deque of dicts, six minutes of retention instead of fifteen,
+    and an accumulator for spread rather than a stored quote tape -- ~100 KB
+    across 430 symbols against ~42 MB.
+
+    Kept as a function, though it now takes no decision, because the same
+    answer is needed in two places and a literal in each is how a symbol comes
+    back from a reconnect missing a channel.
     """
-    return f"T.{sym},Q.{sym}" if pane_held else f"T.{sym}"
+    return f"T.{sym},Q.{sym}"
 
 
 class Hub:
@@ -81,6 +92,11 @@ class Hub:
         # opening on it, and the pane closing does not take it away from the
         # scan.
         self.scan: dict[str, SymbolBuf] = {}
+        # symbol -> its spread accumulator. SEPARATE FROM THE TRADE RING
+        # because it holds nothing per quote: spread over a window is an
+        # aggregate, so what is kept is the duration-weighted sums per minute
+        # -- ~240 bytes a symbol against ~42 MB for a quote tape at 430.
+        self.spread: dict[str, SpreadAccum] = {}
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
         # obvious set-of-tuples does not survive contact with Python.
@@ -121,16 +137,14 @@ class Hub:
             self.refs[sym] = self.refs.get(sym, 0) + 1
             self.trades.setdefault(sym, deque())
             self.quotes.setdefault(sym, deque())
-        if first:
-            # ALREADY SUBSCRIBED FOR TRADES IF THE SCAN HAS IT -- so this is
-            # an UPGRADE, and asking for quotes alone is what it must send.
-            # Re-sending T as well would be harmless upstream, but writing it
-            # that way makes the release path below look wrong: the two have
-            # to be mirror images or the downgrade drops a channel the other
-            # tier is still reading.
+        # NOTHING TO SEND IF THE SCAN ALREADY HOLDS IT. Both tiers now take
+        # both channels, so a pane opening on a scan symbol needs no upgrade
+        # -- the subscription it wants is already live. Re-sending would be
+        # harmless upstream but would make the release path below look wrong,
+        # and the two have to stay mirror images of each other.
+        if first and not held_by_scan:
             await self._send({"action": "subscribe",
-                              "params": f"Q.{sym}" if held_by_scan
-                              else f"T.{sym},Q.{sym}"})
+                              "params": _channels(sym)})
         return None
 
     async def release(self, symbol: str) -> None:
@@ -144,14 +158,15 @@ class Hub:
             self.trades.pop(sym, None)
             self.quotes.pop(sym, None)
             held_by_scan = sym in self.scan
-        # THE SCAN KEEPS IT. Dropping the whole subscription because the last
-        # PANE closed would blank a row in the grid -- and worse, blank it
-        # silently, since a symbol that stops printing looks exactly like a
-        # symbol that has gone quiet, which is the one thing the page exists
-        # to tell apart. Only the quote channel goes.
-        await self._send({"action": "unsubscribe",
-                          "params": f"Q.{sym}" if held_by_scan
-                          else f"T.{sym},Q.{sym}"})
+        # THE SCAN KEEPS IT, WHOLE. Dropping any part of the subscription
+        # because the last PANE closed would blank a row in the grid -- and
+        # blank it silently, since a symbol that stops printing looks exactly
+        # like a symbol that has gone quiet, which is the one thing the page
+        # exists to tell apart. Now that the scan takes quotes too, that means
+        # sending nothing at all rather than dropping the quote channel.
+        if not held_by_scan:
+            await self._send({"action": "unsubscribe",
+                              "params": _channels(sym)})
 
     # ── the scan tier ───────────────────────────────────────────────────
     async def scan_set(self, symbols) -> tuple[list[str], list[str], list[str]]:
@@ -193,8 +208,15 @@ class Hub:
                 self.scan[s] = SymbolBuf(config.SCAN_RETAIN_S,
                                          config.SCAN_RING_START,
                                          config.SCAN_RING_MAX)
+                # Minutes covering the slow window plus a margin, so a
+                # five-minute query never asks for a bucket the ring has
+                # already reused.
+                self.spread[s] = SpreadAccum(
+                    minutes=int(config.SCAN_SLOW_WINDOW_S // 60) + 3,
+                    cap_dwell_s=config.SCAN_QUOTE_DWELL_CAP_S)
             for s in drop:
                 self.scan.pop(s, None)
+                self.spread.pop(s, None)
             # A pane still holding a dropped symbol keeps it subscribed, so
             # its trade channel must not be unsubscribed here.
             drop_sub = [s for s in drop if s not in self.refs]
@@ -205,17 +227,26 @@ class Hub:
         # with a status line.
         if add_sub:
             await self._send({"action": "subscribe",
-                              "params": ",".join(f"T.{s}" for s in add_sub)})
+                              "params": ",".join(_channels(s)
+                                                 for s in add_sub)})
         if drop_sub:
             await self._send({"action": "unsubscribe",
-                              "params": ",".join(f"T.{s}" for s in drop_sub)})
+                              "params": ",".join(_channels(s)
+                                                 for s in drop_sub)})
         if add or drop:
             log.info("scan set: %d held (+%d, -%d), %d refused",
                      len(self.scan), len(add), len(drop), len(refused))
         return add, drop, refused
 
     async def scan_state(self, now_s: float | None = None) -> dict:
-        """Every scan symbol's current (ratio, range, dollars, trades).
+        """Every scan symbol's current state, as an 8-tuple:
+
+            ratio, range_cents, dollars_per_min, trades,
+            spread_cents_tw, spread_bps_tw, quote_observations, crossed_share
+
+        The first four are the TRADE rollup and are what a history cell holds.
+        The last four come from the quote accumulator and are LIVE ONLY -- see
+        ScanHistory.write for why spread is not stored per minute.
 
         ASYNC, AND THAT IS THE POINT. One pass costs ~0.85 ms a symbol, so 430
         symbols is 367 ms -- and as a plain loop that is 367 ms in which the
@@ -228,7 +259,7 @@ class Hub:
         blocking twin sitting next to this one is a footgun with a docstring
         telling you not to touch it, which is not a guard.
         """
-        return await rollup_all(
+        state = await rollup_all(
             self.scan, now_s,
             quiet_window_s=config.SCAN_QUIET_WINDOW_S,
             slow_window_s=config.SCAN_SLOW_WINDOW_S,
@@ -237,6 +268,20 @@ class Hub:
             # second copy is a threshold that drifts.
             min_trades=quiet.MIN_TRADES,
             slice_s=config.SCAN_ROLLUP_SLICE_MS / 1000.0)
+        # SPREAD IS APPENDED, NOT FOLDED INTO rollup_all. The rollup is the
+        # TRADE arithmetic and runs the vendored quiet.py; spread comes from
+        # quotes and a different accumulator, and reading it is summing five
+        # floats per symbol rather than a numpy pass. Keeping them apart is
+        # what lets the capacity harness go on measuring the trade rollup as
+        # the thing it was measuring before.
+        now_ms = (time.time() if now_s is None else now_s) * 1000.0
+        win = config.SCAN_SLOW_WINDOW_S
+        for sym, cell in state.items():
+            acc = self.spread.get(sym)
+            state[sym] = cell + (acc.window(now_ms, win) if acc is not None
+                                 else (float("nan"), float("nan"), 0,
+                                       float("nan")))
+        return state
 
     # ── pins ────────────────────────────────────────────────────────────
     async def pin(self, symbol: str) -> str | None:
@@ -336,9 +381,8 @@ class Hub:
                 # quotes would put back the 68% of the message volume that
                 # not subscribing to them is the point of.
                 syms = sorted(set(self.refs) | set(self.scan))
-                panes = set(self.refs)
             if syms:
-                params = ",".join(_channels(s, s in panes) for s in syms)
+                params = ",".join(_channels(s) for s in syms)
                 await ws.send(json.dumps({"action": "subscribe",
                                           "params": params}))
             async for raw in ws:
@@ -390,6 +434,14 @@ class Hub:
                             sym, {"t": [], "q": []})["t"].append(rec)
             elif ev == "Q":
                 sym = m.get("sym")
+                # THE SCAN TIER FIRST, and independently of the pane tier --
+                # the same rule the trade path follows. A symbol can be held
+                # by both, by either, or briefly by neither.
+                acc = self.spread.get(sym)
+                if acc is not None:
+                    ts, bp, ap = m.get("t"), m.get("bp"), m.get("ap")
+                    if ts is not None and bp is not None and ap is not None:
+                        acc.push(float(ts), float(bp), float(ap))
                 if sym in self.quotes:
                     rec = {"t": m.get("t"), "bp": m.get("bp"),
                            "ap": m.get("ap"), "bs": m.get("bs"),
@@ -471,6 +523,8 @@ class Hub:
             "trades_held": sum(b.n for b in self.scan.values()),
             "buffer_mb": sum(b.bytes_held()
                              for b in self.scan.values()) / 1048576.0,
+            "spread_mb": sum(a.bytes_held()
+                             for a in self.spread.values()) / 1048576.0,
             "rings_grown": sum(b.grows for b in self.scan.values()),
             "truncated": truncated[:20],
             "truncated_count": len(truncated),

@@ -121,11 +121,23 @@ class ScanHistory:
         return row
 
     def write(self, symbol: str, idx: int, cell) -> None:
-        """One finished minute. Out-of-range indices are ignored, not raised.
+        """One finished minute: exactly CELL_WIDTH numbers, no more.
 
-        A rollup that lands a second either side of the session window is an
-        ordinary thing at 04:00 and 20:00, and raising there would take the
-        whole minute task down for a cell nobody will look at.
+        SPREAD IS NOT STORED HERE. It is a live per-symbol screen and a
+        column, not something the grid draws per minute -- the cells are
+        coloured by quietness and the expanded row has three bands, none of
+        them spread. Widening every stored minute by a third to carry a value
+        only ever read at `now` would cost a third of the session file and
+        invalidate every file already on disk, for nothing anyone looks at.
+
+        The caller therefore passes the trade rollup's leading fields and
+        leaves the quote fields behind. If that ever needs to change, the
+        shape check in load() is what will catch the old files.
+
+        Out-of-range indices are ignored rather than raised: a rollup landing
+        a second either side of the session window is ordinary at 04:00 and
+        20:00, and raising there would take the whole minute task down for a
+        cell nobody will look at.
         """
         if idx is None or not (0 <= idx < SESSION_MINUTES):
             return

@@ -44,6 +44,14 @@ document.addEventListener('alpine:init', () => {
     ratioHigh: 1.20,
     pct: { p10: null, p50: null, p90: null },
 
+    // Both MINIMA: below either, a name has nothing to capture however it
+    // behaves. Defaults come from /scan/defaults so the cents figure is the
+    // pipeline's own min_spread_cents rather than a number invented here.
+    minSpreadCents: 5,
+    minSpreadBps: 0,
+    hiddenBySpread: 0,
+    unknownSpread: 0,
+
     pinned: {},
     hovered: null,
     showManual: false,
@@ -89,6 +97,10 @@ document.addEventListener('alpine:init', () => {
           this.ratioLow = d.ratio_low;
           this.ratioHigh = d.ratio_high;
         }
+        if (!this.hasStored('spread')) {
+          this.minSpreadCents = d.min_spread_cents;
+          this.minSpreadBps = d.min_spread_bps;
+        }
       } catch (e) {
         this.warning = 'could not read /scan/defaults: ' + e;
       }
@@ -113,6 +125,8 @@ document.addEventListener('alpine:init', () => {
         localStorage.setItem(this.storeKey('symbols'), JSON.stringify(this.held));
         localStorage.setItem(this.storeKey('seed'),
           JSON.stringify([this.seedMinRange, this.seedMinDollar]));
+        localStorage.setItem(this.storeKey('spread'),
+          JSON.stringify([this.minSpreadCents, this.minSpreadBps]));
       } catch (e) { /* private mode, quota — the page still works */ }
     },
     restore() {
@@ -133,6 +147,12 @@ document.addEventListener('alpine:init', () => {
           const v = JSON.parse(s);
           this.seedMinRange = v[0];
           this.seedMinDollar = v[1];
+        }
+        const sp = localStorage.getItem(this.storeKey('spread'));
+        if (sp) {
+          const v = JSON.parse(sp);
+          this.minSpreadCents = v[0];
+          this.minSpreadBps = v[1];
         }
       } catch (e) { /* ignore — defaults are fine */ }
     },
@@ -215,6 +235,8 @@ document.addEventListener('alpine:init', () => {
         row.dollars = v[2];
         row.trades = v[3];
         row.price = v[4];
+        row.spreadC = v[5];
+        row.spreadB = v[6];
       }
       this.recomputePercentiles();
       this.resort();
@@ -273,7 +295,7 @@ document.addEventListener('alpine:init', () => {
       for (const sym of this.held) {
         const row = {
           sym: sym, ratio: null, range: null, dollars: null, trades: null,
-          price: null, qual: 0, html: '',
+          price: null, spreadC: null, spreadB: null, qual: 0, html: '',
         };
         rows.push(row);
         this.bySym[sym] = row;
@@ -342,6 +364,21 @@ document.addEventListener('alpine:init', () => {
       return out.join('');
     },
 
+    // UNKNOWN IS NOT TIGHT. A symbol whose book has not quoted yet — the
+    // first seconds after a seed, or a name nobody is making a market in —
+    // has a NaN spread, and hiding it would empty the grid at startup and
+    // silently drop names for a reason that is not "the spread is too tight".
+    // It passes, renders dim and italic, and is counted so the state is
+    // visible rather than inferred.
+    passesSpread(r) {
+      if (r.spreadC === null || r.spreadC === undefined ||
+          !isFinite(r.spreadC)) return true;
+      if (r.spreadC < this.minSpreadCents) return false;
+      if (r.spreadB !== null && isFinite(r.spreadB) &&
+          r.spreadB < this.minSpreadBps) return false;
+      return true;
+    },
+
     resort() {
       // ORDER BY QUALIFYING MINUTES. Not a score, and not a ranking that
       // asserts one name is better than another — the evidence does not
@@ -378,7 +415,16 @@ document.addEventListener('alpine:init', () => {
       // collapsed one, so a row's offset is not its index times a constant.
       let y = 0;
       const vis = [];
+      let hidden = 0, unknown = 0;
       for (const r of this.rows) {
+        // The filter is applied HERE rather than by rebuilding a second
+        // array, so a row that starts or stops passing does not disturb the
+        // sort order or the scroll position — the list simply gets shorter.
+        if (r.spreadC !== null && isFinite(r.spreadC)) {
+          if (!this.passesSpread(r)) { hidden++; continue; }
+        } else {
+          unknown++;
+        }
         const rh = this.isOpen(r.sym) ? this.expandedHeight : this.rowHeight;
         r._top = y;
         r._h = rh;
@@ -387,6 +433,8 @@ document.addEventListener('alpine:init', () => {
       }
       this._total = y;
       this.visible = vis;
+      this.hiddenBySpread = hidden;
+      this.unknownSpread = unknown;
     },
 
     totalHeight() { return this._total || 0; },
@@ -449,6 +497,13 @@ document.addEventListener('alpine:init', () => {
       }
       this.renderAll();
       this.resort();
+      this.save();
+    },
+
+    onSpread() {
+      // No re-render: the cells are coloured by quietness and the filter only
+      // decides which ROWS exist, so re-windowing is the whole of the work.
+      this.window_();
       this.save();
     },
 
@@ -524,6 +579,33 @@ document.addEventListener('alpine:init', () => {
       return (p === null || !isFinite(p)) ? '—' : p.toFixed(2);
     },
     fmtPct(v) { return v === null ? '—' : v.toFixed(2); },
+    fmtSpreadC(c) {
+      return (c === null || c === undefined || !isFinite(c))
+        ? '—' : c.toFixed(1) + 'c';
+    },
+    fmtSpreadB(b) {
+      return (b === null || b === undefined || !isFinite(b))
+        ? '' : b.toFixed(1);
+    },
+    spreadClass(r) {
+      return (r.spreadC === null || r.spreadC === undefined ||
+              !isFinite(r.spreadC)) ? 'unknown' : '';
+    },
+    spreadTitle(r) {
+      if (r.spreadC === null || !isFinite(r.spreadC)) {
+        return r.sym + ' — no usable quotes yet. Unknown, not tight: it is ' +
+               'not being filtered out.';
+      }
+      return r.sym + '  time-weighted quoted spread over the last ' +
+             '5 minutes: ' + r.spreadC.toFixed(2) + ' cents, ' +
+             r.spreadB.toFixed(2) + ' bps';
+    },
+    spreadSummary() {
+      const parts = [];
+      if (this.hiddenBySpread) parts.push(this.hiddenBySpread + ' hidden');
+      if (this.unknownSpread) parts.push(this.unknownSpread + ' unquoted');
+      return parts.join(', ');
+    },
 
     // The bars are scaled against fixed ceilings, not against the current
     // maximum: a bar that rescales when one name spikes makes every other bar
@@ -546,6 +628,7 @@ document.addEventListener('alpine:init', () => {
       return r.sym + '  ratio ' + this.fmtPct(r.ratio) +
              '  range ' + this.fmtRange(r.range) +
              '  ' + this.fmtDollars(r.dollars) + '/min' +
+             '  spread ' + this.fmtSpreadC(r.spreadC) +
              '  ' + (r.trades === null ? '—' : r.trades) + ' trades' +
              (r.dollars !== null && r.dollars < this.volumeFloor
                ? '  — under the floor' : '');

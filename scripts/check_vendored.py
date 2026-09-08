@@ -97,6 +97,27 @@ VERBATIM = [
 # COMMITTED HEAD, so work in flight upstream does not trip it either.
 FINGERPRINT = [
     {
+        # live/scan_spread.py REIMPLEMENTS this rather than vendoring it, and
+        # the reason is structural rather than a shortcut: spread_metrics
+        # imports from `scalp` (so a verbatim copy breaks the rule that
+        # `rm -rf scalp/` leaves this app standing) and takes a pandas
+        # DataFrame per window, where the live page needs a per-quote
+        # accumulator that never materialises the quotes at all.
+        #
+        # What is copied is the DEFINITION -- drop crossed and locked quotes
+        # (ask <= bid) as transient consolidated-feed artefacts rather than
+        # capturable spreads, bps = spread / mid * 10,000, weight each quote
+        # by how long it stood. If any of those move upstream, the live column
+        # and the stored metric mean different things while both look right,
+        # and the page would be screening on a definition the universe was not
+        # built with.
+        "vendored": "live/scan_spread.py",
+        "source":   "scalp/metrics.py",
+        "symbol":   "spread_metrics",
+        "synced":   "911fde3c9b73ff2f457e04424ac27d249f9b43e7",
+        "sha256":   "842c0712f4de1641f7aa15e4a420ad98cf49e88188ceff8abbaa508bed17de36",
+    },
+    {
         "vendored": "app/trade_path_rules.py",
         "source":   "lib/trade_path_rules.py",
         "symbol":   "build_combine_sql",

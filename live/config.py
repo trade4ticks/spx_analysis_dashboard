@@ -168,6 +168,32 @@ SCAN_VOLUME_FLOOR = float(os.environ.get("LIVE_SCAN_VOLUME_FLOOR", "750000"))
 SCAN_RATIO_LOW = float(os.environ.get("LIVE_SCAN_RATIO_LOW", "0.10"))
 SCAN_RATIO_HIGH = float(os.environ.get("LIVE_SCAN_RATIO_HIGH", "1.20"))
 
+# THE SPREAD FLOOR, in cents and in bps, and both are MINIMA.
+#
+# A name whose quoted spread is too tight has nothing to capture however much
+# it trades -- INTC sits near the top of the grid on 1-2 cents, and no amount
+# of tuning the quiet ratio removes it, because quietness is not what is wrong
+# with it.
+#
+# 5 cents is the pipeline's own figure: scalp/config.py's
+# DEFAULT_FILTERS['min_spread_cents']. Matching it means the page opens on the
+# same screen the universe was built with rather than on a number invented
+# here. The bps minimum defaults OFF, because the cents figure is the one with
+# a decision behind it and a second active threshold nobody chose would hide
+# names for a reason that is not written down anywhere.
+SCAN_MIN_SPREAD_CENTS = float(os.environ.get("LIVE_SCAN_MIN_SPREAD_CENTS", "5"))
+SCAN_MIN_SPREAD_BPS = float(os.environ.get("LIVE_SCAN_MIN_SPREAD_BPS", "0"))
+
+# How long a quote may be credited with standing, in seconds.
+#
+# A quote that stands across a halt, a feed gap, or a subscription that has
+# just been restored would otherwise dominate a five-minute time-weighted
+# average with a price nobody could have traded. 30 seconds is half the quiet
+# window: long enough that an ordinarily still book is weighted honestly, short
+# enough that an outage cannot own the window.
+SCAN_QUOTE_DWELL_CAP_S = float(
+    os.environ.get("LIVE_SCAN_QUOTE_DWELL_CAP_S", "30"))
+
 # THE LONGEST THE ROLLUP MAY HOLD THE EVENT LOOP, in milliseconds.
 #
 # Measured: the rollup costs ~0.85 ms per symbol, so 430 symbols is a 367 ms

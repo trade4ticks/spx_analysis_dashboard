@@ -27,7 +27,7 @@ import logging
 import time
 
 from live import config
-from live.scan_history import (ScanHistory, minute_index,
+from live.scan_history import (CELL_WIDTH, ScanHistory, minute_index,
                                minute_epoch, session_date)
 
 log = logging.getLogger("live.scan_runner")
@@ -39,7 +39,8 @@ class ScanRunner:
     def __init__(self, hub, history: ScanHistory | None = None):
         self.hub = hub
         self.history = history or ScanHistory(config.SCAN_HISTORY_DIR)
-        # symbol -> (ratio, range_c, dollars, trades), the live column.
+        # symbol -> the 8-tuple from Hub.scan_state: the four trade
+        # fields then the four quote ones. The live column.
         self.live: dict[str, tuple] = {}
         self.live_at: float | None = None
         self.ticks = 0
@@ -98,7 +99,12 @@ class ScanRunner:
         boundary = minute_epoch(self.history.date, ended + 1)
         cells = await self.hub.scan_state(boundary)
         for sym, cell in cells.items():
-            self.history.write(sym, ended, cell)
+            # THE TRADE FIELDS ONLY. scan_state returns spread alongside them
+            # and a cell is CELL_WIDTH wide; slicing at the call site rather
+            # than truncating inside write() keeps the decision visible, since
+            # "spread is live-only" is a choice and not an implementation
+            # detail of the store.
+            self.history.write(sym, ended, cell[:CELL_WIDTH])
         self.minutes_written += 1
 
         # THE SESSION DATE CAN CHANGE UNDER A LONG-RUNNING PROCESS. Rolling to
@@ -136,10 +142,15 @@ class ScanRunner:
                    "minute": self.last_minute,
                    # price rides along on the tick only -- see
                    # SymbolBuf.last_price for why it is not a fifth cell field.
+                   # ratio, range_c, $/min, trades, price, spread_c,
+                   # spread_bps. Positional rather than named, because this
+                   # frame goes out for every symbol on every tick and the
+                   # keys would be most of the bytes.
                    "live": {s: [_num(v[0], 3), _num(v[1], 1), _num(v[2], 0),
                                 _num(v[3], 0),
                                 _num(bufs[s].last_price(), 2)
-                                if s in bufs else None]
+                                if s in bufs else None,
+                                _num(v[4], 2), _num(v[5], 2)]
                             for s, v in state.items()}}
         dead = []
         for ws in list(self._subscribers):

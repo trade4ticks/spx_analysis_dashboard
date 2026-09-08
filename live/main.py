@@ -350,6 +350,8 @@ async def scan_defaults():
         "volume_floor": config.SCAN_VOLUME_FLOOR,
         "ratio_low": config.SCAN_RATIO_LOW,
         "ratio_high": config.SCAN_RATIO_HIGH,
+        "min_spread_cents": config.SCAN_MIN_SPREAD_CENTS,
+        "min_spread_bps": config.SCAN_MIN_SPREAD_BPS,
         "grid_minutes": config.SCAN_GRID_MINUTES,
         "session_minutes": SESSION_MINUTES,
         "tick_s": config.SCAN_TICK_S,

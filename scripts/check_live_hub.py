@@ -359,29 +359,61 @@ def _spy_hub():
     return h, h._ws
 
 
-async def case_scan_subscribes_trades_only():
-    """A scan symbol takes trades and NOT quotes.
+async def case_scan_subscribes_both_channels():
+    """A scan symbol takes trades AND quotes.
 
-    The single largest saving on the socket, and free: measured at 200
-    symbols, quotes were 68% of all records and the full subscription was 2.4x
-    the message volume of trades alone. quiet.py is trades-only by
-    construction -- a 29-share bid pulled on a thin book moves the midpoint 19
-    cents while the stock does not move -- so a quote the scan subscribed to
-    is bandwidth spent on a number it must not use.
+    THIS CASE USED TO ASSERT THE OPPOSITE, and the reversal is deliberate
+    rather than a relaxation. Trades-only was worth real bandwidth -- measured
+    at 200 symbols, quotes were 68% of records and 2.4x the message volume --
+    and it held for as long as the scan had no use for a quote.
+
+    It has one now: quoted spread. There is no source for a CURRENT bid-ask
+    width other than the quote channel, and a name on a 1-2 cent spread has
+    nothing to capture however quiet it is, so the ratio cannot be tuned to
+    remove it. The price was measured before it was paid: ~3.1x the records,
+    ingest busy ~6% to ~19%, CPU ~35% to ~48% of one core at 430 symbols.
+
+    What this case still protects is that BOTH channels arrive, in ONE frame.
+    A 430-symbol set going out as 430 subscribe messages is a burst the socket
+    does not need and 430 status lines back.
     """
     h, ws = _spy_hub()
     added, _, refused = await h.scan_set(["AAPL", "MSFT"])
     check(sorted(added) == ["AAPL", "MSFT"], f"scan_set added {added}")
     check(not refused, f"ordinary symbols were refused: {refused}")
     params = ",".join(ws.params("subscribe"))
-    check("T.AAPL" in params and "T.MSFT" in params,
-          f"the scan did not subscribe to trades: {params}")
-    check("Q." not in params,
-          f"the scan subscribed to QUOTES: {params} -- 68% of the message "
-          f"volume, for records quiet.py must not look at")
+    for sym in ("AAPL", "MSFT"):
+        check(f"T.{sym}" in params,
+              f"the scan did not subscribe to {sym} trades: {params}")
+        check(f"Q.{sym}" in params,
+              f"the scan did not subscribe to {sym} quotes: {params} -- "
+              f"without them the spread column is empty and the screen the "
+              f"universe is built on cannot be applied live")
     check(len(ws.params("subscribe")) == 1,
           f"{len(ws.params('subscribe'))} subscribe frames for two symbols; "
-          f"a 600-symbol set must go out as one message, not six hundred")
+          f"a 430-symbol set must go out as one message, not four hundred")
+
+
+async def case_scan_allocates_a_spread_accumulator():
+    """Every scan symbol gets an accumulator, and it is NOT a quote tape.
+
+    Spread over a window is an aggregate, so what is kept is the
+    duration-weighted sums per minute -- about 240 bytes a symbol. Keeping the
+    quotes themselves would be ~42 MB across 430 at 2.1 quotes per trade, for
+    a median nothing asks for. The check is on the SHAPE, because a later
+    change that starts storing quotes would look correct and cost forty
+    megabytes silently.
+    """
+    h, _ = _spy_hub()
+    await h.scan_set(["AAPL"])
+    check("AAPL" in h.spread, "the scan symbol got no spread accumulator")
+    acc = h.spread["AAPL"]
+    check(acc.bytes_held() < 2048,
+          f"the accumulator holds {acc.bytes_held()} bytes for one symbol -- "
+          f"that is a quote tape, not an accumulator")
+    check("AAPL" not in h.quotes,
+          "a scan-only symbol allocated a pane QUOTE deque; the accumulator "
+          "is what the scan reads and the deque is the tape's shape")
 
 
 async def case_scan_does_not_allocate_pane_buffers():
@@ -405,14 +437,16 @@ async def case_scan_does_not_allocate_pane_buffers():
 
 
 async def case_scan_and_pane_share_a_symbol():
-    """A pane opening on a scan symbol UPGRADES it; closing DOWNGRADES it.
+    """A pane opening on a scan symbol changes NO subscription, and closing
+    changes none either.
 
-    Both directions are silent when wrong, in opposite ways. Miss the upgrade
-    and the pane draws a tape with no quotes and no spread, which looks like a
-    thin book rather than a missing subscription. Unsubscribe both channels on
-    the pane closing and the scan row stops updating -- and a symbol that has
-    stopped printing is indistinguishable from one that has gone quiet, which
-    is the single thing the grid exists to tell apart.
+    Both tiers now take both channels, so the upgrade and downgrade this case
+    used to assert are gone -- and their absence is what has to be checked,
+    because the dangerous direction survived the change. If the release path
+    still unsubscribed anything, the scan row would stop updating while the
+    symbol looked merely quiet, which is the one thing the grid exists to tell
+    apart. The pane's own BUFFERS still come and go; only the wire is
+    untouched.
     """
     h, ws = _spy_hub()
     await h.scan_set(["AAPL"])
@@ -420,20 +454,35 @@ async def case_scan_and_pane_share_a_symbol():
 
     err = await h.acquire("AAPL")
     check(err is None, f"a pane could not open on a scan symbol: {err}")
-    up = ",".join(ws.params("subscribe"))
-    check("Q.AAPL" in up,
-          f"the pane did not add quotes to a scan-held symbol: {up}")
-    check("AAPL" in h.trades, "the pane got no trade buffer of its own")
+    check(not ws.sent,
+          f"opening a pane on a scan-held symbol sent {ws.sent} -- both "
+          f"channels are already subscribed and there is nothing to ask for")
+    check("AAPL" in h.trades and "AAPL" in h.quotes,
+          "the pane got no buffers of its own")
     ws.sent.clear()
 
     await h.release("AAPL")
-    down = ",".join(ws.params("unsubscribe"))
-    check("Q.AAPL" in down, f"the pane closing did not drop quotes: {down}")
-    check("T.AAPL" not in down,
-          f"the pane closing unsubscribed TRADES on a symbol the scan still "
-          f"holds ({down}) -- the row goes dead and reads as gone quiet")
-    check("AAPL" in h.scan, "the scan lost its symbol when a pane closed")
-    check("AAPL" not in h.trades, "the pane's deque outlived the pane")
+    check(not ws.sent,
+          f"closing the pane sent {ws.sent} on a symbol the scan still holds "
+          f"-- any unsubscribe here kills the row, and a row that stops "
+          f"printing reads as one that has gone quiet")
+    check("AAPL" in h.scan and "AAPL" in h.spread,
+          "the scan lost its symbol when a pane closed")
+    check("AAPL" not in h.trades and "AAPL" not in h.quotes,
+          "the pane's deques outlived the pane")
+
+    # A PANE-ONLY SYMBOL STILL UNSUBSCRIBES ON THE WAY OUT. Without this the
+    # case above would pass just as well against a release that never sends
+    # anything at all, which would strand every tape subscription.
+    ws.sent.clear()
+    await h.acquire("FDX")
+    check(any("T.FDX" in x and "Q.FDX" in x for x in ws.params("subscribe")),
+          f"a pane-only symbol did not subscribe both channels: {ws.sent}")
+    ws.sent.clear()
+    await h.release("FDX")
+    check(any("T.FDX" in x and "Q.FDX" in x for x in ws.params("unsubscribe")),
+          f"a pane-only symbol was not unsubscribed when its last pane "
+          f"closed: {ws.sent} -- the subscription is stranded")
 
 
 async def case_scan_removal_spares_a_watched_symbol():
@@ -466,12 +515,12 @@ async def case_scan_cap_refuses_with_a_reason():
 
 
 async def case_scan_reconnect_restores_both_tiers():
-    """A reconnect restores the scan too, and with the right channels.
+    """A reconnect restores the scan too, with both channels.
 
     The server remembers nothing after a drop. Restore only the panes and the
-    grid freezes with every row looking quiet; restore the scan with quotes
-    and the saving that justifies the tier is gone. Both are invisible from
-    the page.
+    grid freezes with every row looking quiet; restore trades but not quotes
+    and the spread column empties, so the screen stops applying and the names
+    it was hiding come back. Both are invisible from the page.
     """
     sent = []
 
@@ -497,14 +546,13 @@ async def case_scan_reconnect_restores_both_tiers():
 
     params = ",".join(m["params"] for m in sent
                       if m.get("action") == "subscribe")
-    for sym in ("AAPL", "MSFT"):
+    for sym in ("AAPL", "MSFT", "FDX"):
         check(f"T.{sym}" in params,
-              f"the scan symbol {sym} was not resubscribed after a drop -- "
-              f"the grid freezes and every row reads as quiet")
-        check(f"Q.{sym}" not in params,
-              f"the scan symbol {sym} came back WITH quotes: {params}")
-    check("T.FDX" in params and "Q.FDX" in params,
-          f"the pane symbol lost a channel on reconnect: {params}")
+              f"{sym} did not get its trades back after a drop -- the grid "
+              f"freezes and every row reads as quiet")
+        check(f"Q.{sym}" in params,
+              f"{sym} did not get its quotes back after a drop -- the spread "
+              f"column empties and the screen silently stops applying")
 
 
 async def case_scan_ingest_routes_to_both_stores():
@@ -560,7 +608,11 @@ async def case_scan_state_computes_something():
     st = await h.scan_state(now)
     check(set(st) == {"STILL", "MOVED"}, f"scan_state returned {sorted(st)}")
     for sym in ("STILL", "MOVED"):
-        ratio, range_c, dollars, n = st[sym]
+        # INDEXED, NOT UNPACKED. scan_state grew from four fields to
+        # eight when spread arrived, and a fixed-width unpack here
+        # would raise on every call rather than fail the check it is
+        # written to make.
+        ratio, range_c, dollars, n = st[sym][:4]
         check(ratio == ratio,
               f"{sym} produced a NaN quiet ratio -- the rollup is computing "
               f"nothing and every cell would render identically")
@@ -848,6 +900,85 @@ async def case_history_survives_a_corrupt_file():
         check(h.cells == {}, "a corrupt load left partial state behind")
 
 
+async def case_quotes_route_to_the_accumulator():
+    """A quote reaches every tier holding its symbol, and only those."""
+    h, _ = _spy_hub()
+    await h.scan_set(["AAPL", "MSFT"])
+    await h.acquire("AAPL")                    # held by both
+    await h.acquire("FDX")                     # pane only
+    now = time.time() * 1000
+    h._ingest(json.dumps([quote("AAPL", now, 99.99, 100.01),
+                          quote("MSFT", now, 49.98, 50.02),
+                          quote("FDX", now, 330.00, 330.10)]))
+
+    check(len(h.quotes["AAPL"]) == 1,
+          "a symbol held by both tiers did not reach the pane's quote deque")
+    check(h.spread["AAPL"].acc.sum() > 0,
+          "a symbol held by both tiers did not reach the accumulator")
+    check(h.spread["MSFT"].acc.sum() > 0,
+          "a scan-only symbol's quote did not reach its accumulator")
+    check("MSFT" not in h.quotes,
+          "a scan-only quote allocated a pane deque on arrival")
+    check("FDX" not in h.spread and len(h.quotes["FDX"]) == 1,
+          "a pane-only quote leaked into the scan's accumulator")
+
+
+async def case_scan_state_reports_spread():
+    """scan_state returns a finite, correct spread on a known quote stream.
+
+    THE SAME FAILURE THE QUIET RATIO HAS ALREADY HAD ONCE: a computation that
+    quietly returns nothing is faster than one that works, and a NaN spread
+    does not hide a row -- it PASSES the filter, because unknown is not tight.
+    So a broken accumulator looks exactly like a page where nobody is quoting,
+    and the screen silently stops screening.
+
+    The tape is synthetic and the answer is known: a constant 2-cent spread on
+    a $100 stock is 2.0 cents and 2.0 bps.
+    """
+    h, _ = _spy_hub()
+    await h.scan_set(["WIDE", "TIGHT"])
+    now = time.time()
+    msgs = []
+    for k in range(120):
+        t_ms = (now - 120.0 + k) * 1000.0
+        msgs.append(quote("WIDE", t_ms, 99.90, 100.10))     # 20c
+        msgs.append(quote("TIGHT", t_ms, 99.99, 100.01))    # 2c
+        # Trades too, or the rollup half of the tuple is empty and the shape
+        # check below would pass on a state nobody could render.
+        msgs.append(trade("WIDE", t_ms, 100.0, 100))
+        msgs.append(trade("TIGHT", t_ms, 100.0, 100))
+    h._ingest(json.dumps(msgs))
+
+    st = await h.scan_state(now)
+    for sym in ("WIDE", "TIGHT"):
+        check(len(st[sym]) == 8,
+              f"{sym} state has {len(st[sym])} fields, want 8 -- the four "
+              f"trade fields plus the four quote ones")
+    wide_c, wide_b = st["WIDE"][4], st["WIDE"][5]
+    tight_c, tight_b = st["TIGHT"][4], st["TIGHT"][5]
+    check(wide_c == wide_c and tight_c == tight_c,
+          f"a NaN spread on a fully quoted symbol ({wide_c}, {tight_c}) -- "
+          f"the accumulator is computing nothing, and NaN PASSES the filter, "
+          f"so the screen would silently stop screening")
+    check(abs(wide_c - 20.0) < 0.01,
+          f"a 20-cent book reported {wide_c} cents")
+    check(abs(tight_c - 2.0) < 0.01,
+          f"a 2-cent book reported {tight_c} cents")
+    check(abs(tight_b - 2.0) < 0.05,
+          f"a 2-cent spread on a $100 stock reported {tight_b} bps, want 2.0 "
+          f"-- the bps scaling is wrong and every bps threshold is meaningless")
+    check(wide_c > tight_c,
+          "the wide book did not score wider than the tight one")
+
+    # A symbol nobody quotes is NaN, not zero. Zero would sort as the
+    # tightest book on the page and be hidden by any floor above it.
+    await h.scan_set(["WIDE", "TIGHT", "SILENT"])
+    st2 = await h.scan_state(now)
+    check(st2["SILENT"][4] != st2["SILENT"][4],
+          f"an unquoted symbol reported {st2['SILENT'][4]} cents rather than "
+          f"NaN -- it would screen as the tightest name on the page")
+
+
 CASES = [
     ("no aggregation",          case_no_aggregation),
     ("odd lots survive",        case_odd_lots_survive),
@@ -860,9 +991,12 @@ CASES = [
     ("resubscribe on connect",  case_resubscribe_on_reconnect),
     ("snapshot honours window", case_snapshot_window),
     ("status names the feed",   case_status_states_the_feed),
-    ("scan takes trades only",  case_scan_subscribes_trades_only),
+    ("scan takes both channels", case_scan_subscribes_both_channels),
+    ("spread is an accumulator", case_scan_allocates_a_spread_accumulator),
+    ("quotes route by tier",    case_quotes_route_to_the_accumulator),
+    ("scan_state has spread",   case_scan_state_reports_spread),
     ("scan buffers are rings",  case_scan_does_not_allocate_pane_buffers),
-    ("pane up/downgrades scan", case_scan_and_pane_share_a_symbol),
+    ("tiers share untouched",   case_scan_and_pane_share_a_symbol),
     ("scan drop spares a pane", case_scan_removal_spares_a_watched_symbol),
     ("scan cap refuses",        case_scan_cap_refuses_with_a_reason),
     ("reconnect: both tiers",   case_scan_reconnect_restores_both_tiers),
