@@ -97,7 +97,7 @@ VERBATIM = [
 # COMMITTED HEAD, so work in flight upstream does not trip it either.
 FINGERPRINT = [
     {
-        # live/scan_spread.py REIMPLEMENTS this rather than vendoring it, and
+        # app/scalp_spread.py REIMPLEMENTS this rather than vendoring it, and
         # the reason is structural rather than a shortcut: spread_metrics
         # imports from `scalp` (so a verbatim copy breaks the rule that
         # `rm -rf scalp/` leaves this app standing) and takes a pandas
@@ -111,7 +111,7 @@ FINGERPRINT = [
         # and the stored metric mean different things while both look right,
         # and the page would be screening on a definition the universe was not
         # built with.
-        "vendored": "live/scan_spread.py",
+        "vendored": "app/scalp_spread.py",
         "source":   "scalp/metrics.py",
         "symbol":   "spread_metrics",
         "synced":   "911fde3c9b73ff2f457e04424ac27d249f9b43e7",

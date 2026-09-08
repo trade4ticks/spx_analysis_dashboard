@@ -272,10 +272,117 @@ def self_test() -> int:
           f"-- it would screen as the tightest spread on the page")
     check(ne == 0, f"{ne} observations with no quotes")
 
+    # THE TWO SHAPES MUST AGREE. The accumulator and the vectorised window
+    # implement one rule, and the only thing keeping them honest is that the
+    # same tape put through both comes out the same. Without this they drift
+    # the moment one is edited, and the live column and the replay readout
+    # would report different spreads for the same book.
+    rows_t, rows_b, rows_a = [], [], []
+    acc = SpreadAccum(minutes=8, cap_dwell_s=30.0)
+    for k in range(120):
+        ts = base + k * 500.0
+        # A book that widens halfway, so a constant would not pass by luck.
+        bid_, ask_ = (99.99, 100.01) if k < 60 else (99.95, 100.05)
+        acc.push(ts, bid_, ask_)
+        rows_t.append(ts); rows_b.append(bid_); rows_a.append(ask_)
+    a_c, a_b, _, _ = acc.window(base + 120 * 500.0, 300.0)
+    w_c, w_b, _, _ = spread_tw_window(np.array(rows_t), np.array(rows_b),
+                                      np.array(rows_a),
+                                      end_ms=base + 120 * 500.0,
+                                      cap_dwell_s=30.0)
+    check(abs(a_c - w_c) < 0.05,
+          f"the accumulator says {a_c:.4f} cents and the windowed form says "
+          f"{w_c:.4f} -- one rule, two shapes, and they have drifted")
+    check(abs(a_b - w_b) < 0.05,
+          f"accumulator {a_b:.4f} bps vs windowed {w_b:.4f} bps")
+    check(abs(w_c - 6.0) < 0.2,
+          f"half a window at 2c and half at 10c came out {w_c:.4f}, want ~6.0")
+
+    # Crossed quotes are dropped by BOTH, and counted by both.
+    cx_t = np.array([base, base + 1000.0, base + 2000.0])
+    cx_b = np.array([99.99, 100.02, 99.99])
+    cx_a = np.array([100.01, 99.98, 100.01])
+    c_c, _, c_n, c_x = spread_tw_window(cx_t, cx_b, cx_a,
+                                        end_ms=base + 3000.0)
+    check(abs(c_c - 2.0) < 1e-6,
+          f"a crossed quote moved the windowed average to {c_c}, want 2.0")
+    check(c_n == 3 and abs(c_x - 1 / 3) < 1e-9,
+          f"windowed form counted {c_n} observations, {c_x:.3f} crossed")
+
     for f in fails:
         print(f"  FAIL  {f}")
     print(f"  spread self-test: {'PASS' if not fails else str(len(fails)) + ' FAILED'}")
     return 1 if fails else 0
+
+
+
+
+def spread_tw_window(t_ms, bid, ask, *, end_ms: float,
+                     cap_dwell_s: float = 30.0) -> tuple:
+    """Duration-weighted spread over a WINDOW of rows already in hand.
+
+    THE SAME DEFINITION AS SpreadAccum, in the shape a replay needs. The
+    accumulator above is incremental because the live page sees one quote at a
+    time and must never hold the tape; this sees a whole window at once,
+    already sorted, and a per-row Python loop over 19,000 rows would be the
+    slowest thing on the request.
+
+    They are two shapes of one rule, kept in one file so the rule has one
+    place: drop crossed and locked quotes (ask <= bid), bps = spread / mid *
+    10,000, weight each quote by how long it stood, and cap that dwell so a
+    quote spanning a halt cannot own the window. If either shape is edited the
+    other is a screen away, which is the most that can be done short of the
+    live path giving up being incremental.
+
+    Returns (spread_cents_tw, spread_bps_tw, observations, crossed_share).
+    """
+    t = np.asarray(t_ms, dtype="float64")
+    b = np.asarray(bid, dtype="float64")
+    a = np.asarray(ask, dtype="float64")
+    if t.size == 0:
+        return (float("nan"), float("nan"), 0, float("nan"))
+
+    mid = (a + b) / 2.0
+    usable = np.isfinite(b) & np.isfinite(a) & (mid > 0)
+    n_obs = int(usable.sum())
+    if n_obs == 0:
+        return (float("nan"), float("nan"), 0, float("nan"))
+
+    spread = a - b
+    crossed = usable & (spread <= 0)
+    crossed_share = float(crossed.sum()) / n_obs
+    good = usable & (spread > 0)
+    if not good.any():
+        return (float("nan"), float("nan"), n_obs, crossed_share)
+
+    # HOW LONG EACH ROW STOOD: to the next row, and the last one TO THE END OF
+    # THE WINDOW. `end_ms` is required rather than defaulted, and that is the
+    # bug this signature exists to prevent.
+    #
+    # The first version gave the final row a full cap's worth of dwell so it
+    # would not carry zero weight. On a 60-second window of 500 ms quotes that
+    # handed the last quote 30 seconds -- half the window -- and a tape that
+    # ran 2 cents then 10 cents came out at 7.32 against the accumulator's
+    # 6.00. Neither number looks wrong on its own; only running the same tape
+    # through both shapes showed it.
+    #
+    # Upstream's spread_metrics takes `end` for precisely this reason
+    # (durations_seconds(..., end)), which is the tell that the window's right
+    # edge is part of the definition and not a convenience.
+    dwell = np.empty(t.size, dtype="float64")
+    if t.size > 1:
+        dwell[:-1] = np.diff(t)
+    dwell[-1] = float(end_ms) - t[-1]
+    np.clip(dwell, 0.0, cap_dwell_s * 1000.0, out=dwell)
+
+    w = dwell[good]
+    if w.sum() <= 0:
+        return (float("nan"), float("nan"), n_obs, crossed_share)
+    sp_c = spread[good] * _CENTS
+    bps = spread[good] / mid[good] * 1e4
+    return (float(np.dot(sp_c, w) / w.sum()),
+            float(np.dot(bps, w) / w.sum()),
+            n_obs, crossed_share)
 
 
 if __name__ == "__main__":

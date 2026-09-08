@@ -28,7 +28,7 @@ import websockets
 from app import scalp_quiet as quiet
 from live import config
 from live.scan import SymbolBuf, rollup_all
-from live.scan_spread import SpreadAccum
+from app.scalp_spread import SpreadAccum
 
 log = logging.getLogger("live.hub")
 
