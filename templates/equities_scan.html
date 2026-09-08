@@ -279,6 +279,20 @@
     </div>
   </div>
 
-  <script defer src={{ asset('js/equities_scan.js') }}></script>
+  {#- NOT `defer`, and that is the whole reason this page was dead.
+
+      Alpine is loaded with `defer` in the head. Deferred scripts run in
+      document order after parsing, so a deferred bundle HERE runs AFTER
+      Alpine has started and dispatched `alpine:init` — the listener that
+      registers the component is added to an event that has already fired,
+      Alpine.data('equitiesScan') is never called, and every expression on
+      the page throws "equitiesScan is not defined".
+
+      A plain script at the end of the body executes DURING parsing, before
+      any deferred script, so the component is registered before Alpine
+      boots. That is why equities_live.html and equities_scalp.html have no
+      `defer` here either, and it is now gated in check_rendered_assets.py
+      rather than left as something to remember. -#}
+  <script src={{ asset('js/equities_scan.js') }}></script>
 </body>
 </html>
