@@ -145,19 +145,41 @@ from live.scan import SymbolBuf, rollup_one                # noqa: E402
 
 # -- the measurement --------------------------------------------------------
 
+def cap_max_for(args) -> int:
+    """The per-symbol ring ceiling, in records.
+
+    Defaults to the SHIPPED value rather than deriving one, so the harness
+    measures the service's dimensions. --max-rate remains, because deliberately
+    exploring a different ceiling is a real thing to want -- but it now has to
+    be asked for.
+    """
+    if args.max_rate is None:
+        return int(config.SCAN_RING_MAX)
+    return max(64, int(args.retain_s * args.max_rate))
+
+
 class Step:
     def __init__(self, symbols, channels, args):
         self.symbols = symbols
         self.channels = channels
         self.args = args
-        # The CEILING, not the size. Every ring starts at the shipped
-        # SCAN_RING_START and grows toward this as its own symbol's rate
-        # demands -- which is the fix for what the first capacity run got
-        # wrong in both directions at once: one assumed rate truncated the
-        # busy names and over-allocated the quiet ones threefold.
-        cap_max = max(64, int(args.retain_s * args.max_rate))
+        # THE SHIPPED CEILING BY DEFAULT, and this used to be the bug.
+        #
+        # The harness derived its own ceiling from --max-rate 20, giving
+        # 7,200 records where live/config ships SCAN_RING_MAX = 72,000 -- a
+        # ceiling ten times lower than the service's. So the run reported
+        # 227,295 live evictions and a 74% memory saving, and NEITHER was a
+        # measurement of what the hub will do: the evictions were the
+        # harness's own clip, and part of the saving was that clip rather
+        # than the growth rule.
+        #
+        # Exactly the failure the "import, do not redefine" note above is
+        # about, arrived at through a CONSTRUCTOR ARGUMENT instead of a
+        # duplicated class. Importing the shipped SymbolBuf is not enough if
+        # it is then built to different dimensions.
+        self.cap_max = cap_max_for(args)
         self.bufs = {s: SymbolBuf(args.retain_s, config.SCAN_RING_START,
-                                  cap_max) for s in symbols}
+                                  self.cap_max) for s in symbols}
         self.frames = 0
         self.records = 0
         self.trades = 0
@@ -345,8 +367,11 @@ async def run_step(symbols, args) -> dict:
     # from one assumed rate, which is the arrangement the growth rule
     # replaced -- so the saving is the point of the change and belongs in the
     # output rather than in someone's memory of a previous number.
-    fixed_mb = len(st.bufs) * (max(64, int(args.retain_s * args.max_rate))
-                               * 3 * 8) / 1048576.0
+    # Fixed-size AT THE SAME CEILING: what giving every symbol the ceiling
+    # would cost. That is the honest comparison, because a fixed ring smaller
+    # than the ceiling is a scheme that truncates -- which is what the
+    # original one did, and it is not a baseline anyone would ship on purpose.
+    fixed_mb = len(st.bufs) * (st.cap_max * 3 * 8) / 1048576.0
     out = {
         "symbols": len(symbols),
         "channels": ",".join(channels),
@@ -371,6 +396,7 @@ async def run_step(symbols, args) -> dict:
         "ring_evicted_live": lost,
         "ring_mb": ring_mb,
         "ring_fixed_mb": fixed_mb,
+        "ring_cap_max": st.cap_max,
         "unknown_symbol_records": st.unknown_syms,
         "status": st.status_msgs[:10],
     }
@@ -398,9 +424,10 @@ def report(r: dict, args) -> None:
     print(f"  coverage   {r['symbols_with_trades']}/{r['symbols']} symbols "
           f"printed at least once")
     saved = (1.0 - r["ring_mb"] / r["ring_fixed_mb"]) * 100.0         if r["ring_fixed_mb"] else float("nan")
-    print(f"  rings      {r['ring_mb']:.1f} MB held, {r['ring_grows']} grows "
-          f"-- fixed-size would be {r['ring_fixed_mb']:.1f} MB "
-          f"({saved:.0f}% saved)")
+    print(f"  rings      {r['ring_mb']:.1f} MB held, {r['ring_grows']} grows, "
+          f"ceiling {r['ring_cap_max']:,} records/symbol")
+    print(f"             fixed at that ceiling would be "
+          f"{r['ring_fixed_mb']:.1f} MB ({saved:.0f}% saved)")
     # A RING MEMORY FIGURE TAKEN BEFORE STEADY STATE IS TOO LOW, and too low
     # in the direction that says the growth rule worked. A ring grows until it
     # holds a full retention window; measure for two minutes against a
@@ -413,9 +440,16 @@ def report(r: dict, args) -> None:
               f"growing, so ring MB is UNDERSTATED and the saving above is "
               f"flattering. Re-run with --seconds > {args.retain_s:.0f}.")
     if r["ring_evicted_live"]:
-        print(f"  WARNING    {r['ring_evicted_live']} live records evicted -- "
-              f"rings hit the --max-rate ceiling, so the range bar is "
-              f"truncated on the busiest names")
+        # THE SAVING IS NOT CLEAN WHEN THIS FIRES, and saying so is the point.
+        # A ring clipped at the ceiling holds less memory AND less data, so
+        # the percentage above is partly the clip rather than the growth rule
+        # -- and the range bar is short on exactly the names worth trading.
+        print(f"  WARNING    {r['ring_evicted_live']:,} live records evicted: "
+              f"rings hit the {r['ring_cap_max']:,}-record ceiling, so the "
+              f"range bar is TRUNCATED on the busiest names")
+        print(f"             the saving above is therefore partly this clip "
+              f"and not the growth rule alone; raise LIVE_SCAN_RING_MAX (or "
+              f"--max-rate) and re-run before believing it")
     if r["unknown_symbol_records"]:
         print(f"  WARNING    {r['unknown_symbol_records']} records arrived for "
               f"symbols never subscribed")
@@ -471,177 +505,29 @@ def holder_of_the_connection() -> str | None:
     return None
 
 
-async def symbols_from_db(limit: int) -> list[str]:
-    """The busiest names in the most recent universe, dollar volume first.
+async def symbols_from_db(limit: int, args) -> list[str]:
+    """The scan's own seed, not a second query written next to it.
 
-    The scan is a tool for finding something to trade, so the capacity test
-    has to be run against names that PRINT. Measuring 600 randomly chosen
-    tickers would report the message rate of a sleeping market and call it
-    capacity.
+    This used to order by dollar_volume with no filter, which put SPY, QQQ and
+    VYM at the top of a 600-symbol run -- index ETFs at 0.3 bps that the
+    pipeline's spread floor already excludes. A capacity number measured
+    against names the page will never hold is measuring the wrong load.
     """
     import asyncpg
-    from urllib.parse import urlsplit, urlunsplit
-    dsn = os.getenv("SCALP_DATABASE_URL")
-    if not dsn:
-        parts = urlsplit(os.environ["DATABASE_URL"])
-        dsn = urlunsplit(parts._replace(path="/equities_scalp"))
-    con = await asyncpg.connect(dsn)
+    from live import scan_universe
+
+    con = await asyncpg.connect(scan_universe.scalp_dsn())
     try:
-        rows = await con.fetch(
-            """select symbol from universe
-               where trade_date = (select max(trade_date) from universe)
-               order by dollar_volume desc nulls last
-               limit $1""", limit)
+        c = await scan_universe.counts(con)
+        print(f"universe: {c['total']} symbols, {c['qualified']} qualified, "
+              f"{c['not_excluded']} not spread-excluded, {c['both']} both")
+        rows = await scan_universe.seed(
+            con, limit=limit, order=args.order,
+            min_range_cents=args.min_range_cents,
+            min_dollar_per_min=args.min_dollar_per_min)
     finally:
         await con.close()
-    return [r[0] for r in rows]
-
-
-# -- the self-test ----------------------------------------------------------
-
-def self_test() -> int:
-    """Prove the harness measures WORK, not an early return.
-
-    The failure this exists to catch has happened in this project before, in
-    exactly this shape: a timed loop over a computation that quietly produces
-    nothing runs FASTER than one that works, so a broken rollup reports as
-    excellent capacity. Every number in the report would then be a measurement
-    of `return nan`.
-
-    So the rollup is run against a synthetic tape whose answers are known, and
-    a NaN ratio is a FAILURE rather than a shrug. Also checks the ring after
-    it has wrapped, because ordering is the one part of a ring buffer that is
-    wrong silently and only under load.
-    """
-    fails = []
-
-    def check(cond, msg):
-        if not cond:
-            fails.append(msg)
-
-    # /proc parsing. A nan here means every cpu and rss figure in the report
-    # is nan, which reads as "not measured" only if you notice it.
-    if sys.platform.startswith("linux"):
-        c0 = cpu_seconds()
-        check(c0 == c0 and c0 >= 0,
-              f"cpu_seconds() returned {c0} on Linux -- /proc/self/stat "
-              f"parsing is wrong and every CPU figure would be nan")
-        junk = [x * x for x in range(400000)]
-        c1 = cpu_seconds()
-        check(c1 > c0, f"cpu_seconds() did not advance across real work "
-                       f"({c0} -> {c1}); it is not reading the counter")
-        del junk
-        r = rss_mb()
-        check(r == r and r > 1, f"rss_mb() returned {r}; VmRSS was not found")
-    else:
-        print("  (not Linux: /proc accounting is untested here and will "
-              "report nan -- run the real measurement on the VPS)")
-
-    # THE RING WRAPS WITHOUT LOSING ORDER. A ring is wrong silently and only
-    # under load, so this writes past the ceiling deliberately and checks the
-    # sequence rather than the count.
-    #
-    # 150 records one millisecond apart span 150 ms, all of it inside the
-    # 10-second retention -- so every eviction here is of a LIVE record, the
-    # ring grows to its ceiling, and past that the loss is counted. Both
-    # halves of the growth rule are exercised by the same loop.
-    b = SymbolBuf(10.0, 8, 100)
-    for i in range(150):
-        b.push(float(i), 10.0 + i, 1.0)
-    t, p, s = b.ordered()
-    check(t.size == 100,
-          f"ring holds {t.size} after 150 pushes into a ceiling of 100")
-    check(b.grows > 0,
-          "the ring never grew, though every eviction was of a record still "
-          "inside the retention window -- the busy names lose the back of "
-          "their range window exactly when it matters")
-    check(b.evicted_live == 50,
-          f"ring counted {b.evicted_live} live evictions at the ceiling, "
-          f"want 50 -- an unreported truncation draws a short range bar that "
-          f"is indistinguishable from a narrow one")
-    check(list(t[:3]) == [50.0, 51.0, 52.0],
-          f"wrapped ring came back out of order: starts {list(t[:3])}, "
-          f"want [50.0, 51.0, 52.0]")
-    check(t[-1] == 149.0, f"wrapped ring's newest is {t[-1]}, want 149.0")
-    check(bool(np.all(np.diff(t) == 1.0)),
-          "wrapped ring is not monotonic in time")
-    check(bool(np.all(np.diff(p) == 1.0)),
-          "price and time were reordered differently -- ordered() rolls the "
-          "three arrays independently and they no longer line up")
-
-    # AND IT DOES NOT GROW WHEN THE EVICTION IS CORRECT. Records FIVE seconds
-    # apart against a 10-second retention, so eight slots already hold forty
-    # seconds and the oldest is long outside the window by the time it is
-    # overwritten. That is the ring working, and it must allocate nothing.
-    # Without this case, "grow on overflow" grows forever on any symbol busy
-    # enough to fill its ring -- the memory failure the growth rule exists to
-    # avoid, arrived at from the other direction.
-    #
-    # The spacing has to beat retain_s / cap0, not merely be "wide". At one
-    # second apart an 8-slot ring holds 8 seconds against a 10-second window
-    # and is CORRECT to grow -- which is what this check asserted on its first
-    # writing, and it failed the code for doing the right thing.
-    q = SymbolBuf(10.0, 8, 100)
-    for i in range(60):
-        q.push(float(i * 5000), 10.0, 1.0)
-    check(q.grows == 0,
-          f"the ring grew {q.grows} times while evicting records already "
-          f"outside the retention window -- that is unbounded growth on every "
-          f"busy symbol")
-    check(q.cap == 8, f"capacity drifted to {q.cap} with nothing to retain")
-
-    # The rollup, against a tape with a KNOWN answer. Two 60s windows: the
-    # first jitters around 100.00, the second around 100.20 -- so the level
-    # shifts about 20 cents against an IQR of a few cents, and the ratio must
-    # come out well above 1. A quiet tape (no shift) must come out near 0.
-    now = time.time()
-    rng = np.random.default_rng(7)
-
-    def tape(shift_dollars):
-        buf = SymbolBuf(600.0, 512, 4000)
-        # 40 trades/min over the 80 seconds the rollup asks for, plus the
-        # five-minute slow window behind it.
-        for k in range(400):
-            age = 300.0 * (1.0 - k / 400.0)          # 300s ago -> now
-            base = 100.0 + (shift_dollars if age < 20.0 else 0.0)
-            buf.push((now - age) * 1000.0,
-                     base + float(rng.normal(0, 0.01)), 100.0)
-        return buf
-
-    loud = rollup_one(tape(0.20), now, quiet_window_s=60.0,
-                      slow_window_s=300.0, min_trades=10)
-    still = rollup_one(tape(0.0), now, quiet_window_s=60.0,
-                       slow_window_s=300.0, min_trades=10)
-    for name, got in (("moved", loud), ("still", still)):
-        check(got[0] == got[0],
-              f"{name} tape produced a NaN quiet ratio -- the rollup is "
-              f"computing nothing and its timing is meaningless")
-        check(got[1] == got[1] and got[1] > 0,
-              f"{name} tape produced range {got[1]}, want a positive span")
-        check(got[2] == got[2] and got[2] > 0,
-              f"{name} tape produced {got[2]} dollars/min, want positive")
-        check(got[3] >= 10, f"{name} tape saw {got[3]} slow-window trades")
-    check(loud[0] > still[0],
-          f"a tape that moved 20 cents scored {loud[0]:.3f}, no louder than "
-          f"one that did not ({still[0]:.3f}) -- the ratio is not responding "
-          f"to the shift it exists to measure")
-    check(still[0] < 1.0,
-          f"an unmoved tape scored {still[0]:.3f}; a still name must read "
-          f"quiet or the grid lights up on nothing")
-
-    # Dollar volume is checkable exactly, and it is worth checking rather
-    # than eyeballing: 400 trades of 100 shares near $100 is $4.0M over the
-    # 300-second slow window, so $800k a minute. The bounds are loose because
-    # this is a wiring check on the /60 normalisation -- getting that wrong by
-    # a factor of five is what the amber bar would silently render.
-    check(7e5 < still[2] < 9e5,
-          f"dollars/min came out {still[2]:.0f}; 400 x 100sh x ~$100 over "
-          f"300s is ~8.0e5, so the per-minute normalisation is wrong")
-
-    for f in fails:
-        print(f"  FAIL  {f}")
-    print(f"\n  self-test: {'PASS' if not fails else str(len(fails)) + ' FAILED'}")
-    return 1 if fails else 0
+    return [r["symbol"] for r in rows]
 
 
 async def main() -> int:
@@ -661,6 +547,13 @@ async def main() -> int:
     ap.add_argument("--chunk", type=int, default=200,
                     help="symbols per subscribe message")
     ap.add_argument("--symbols-file", default=None)
+    ap.add_argument("--order", default="trades",
+                    choices=sorted(__import__("live.scan_universe",
+                                              fromlist=["ORDERS"]).ORDERS),
+                    help="seed ordering; 'trades' counts prints, which is "
+                         "what loads the socket, rather than notional")
+    ap.add_argument("--min-range-cents", type=float, default=0.0)
+    ap.add_argument("--min-dollar-per-min", type=float, default=0.0)
     ap.add_argument("--rollup-s", type=float, default=5.0)
     ap.add_argument("--quiet-window-s", type=float, default=60.0)
     ap.add_argument("--slow-window-s", type=float, default=300.0)
@@ -668,8 +561,12 @@ async def main() -> int:
     ap.add_argument("--retain-s", type=float, default=360.0,
                     help="seconds of raw trades kept per symbol; must exceed "
                          "the slow window")
-    ap.add_argument("--max-rate", type=float, default=20.0,
-                    help="trades/second the ring is sized for, per symbol")
+    ap.add_argument("--max-rate", type=float, default=None,
+                    help="OVERRIDE the ring ceiling, as trades/second per "
+                         "symbol (ceiling = retain_s * max_rate). Left unset "
+                         "the shipped LIVE_SCAN_RING_MAX is used, which is "
+                         "what the service runs and therefore what a capacity "
+                         "number should be measured against.")
     ap.add_argument("--max-queue", type=int, default=4096)
     ap.add_argument("--no-rollup", action="store_true",
                     help="ingest only, to separate the two costs")
@@ -701,7 +598,7 @@ async def main() -> int:
             pool = [ln.strip().upper() for ln in fh
                     if ln.strip() and not ln.startswith("#")]
     else:
-        pool = await symbols_from_db(want)
+        pool = await symbols_from_db(want, args)
     if len(pool) < want:
         print(f"only {len(pool)} symbols available; the {want} step will "
               f"measure {len(pool)}")

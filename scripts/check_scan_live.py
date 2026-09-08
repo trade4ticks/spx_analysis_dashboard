@@ -53,23 +53,45 @@ def check(cond, msg):
     return bool(cond)
 
 
-async def symbols_from_db(limit: int) -> list[str]:
+async def seed_symbols(limit: int) -> list[str]:
+    """The scan's seed, checked on the way past.
+
+    THE FILTER IS VERIFIED, not trusted. Dropping `not spread_excluded` does
+    not fail anything -- it silently puts SPY and QQQ back at the top of the
+    list, which is what happened, and it was caught by a person reading
+    symbol names rather than by any check. So the unfiltered query is run
+    too, and the two are compared: if the filter removes nothing, it is not
+    doing its job and this says so before the socket opens.
+    """
     import asyncpg
-    from urllib.parse import urlsplit, urlunsplit
-    dsn = os.getenv("SCALP_DATABASE_URL")
-    if not dsn:
-        parts = urlsplit(os.environ["DATABASE_URL"])
-        dsn = urlunsplit(parts._replace(path="/equities_scalp"))
-    con = await asyncpg.connect(dsn)
+    from live import scan_universe
+
+    con = await asyncpg.connect(scan_universe.scalp_dsn())
     try:
-        rows = await con.fetch(
+        c = await scan_universe.counts(con)
+        print(f"universe: {c['total']} symbols, {c['qualified']} qualified, "
+              f"{c['not_excluded']} not spread-excluded, {c['both']} both")
+        check(c["both"] < c["total"],
+              f"the spread-exclusion filter removed nothing ({c['both']} of "
+              f"{c['total']}) — index ETFs the pipeline already excludes "
+              f"would be back on the list")
+        rows = await scan_universe.seed(con, limit=limit)
+        unfiltered = await con.fetch(
             """select symbol from universe
                where trade_date = (select max(trade_date) from universe)
-               order by dollar_volume desc nulls last
-               limit $1""", limit)
+                 and spread_excluded
+               order by dollar_volume desc nulls last limit 40""")
     finally:
         await con.close()
-    return [r[0] for r in rows]
+
+    syms = [r["symbol"] for r in rows]
+    excluded = {r["symbol"] for r in unfiltered}
+    leaked = sorted(excluded.intersection(syms))
+    check(not leaked,
+          f"spread-excluded names reached the seed list: {leaked[:8]} — the "
+          f"scan would hold names with nothing to capture, and they are the "
+          f"heaviest on the tape")
+    return syms
 
 
 async def settle(hub: Hub, seconds: float, label: str) -> None:
@@ -129,7 +151,7 @@ async def main() -> int:
               f"be NaN and this would report it as a failure of the code.")
         return 2
 
-    syms = await symbols_from_db(args.symbols)
+    syms = await seed_symbols(args.symbols)
     print(f"feed:  {config.FEED} -> {config.feed_url()}")
     print(f"scan:  {len(syms)} symbols, busiest first: "
           f"{', '.join(syms[:6])} ...")
