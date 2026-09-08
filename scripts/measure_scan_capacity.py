@@ -88,6 +88,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from live import config                                   # noqa: E402
+from live import scan_universe                            # noqa: E402
 from app import scalp_quiet as quiet                      # noqa: E402
 
 
@@ -514,7 +515,6 @@ async def symbols_from_db(limit: int, args) -> list[str]:
     against names the page will never hold is measuring the wrong load.
     """
     import asyncpg
-    from live import scan_universe
 
     con = await asyncpg.connect(scan_universe.scalp_dsn())
     try:
@@ -548,8 +548,7 @@ async def main() -> int:
                     help="symbols per subscribe message")
     ap.add_argument("--symbols-file", default=None)
     ap.add_argument("--order", default="trades",
-                    choices=sorted(__import__("live.scan_universe",
-                                              fromlist=["ORDERS"]).ORDERS),
+                    choices=sorted(scan_universe.ORDERS),
                     help="seed ordering; 'trades' counts prints, which is "
                          "what loads the socket, rather than notional")
     ap.add_argument("--min-range-cents", type=float, default=0.0)
