@@ -401,6 +401,17 @@ def report(r: dict, args) -> None:
     print(f"  rings      {r['ring_mb']:.1f} MB held, {r['ring_grows']} grows "
           f"-- fixed-size would be {r['ring_fixed_mb']:.1f} MB "
           f"({saved:.0f}% saved)")
+    # A RING MEMORY FIGURE TAKEN BEFORE STEADY STATE IS TOO LOW, and too low
+    # in the direction that says the growth rule worked. A ring grows until it
+    # holds a full retention window; measure for two minutes against a
+    # six-minute retention and every symbol is still sized for two minutes of
+    # data, so the saving reads as three times better than it is. The run has
+    # to outlast the retention before this number means anything.
+    if r["seconds"] < args.retain_s:
+        print(f"  WARNING    measured {r['seconds']:.0f}s against a "
+              f"{args.retain_s:.0f}s retention -- the rings have not finished "
+              f"growing, so ring MB is UNDERSTATED and the saving above is "
+              f"flattering. Re-run with --seconds > {args.retain_s:.0f}.")
     if r["ring_evicted_live"]:
         print(f"  WARNING    {r['ring_evicted_live']} live records evicted -- "
               f"rings hit the --max-rate ceiling, so the range bar is "

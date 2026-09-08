@@ -44,8 +44,13 @@ echo "step 3 exit: $?" >>"$LOG"
 
 echo "" >>"$LOG"
 echo "######## STEP 6: ring memory at 600 symbols ########" >>"$LOG"
-timeout 300 "$PY" scripts/measure_scan_capacity.py \
-  --steps 600 --seconds 120 --warmup 10 --channels T \
+# SEVEN MINUTES, not two, and the length is the whole validity of the number.
+# A ring grows until it holds a full retention window; measured over two
+# minutes against a six-minute retention, every symbol is still sized for two
+# minutes of data and the saving reads about three times better than it is.
+# The run has to outlast LIVE_SCAN_RETAIN_S before ring MB means anything.
+timeout 600 "$PY" scripts/measure_scan_capacity.py \
+  --steps 600 --seconds 420 --warmup 10 --channels T \
   --out /tmp/scan_rings_600.json >>"$LOG" 2>&1
 echo "step 6 exit: $?" >>"$LOG"
 
