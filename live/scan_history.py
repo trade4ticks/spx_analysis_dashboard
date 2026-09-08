@@ -243,7 +243,18 @@ class ScanHistory:
         self.dir.mkdir(parents=True, exist_ok=True)
         final = self.path_for()
         tmp = final.with_suffix(".npz.tmp")
-        np.savez_compressed(tmp, symbols=np.array(syms), cells=arr)
+        # WRITTEN THROUGH AN OPEN HANDLE, not by passing the path.
+        #
+        # np.savez_compressed APPENDS ".npz" to a filename that does not
+        # already end in it. Given "scan_cells_2026-09-08.npz.tmp" it writes
+        # "scan_cells_2026-09-08.npz.tmp.npz", and the os.replace below then
+        # looks for a file that was never created -- so every flush raised
+        # FileNotFoundError, was caught and logged as a failed flush, and the
+        # history silently never persisted at all. A file object is left
+        # alone, which is the only way to name the temporary file after what
+        # it is rather than after what numpy will accept.
+        with open(tmp, "wb") as fh:
+            np.savez_compressed(fh, symbols=np.array(syms), cells=arr)
         os.replace(tmp, final)
 
     def status(self) -> dict:

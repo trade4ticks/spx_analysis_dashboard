@@ -702,6 +702,152 @@ async def case_rollup_does_not_block_the_loop():
           "each other, which is the whole premise of the grid")
 
 
+# -- the grid's minutes, across a restart ------------------------------------
+#
+# spx-live restarts on every deploy, several times a day, and the grid's two
+# hours is the page's whole context. Everything below is a way the file can be
+# wrong WITHOUT anything raising: a round trip that loses a column, a gap that
+# reloads as quiet rather than as absent, an index that is off by one for an
+# hour and then right again.
+
+
+async def case_history_survives_a_restart():
+    """Cells written, flushed, and read back by a fresh instance.
+
+    The round trip is the whole feature. A flush that writes and a load that
+    reads something subtly different is the failure that shows up as "the grid
+    looked odd after the deploy" and is never chased.
+    """
+    import tempfile
+    import numpy as np
+    from live.scan_history import ScanHistory, SESSION_MINUTES
+
+    with tempfile.TemporaryDirectory() as d:
+        h = ScanHistory(d, "2026-09-08")
+        h.write("AAPL", 100, (0.42, 12.5, 850000.0, 63))
+        h.write("AAPL", 101, (1.31, 9.0, 120000.0, 21))
+        h.write("MSFT", 100, (0.07, 30.0, 4.2e6, 210))
+        h.write("MSFT", SESSION_MINUTES - 1, (0.5, 1.0, 1.0, 1))
+
+        wrote = await h.flush()
+        check(wrote, "flush reported nothing written when two symbols held cells")
+
+        path = h.path_for()
+        check(path.is_file(), f"no file at {path} after a flush")
+        check(not list(Path(d).glob("*.tmp")),
+              "a .tmp file was left behind — the rename is not atomic, and a "
+              "crash mid-write would leave a truncated file that loads as "
+              "garbage")
+
+        back = ScanHistory(d, "2026-09-08")
+        n = back.load()
+        check(n == 2, f"reloaded {n} symbols, wrote 2")
+        check(back.loaded_from == str(path),
+              "the reload did not record where it came from")
+
+        for sym in ("AAPL", "MSFT"):
+            a, b = h.cells[sym], back.cells[sym]
+            check(a.shape == b.shape,
+                  f"{sym} came back {b.shape}, wrote {a.shape}")
+            same = np.array_equal(a, b, equal_nan=True)
+            check(same,
+                  f"{sym} did not survive the round trip — the reloaded cells "
+                  f"differ from what was written")
+
+        # THE LAST MINUTE OF THE SESSION. An off-by-one in the array bound
+        # loses exactly one column, at the far end, where nobody looks.
+        got = back.cells["MSFT"][SESSION_MINUTES - 1]
+        check(float(got[0]) == 0.5,
+              f"the final session minute came back {got[0]}, wrote 0.5")
+
+
+async def case_history_gap_is_absent_not_quiet():
+    """Minutes the service was down come back as null, never as a value.
+
+    THE FAILURE THIS EXISTS FOR: a restart leaves a hole, and if the hole
+    renders as a number the grid shows a calm patch exactly where the service
+    was not running. On a page whose entire job is telling "quiet" from "not
+    trading", a gap that reads as quiet is the worst available bug.
+    """
+    import tempfile
+    from live.scan_history import ScanHistory
+
+    with tempfile.TemporaryDirectory() as d:
+        h = ScanHistory(d, "2026-09-08")
+        h.write("AAPL", 50, (0.30, 10.0, 900000.0, 40))
+        # 51 and 52 never written — the service was down.
+        h.write("AAPL", 53, (0.35, 11.0, 950000.0, 44))
+
+        out = h.slice(["AAPL"], 50, 4)["AAPL"]
+        check(out is not None and len(out) == 4,
+              f"slice returned {out!r} for four minutes")
+        check(out[0] is not None and out[3] is not None,
+              "written minutes came back empty")
+        check(out[1] is None and out[2] is None,
+              f"the gap came back as {out[1:3]!r} rather than null — a restart "
+              f"would render as a quiet patch")
+
+        # A symbol with no history at all is distinguishable from one with
+        # empty minutes, because "never held" and "held and silent" are
+        # different answers.
+        check(h.slice(["NVDA"], 50, 4)["NVDA"] is None,
+              "a symbol with no cells returned a series rather than null")
+
+        # NaN IS NOT JSON. Python's encoder emits bare NaN, which is not in
+        # the grammar; a browser rejects the whole frame rather than one cell.
+        import json
+        json.loads(json.dumps(h.slice(["AAPL"], 50, 4), allow_nan=False))
+
+
+async def case_history_minutes_are_absolute():
+    """A minute index means the same thing after a reload as before it."""
+    from live.scan_history import (minute_index, minute_epoch,
+                                   SESSION_START_ET, SESSION_MINUTES)
+
+    date = "2026-09-08"
+    for idx in (0, 1, 330, SESSION_MINUTES - 1):
+        ts = minute_epoch(date, idx)
+        back = minute_index(ts)
+        check(back == idx,
+              f"minute {idx} round-tripped to {back} — an index that shifts "
+              f"against the clock is wrong by one for an hour and then right "
+              f"again, which is how it survives review")
+
+    # 09:30 ET is minute 330 when the session starts at 04:00.
+    check(SESSION_START_ET == 240,
+          f"session start is minute {SESSION_START_ET}, expected 04:00 = 240")
+    open_idx = minute_index(minute_epoch(date, 9 * 60 + 30 - SESSION_START_ET))
+    check(open_idx == 330,
+          f"the 09:30 open landed at index {open_idx}, expected 330")
+
+    # Outside the window is None rather than a clamped index, because a
+    # clamped one silently writes 03:59 into the first cell of the session.
+    before = minute_epoch(date, 0) - 3600
+    check(minute_index(before) is None,
+          "an hour before the session window returned an index rather than "
+          "None, so it would be written into a cell")
+
+
+async def case_history_survives_a_corrupt_file():
+    """An unreadable file starts empty and says so; it does not stop the app.
+
+    Two hours of drawing is not state anything depends on. Losing it is a bad
+    morning; refusing to start is a dead tape for every pane on the box.
+    """
+    import tempfile
+    from live.scan_history import ScanHistory
+
+    with tempfile.TemporaryDirectory() as d:
+        h = ScanHistory(d, "2026-09-08")
+        h.path_for().write_bytes(b"this is not an npz file")
+        n = h.load()
+        check(n == 0, f"a corrupt file loaded {n} symbols")
+        check(h.last_error, "a corrupt file was swallowed without an error "
+                            "being recorded, so the page cannot say the "
+                            "history was lost")
+        check(h.cells == {}, "a corrupt load left partial state behind")
+
+
 CASES = [
     ("no aggregation",          case_no_aggregation),
     ("odd lots survive",        case_odd_lots_survive),
@@ -724,6 +870,10 @@ CASES = [
     ("scan state computes",     case_scan_state_computes_something),
     ("scan names truncation",   case_scan_status_names_a_truncated_window),
     ("rollup yields the loop",  case_rollup_does_not_block_the_loop),
+    ("history round-trips",     case_history_survives_a_restart),
+    ("a gap is not quiet",      case_history_gap_is_absent_not_quiet),
+    ("minutes are absolute",    case_history_minutes_are_absolute),
+    ("corrupt file is survived", case_history_survives_a_corrupt_file),
 ]
 
 
