@@ -141,7 +141,7 @@ def rss_mb() -> float:
 # in growable per-symbol float64 rings rather than a deque of dicts, because
 # 120 minutes of dicts across 600 symbols is gigabytes and the two hours of
 # history belong in per-minute cells instead.
-from live.scan import SymbolBuf, rollup_one                # noqa: E402
+from live.scan import SymbolBuf, rollup_all, rollup_one    # noqa: E402
 
 
 # -- the measurement --------------------------------------------------------
@@ -240,14 +240,22 @@ class Step:
                     self.taken = str(m.get("message") or "max_connections")
         self.busy_s += time.perf_counter() - t0
 
-    def do_rollup(self) -> None:
-        """Every symbol's current cell, timed as one pass."""
+    async def do_rollup(self) -> None:
+        """Every symbol's current cell, timed as one pass.
+
+        Runs the CHUNKED pass, the same one the hub runs, so the timing is of
+        the code that ships. It yields to the loop every few milliseconds, so
+        the figure below is wall-clock for the whole pass and NOT the length
+        of the block -- the block is what config.SCAN_ROLLUP_SLICE_MS bounds,
+        and the gate in check_live_hub is what proves it.
+        """
         now_s = time.time()
         t0 = time.perf_counter()
-        for buf in self.bufs.values():
-            rollup_one(buf, now_s, quiet_window_s=self.args.quiet_window_s,
-                       slow_window_s=self.args.slow_window_s,
-                       min_trades=self.args.min_trades)
+        await rollup_all(self.bufs, now_s,
+                         quiet_window_s=self.args.quiet_window_s,
+                         slow_window_s=self.args.slow_window_s,
+                         min_trades=self.args.min_trades,
+                         slice_s=config.SCAN_ROLLUP_SLICE_MS / 1000.0)
         self.rollup_ms.append((time.perf_counter() - t0) * 1000.0)
 
 
@@ -349,7 +357,7 @@ async def run_step(symbols, args) -> dict:
                 if st.taken:
                     raise ConnectionTaken(st.taken)
             if time.time() >= next_rollup:
-                st.do_rollup()
+                await st.do_rollup()
                 next_rollup = time.time() + args.rollup_s
 
         cpu1, rss1 = cpu_seconds(), rss_mb()

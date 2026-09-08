@@ -129,6 +129,21 @@ SCAN_RING_MAX = int(os.environ.get("LIVE_SCAN_RING_MAX", "72000"))
 SCAN_QUIET_WINDOW_S = float(os.environ.get("LIVE_SCAN_QUIET_WINDOW_S", "60"))
 SCAN_SLOW_WINDOW_S = float(os.environ.get("LIVE_SCAN_SLOW_WINDOW_S", "300"))
 
+# THE LONGEST THE ROLLUP MAY HOLD THE EVENT LOOP, in milliseconds.
+#
+# Measured: the rollup costs ~0.85 ms per symbol, so 430 symbols is a 367 ms
+# pass. Run as one uninterrupted loop that is 367 ms during which NOTHING else
+# in this process runs -- not the upstream reader, and not Hub.pump(), which
+# flushes to every browser every 100 ms. The tape page would stall for three
+# and a half flush intervals every five seconds, on the same connection the
+# scan shares, and the scan page would make it obvious.
+#
+# 8 ms is half a 60fps frame, so a pass can begin and finish inside one frame's
+# budget without the browser noticing. The slice is a TIME, not a symbol count,
+# so it holds as the per-symbol cost changes and on a slower box -- a count
+# tuned to today's 0.85 ms is a block that silently grows.
+SCAN_ROLLUP_SLICE_MS = float(os.environ.get("LIVE_SCAN_ROLLUP_SLICE_MS", "8"))
+
 
 # ── the persistent watchlist ────────────────────────────────────────────────
 #

@@ -40,6 +40,9 @@ configuration to guess at.
 """
 from __future__ import annotations
 
+import asyncio
+import time
+
 import numpy as np
 
 from app import scalp_quiet as quiet
@@ -164,3 +167,45 @@ def rollup_one(buf: SymbolBuf, now_s: float, *, quiet_window_s: float,
         range_c = float("nan")
         dollars = float("nan")
     return (ratio, range_c, dollars, n_slow)
+
+
+async def rollup_all(bufs, now_s: float | None = None, *,
+                     quiet_window_s: float, slow_window_s: float,
+                     min_trades: int, slice_s: float) -> dict:
+    """Every symbol's current state, WITHOUT holding the event loop.
+
+    The pass costs ~0.85 ms a symbol, so 430 symbols is 367 ms -- and run as
+    one uninterrupted loop that is 367 ms in which nothing else in this
+    process runs. Not the upstream reader, so frames queue; and not
+    Hub.pump(), which flushes to every browser every 100 ms, so the tape
+    stalls for three and a half flush intervals every five seconds. The scan
+    shares the tape's connection AND its process, so the cost lands on the
+    page that is not even asking for it.
+
+    So the loop yields whenever it has held the thread for `slice_s`. On a
+    TIME rather than a symbol count, deliberately: a count tuned to today's
+    per-symbol cost is a block that grows silently as the rollup gets more
+    expensive or the box gets slower, and the property worth keeping is
+    "never blocks longer than X", which only a clock can express.
+
+    NOW IS FROZEN FOR THE WHOLE PASS, and that is not laziness about the
+    clock. Every window ends at the same instant, so trades arriving mid-pass
+    are excluded from every symbol equally and the rows stay comparable to
+    each other -- which is the entire premise of a grid you read by scanning
+    down it. Taking a fresh clock per chunk would make a row's quietness
+    depend on where it happened to fall in the iteration order.
+    """
+    now_s = time.time() if now_s is None else now_s
+    out = {}
+    started = time.perf_counter()
+    for sym, buf in list(bufs.items()):
+        out[sym] = rollup_one(buf, now_s, quiet_window_s=quiet_window_s,
+                              slow_window_s=slow_window_s,
+                              min_trades=min_trades)
+        if time.perf_counter() - started >= slice_s:
+            # sleep(0) rather than a real delay: it reschedules this
+            # coroutine behind whatever is already runnable, which is exactly
+            # "let the reader and the pump have their turn" and nothing more.
+            await asyncio.sleep(0)
+            started = time.perf_counter()
+    return out

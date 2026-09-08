@@ -185,7 +185,7 @@ async def main() -> int:
               "no trades reached the scan store at all — the tier subscribed "
               "and received nothing, which on the page is a grid of empty rows")
 
-        state = hub.scan_state()
+        state = await hub.scan_state()
         live_syms = [s for s, v in state.items() if v[3] > 0]
         finite = [s for s, v in state.items() if v[0] == v[0]]
         print(f"  rollup: {len(live_syms)}/{len(state)} symbols printed, "

@@ -557,7 +557,7 @@ async def case_scan_state_computes_something():
                           100.0 + jitter + (0.20 if age < 20.0 else 0.0), 100))
     h._ingest(json.dumps(msgs))
 
-    st = h.scan_state(now)
+    st = await h.scan_state(now)
     check(set(st) == {"STILL", "MOVED"}, f"scan_state returned {sorted(st)}")
     for sym in ("STILL", "MOVED"):
         ratio, range_c, dollars, n = st[sym]
@@ -600,6 +600,108 @@ async def case_scan_status_names_a_truncated_window():
     check(st["buffer_mb"] > 0, "scan status reports no memory held")
 
 
+async def case_rollup_does_not_block_the_loop():
+    """The rollup must never hold the event loop for a visible stall.
+
+    WHY THIS IS NOT A PERFORMANCE NICETY. The scan shares the tape's process
+    as well as its socket, because the account permits one connection. A pass
+    costs ~0.85 ms a symbol, so 430 symbols run as a plain loop is ~370 ms in
+    which the upstream reader does not run and Hub.pump() does not flush --
+    and pump flushes to every browser every 100 ms. The tape stalls for three
+    and a half flush intervals every five seconds, on a page that never asked
+    for the scan.
+
+    MEASURED AS EVENT-LOOP LAG, not as pass duration. The chunked pass takes
+    slightly LONGER end to end than the blocking one; what changes is that it
+    lets go regularly. Timing the pass would show the fix as a small
+    regression, which is why the thing being asserted is the gap between
+    consecutive opportunities for another coroutine to run.
+
+    The blocking version is run too, and required to stall. Without that half,
+    a chunked pass that quietly did nothing would also report tiny gaps, and
+    this case would pass while measuring an empty loop.
+    """
+    import asyncio as _aio
+    from live.scan import SymbolBuf, rollup_all, rollup_one
+
+    n_syms, n_trades = 430, 60
+    now = time.time()
+    bufs = {}
+    for i in range(n_syms):
+        b = SymbolBuf(360.0, 512, 72000)
+        for k in range(n_trades):
+            age = 300.0 * (1.0 - k / n_trades)
+            b.push((now - age) * 1000.0, 100.0 + 0.01 * (k % 7), 100.0)
+        bufs[f"S{i}"] = b
+
+    async def heartbeat(stop, gaps):
+        """Yield constantly and record how long each turn had to wait."""
+        last = time.perf_counter()
+        while not stop.is_set():
+            await _aio.sleep(0)
+            t = time.perf_counter()
+            gaps.append(t - last)
+            last = t
+
+    async def worst_gap_during(coro):
+        stop = _aio.Event()
+        gaps = []
+        hb = _aio.create_task(heartbeat(stop, gaps))
+        await _aio.sleep(0)
+        result = await coro
+        stop.set()
+        await hb
+        return max(gaps) * 1000.0, result
+
+    kw = dict(quiet_window_s=config.SCAN_QUIET_WINDOW_S,
+              slow_window_s=config.SCAN_SLOW_WINDOW_S,
+              min_trades=10)
+
+    async def blocking():
+        # What the hub used to do: one uninterrupted pass.
+        return {s: rollup_one(b, now, **kw) for s, b in bufs.items()}
+
+    block_ms, block_out = await worst_gap_during(blocking())
+    slice_ms = config.SCAN_ROLLUP_SLICE_MS
+    chunk_ms, chunk_out = await worst_gap_during(
+        rollup_all(bufs, now, slice_s=slice_ms / 1000.0, **kw))
+
+    print(f"    rollup over {n_syms} symbols: worst loop gap "
+          f"{block_ms:.0f} ms blocking -> {chunk_ms:.0f} ms chunked "
+          f"(slice {slice_ms:.0f} ms)")
+
+    # THE INSTRUMENT WORKS. If the blocking pass does not stall, this box is
+    # too fast for the symbol count and the comparison below proves nothing.
+    check(block_ms > 50.0,
+          f"the blocking pass held the loop only {block_ms:.0f} ms over "
+          f"{n_syms} symbols — too fast to demonstrate a stall, so the "
+          f"chunked result below is not evidence of anything")
+
+    # A relative bound rather than only an absolute one: the absolute number
+    # moves with the box, the ratio does not.
+    check(chunk_ms < block_ms / 5.0,
+          f"chunking barely helped: {chunk_ms:.0f} ms against "
+          f"{block_ms:.0f} ms blocking")
+    check(chunk_ms < 60.0,
+          f"the chunked pass still held the loop {chunk_ms:.0f} ms, which is "
+          f"more than half of Hub.pump()'s 100 ms flush interval — the tape "
+          f"would visibly hitch")
+
+    # CHUNKING MUST NOT CHANGE THE ANSWER. Same frozen `now`, so every window
+    # covers the same interval and the two passes have to agree exactly; if
+    # they do not, the yield is letting state move underneath the pass.
+    check(set(block_out) == set(chunk_out),
+          "the chunked pass returned a different symbol set")
+    same = all(
+        all((a != a and b != b) or a == b
+            for a, b in zip(block_out[s], chunk_out[s]))
+        for s in block_out)
+    check(same,
+          "the chunked pass produced different numbers from the blocking one "
+          "at the same frozen `now` — the rows are no longer comparable to "
+          "each other, which is the whole premise of the grid")
+
+
 CASES = [
     ("no aggregation",          case_no_aggregation),
     ("odd lots survive",        case_odd_lots_survive),
@@ -621,6 +723,7 @@ CASES = [
     ("ingest routes by tier",   case_scan_ingest_routes_to_both_stores),
     ("scan state computes",     case_scan_state_computes_something),
     ("scan names truncation",   case_scan_status_names_a_truncated_window),
+    ("rollup yields the loop",  case_rollup_does_not_block_the_loop),
 ]
 
 

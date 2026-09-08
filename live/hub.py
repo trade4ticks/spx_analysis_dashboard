@@ -27,7 +27,7 @@ import websockets
 
 from app import scalp_quiet as quiet
 from live import config
-from live.scan import SymbolBuf, rollup_one
+from live.scan import SymbolBuf, rollup_all
 
 log = logging.getLogger("live.hub")
 
@@ -214,25 +214,29 @@ class Hub:
                      len(self.scan), len(add), len(drop), len(refused))
         return add, drop, refused
 
-    def scan_state(self, now_s: float | None = None) -> dict:
+    async def scan_state(self, now_s: float | None = None) -> dict:
         """Every scan symbol's current (ratio, range, dollars, trades).
 
-        ONE PASS OVER EVERY SYMBOL, and it costs ~0.8 ms each -- measured, so
-        at 600 symbols this blocks for half a second. That is why the caller
-        schedules it and this does not schedule itself: run from inside the
-        ingest loop it stalls the tape, which shares this process and redraws
-        thirty times a second.
+        ASYNC, AND THAT IS THE POINT. One pass costs ~0.85 ms a symbol, so 430
+        symbols is 367 ms -- and as a plain loop that is 367 ms in which the
+        upstream reader does not run and Hub.pump() does not flush, so the
+        TAPE stalls for three and a half of its 100 ms flush intervals every
+        five seconds. The scan shares this process with it and the cost lands
+        on the page that never asked for the scan.
+
+        There is deliberately no synchronous version to call by mistake. A
+        blocking twin sitting next to this one is a footgun with a docstring
+        telling you not to touch it, which is not a guard.
         """
-        now_s = time.time() if now_s is None else now_s
-        return {sym: rollup_one(buf, now_s,
-                                quiet_window_s=config.SCAN_QUIET_WINDOW_S,
-                                slow_window_s=config.SCAN_SLOW_WINDOW_S,
-                                # The VENDORED guard, not a 10 written here.
-                                # It is the trade count below which the IQR is
-                                # not believed, the pipeline owns it, and a
-                                # second copy is a threshold that drifts.
-                                min_trades=quiet.MIN_TRADES)
-                for sym, buf in self.scan.items()}
+        return await rollup_all(
+            self.scan, now_s,
+            quiet_window_s=config.SCAN_QUIET_WINDOW_S,
+            slow_window_s=config.SCAN_SLOW_WINDOW_S,
+            # The VENDORED guard, not a 10 written here. It is the trade count
+            # below which the IQR is not believed, the pipeline owns it, and a
+            # second copy is a threshold that drifts.
+            min_trades=quiet.MIN_TRADES,
+            slice_s=config.SCAN_ROLLUP_SLICE_MS / 1000.0)
 
     # ── pins ────────────────────────────────────────────────────────────
     async def pin(self, symbol: str) -> str | None:
