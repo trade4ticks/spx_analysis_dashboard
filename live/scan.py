@@ -119,6 +119,19 @@ class SymbolBuf:
     def bytes_held(self) -> int:
         return self.t.nbytes + self.p.nbytes + self.s.nbytes
 
+    def last_price(self) -> float:
+        """The most recent print, or nan.
+
+        NOT part of a cell, and deliberately not routed through the rollup.
+        Price is what the row is labelled with, not something the grid
+        measures -- it has no window, no history and no gate -- so adding a
+        fifth number to every stored minute to carry it would widen the
+        session file by a quarter for a value only ever read at `now`.
+        """
+        if self.n == 0:
+            return float("nan")
+        return float(self.p[(self.head - 1) % self.cap])
+
 
 def rollup_one(buf: SymbolBuf, now_s: float, *, quiet_window_s: float,
                slow_window_s: float, min_trades: int) -> tuple:

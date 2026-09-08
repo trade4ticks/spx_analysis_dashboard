@@ -15,8 +15,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from live import broker, config, norms
+from live import broker, config, norms, scan_universe
 from live.hub import HUB
+from live.scan_runner import ScanRunner
+from live.scan_history import SESSION_MINUTES
+
+# One runner for the process, created here rather than in lifespan so
+# the route handlers can name it without a module-global set later.
+SCAN = ScanRunner(HUB)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,7 +50,16 @@ async def lifespan(app: FastAPI):
              else "disabled (set LIVE_TRADING_ENABLED=1 to allow orders)")
     for p in broker.problems():
         log.warning("broker: %s", p)
-    tasks = [asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump())]
+    # RESTORED BEFORE ANYTHING TICKS. spx-live restarts on every deploy,
+    # several times a day, and the grid's two hours is the page's whole
+    # context -- a row is worth looking at because of what the last ninety
+    # minutes did. Loading after the first tick would write a cell into an
+    # empty store and then load over it.
+    n = SCAN.history.load()
+    log.info("scan history: %d symbols for %s (%s)", n, SCAN.history.date,
+             SCAN.history.loaded_from or "no file yet")
+    tasks = [asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump()),
+             asyncio.create_task(SCAN.run())]
     # Pinned BEFORE anything connects, so a symbol on the list is already
     # buffering by the time a pane asks for it — which is the entire point of
     # pinning rather than watching.
@@ -56,6 +71,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await SCAN.stop()
         await HUB.stop()
         await norms.close()
         await broker.aclose()
@@ -92,6 +108,7 @@ def _status() -> dict:
     """
     st = HUB.status()
     st["trading"] = broker.trading_state()
+    st["scan_runner"] = SCAN.status()
     return st
 
 
@@ -303,6 +320,140 @@ async def broker_flatten(req: Request):
             armed=bool(b.get("armed")))
     except Exception as exc:                                # noqa: BLE001
         return _broker_fail(exc)
+
+
+
+# ── the scan page ───────────────────────────────────────────────────────────
+#
+# ITS OWN ROUTE ON THE SAME SERVICE, which is the arrangement the connection
+# limit forces: the account permits one upstream websocket, so the scan holds
+# its symbols on the tape's. It is deliberately not a pane on the tape page --
+# the two are meant to sit on different monitors and be driven independently.
+
+
+@app.get("/scan", response_class=HTMLResponse)
+async def scan_page(request: Request):
+    return templates.TemplateResponse(request, "equities_scan.html")
+
+
+@app.get("/scan/defaults")
+async def scan_defaults():
+    """What the page opens on the FIRST time, before local storage has an
+    opinion.
+
+    Served rather than baked into the JavaScript so the numbers a person
+    reasons about -- the volume floor in particular -- live in one place and
+    move without a rebuild. The page persists whatever the user sets; these
+    only seed it.
+    """
+    return {
+        "volume_floor": config.SCAN_VOLUME_FLOOR,
+        "ratio_low": config.SCAN_RATIO_LOW,
+        "ratio_high": config.SCAN_RATIO_HIGH,
+        "grid_minutes": config.SCAN_GRID_MINUTES,
+        "session_minutes": SESSION_MINUTES,
+        "tick_s": config.SCAN_TICK_S,
+        "max_symbols": config.SCAN_MAX_SYMBOLS,
+        "quiet_window_s": config.SCAN_QUIET_WINDOW_S,
+        "slow_window_s": config.SCAN_SLOW_WINDOW_S,
+    }
+
+
+@app.get("/scan/seed")
+async def scan_seed(limit: int = 0, min_range_cents: float = 0.0,
+                    min_dollar_per_min: float = 0.0, order: str = "trades"):
+    """The mechanical starting list, from the pipeline's own universe.
+
+    READ-ONLY and run on demand. The thresholds are inputs rather than
+    constants because the brief asks for them to be movable, and the default
+    is mechanical rather than hand-picked -- but the page can still override
+    or extend the result by hand.
+    """
+    import asyncpg
+    limit = limit or config.SCAN_MAX_SYMBOLS
+    try:
+        con = await asyncpg.connect(scan_universe.scalp_dsn())
+    except Exception as exc:                              # noqa: BLE001
+        # NAMED, not an empty list. A seed that silently returns nothing is
+        # indistinguishable from a universe with nothing in it, and the page
+        # would show an empty grid as though that were the answer.
+        return {"error": f"{type(exc).__name__}: {exc}", "symbols": []}
+    try:
+        counts = await scan_universe.counts(con)
+        rows = await scan_universe.seed(
+            con, limit=limit, order=order,
+            min_range_cents=min_range_cents,
+            min_dollar_per_min=min_dollar_per_min)
+    finally:
+        await con.close()
+    return {"counts": counts, "symbols": rows, "order": order,
+            "min_range_cents": min_range_cents,
+            "min_dollar_per_min": min_dollar_per_min}
+
+
+@app.post("/scan/symbols")
+async def scan_symbols(req: Request):
+    """{"symbols": [...]} -- replace the held set wholesale.
+
+    Wholesale because that is what the page means: this is the list now. See
+    Hub.scan_set for why it is not built out of adds and removes.
+    """
+    body = await req.json()
+    syms = body.get("symbols") or []
+    if not isinstance(syms, list):
+        return {"error": "symbols must be a list"}
+    added, dropped, refused = await HUB.scan_set(syms)
+    return {"held": sorted(HUB.scan), "added": added, "dropped": dropped,
+            "refused": refused}
+
+
+@app.get("/scan/sessions")
+async def scan_sessions():
+    """Session dates with a file on disk. Yesterday's grid is loadable."""
+    return {"current": SCAN.history.date, "dates": SCAN.history.sessions()}
+
+
+@app.websocket("/scan/ws")
+async def scan_ws(sock: WebSocket):
+    """One scan page. Gets the grid once, then the live column on every tick.
+
+    THE HISTORY GOES OUT ONCE. 430 symbols x 120 minutes x 4 numbers is a
+    megabyte of JSON; re-sending it every five seconds would be twelve
+    megabytes a minute for data the page already has and that does not change.
+    Only the rightmost column moves, so only the rightmost column is pushed.
+    """
+    await sock.accept()
+    SCAN.subscribe(sock)
+    try:
+        await sock.send_json({"ev": "hello", "data": _status()})
+        while True:
+            msg = await sock.receive_json()
+            act = msg.get("action")
+            if act == "grid":
+                # The page asks for the window it wants to draw, so a
+                # narrower screen does not pay for two hours it will not show.
+                minutes = int(msg.get("minutes") or config.SCAN_GRID_MINUTES)
+                cur = SCAN.last_minute
+                first = max(0, (cur if cur is not None
+                                else SESSION_MINUTES) - minutes + 1)
+                syms = sorted(HUB.scan)
+                await sock.send_json({
+                    "ev": "grid",
+                    "date": SCAN.history.date,
+                    "first_minute": first,
+                    "minutes": minutes,
+                    "current_minute": cur,
+                    "symbols": syms,
+                    "cells": SCAN.history.slice(syms, first, minutes),
+                })
+            elif act == "status":
+                await sock.send_json({"ev": "status", "data": _status()})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:                              # noqa: BLE001
+        log.info("scan socket ended: %s", exc)
+    finally:
+        SCAN.unsubscribe(sock)
 
 
 @app.websocket("/ws")

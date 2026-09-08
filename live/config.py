@@ -129,6 +129,45 @@ SCAN_RING_MAX = int(os.environ.get("LIVE_SCAN_RING_MAX", "72000"))
 SCAN_QUIET_WINDOW_S = float(os.environ.get("LIVE_SCAN_QUIET_WINDOW_S", "60"))
 SCAN_SLOW_WINDOW_S = float(os.environ.get("LIVE_SCAN_SLOW_WINDOW_S", "300"))
 
+# How often the live "now" column is recomputed. Quiet is the thing that
+# changes and the reason the page is open, so it has to be responsive; five
+# seconds is twelve passes a minute, which measured at ~8% of one core for 430
+# symbols.
+SCAN_TICK_S = float(os.environ.get("LIVE_SCAN_TICK_S", "5"))
+
+# Where the grid's minutes are kept so a deploy does not blank them. Files are
+# per session date and are NOT pruned -- see scan_history for why yesterday's
+# grid being loadable is a feature rather than an oversight.
+SCAN_HISTORY_DIR = os.environ.get(
+    "LIVE_SCAN_HISTORY_DIR", str(ROOT / "data" / "scan_history"))
+
+# How many minutes the grid shows. The store keeps the whole session; this is
+# only how much of it goes over the wire on connect.
+SCAN_GRID_MINUTES = int(os.environ.get("LIVE_SCAN_GRID_MINUTES", "120"))
+
+# ── the page's own defaults ─────────────────────────────────────────────────
+#
+# SERVED, NOT BAKED INTO THE JAVASCRIPT, so the number a person reasons about
+# lives in one place and can be moved without a rebuild. The page persists
+# whatever the user sets in local storage; these are only what it opens on the
+# first time.
+#
+# THE VOLUME FLOOR IS ARITHMETIC, NOT A PERCENTILE. At $17k round trips,
+# staying under a few percent of a minute's flow puts the floor near $750k/min.
+# A moving percentile would slide underneath the user as the symbol set
+# changes, which is the same objection as a colour ramp fitted to whatever this
+# morning happened to look like.
+SCAN_VOLUME_FLOOR = float(os.environ.get("LIVE_SCAN_VOLUME_FLOOR", "750000"))
+
+# The colour anchors: brightest at the low, dark at the high, uniformly dark
+# above. Measured 2026-09-08 the ratio ran p10 0.07 / p50 0.42 / p90 1.22, so
+# a ramp spread over the full 0-2.4 puts nearly every name in two shades. These
+# open near that spread and the page shows the LIVE percentiles beside them, so
+# the anchors can be placed against what the market is doing rather than
+# against a remembered morning.
+SCAN_RATIO_LOW = float(os.environ.get("LIVE_SCAN_RATIO_LOW", "0.10"))
+SCAN_RATIO_HIGH = float(os.environ.get("LIVE_SCAN_RATIO_HIGH", "1.20"))
+
 # THE LONGEST THE ROLLUP MAY HOLD THE EVENT LOOP, in milliseconds.
 #
 # Measured: the rollup costs ~0.85 ms per symbol, so 430 symbols is a 367 ms

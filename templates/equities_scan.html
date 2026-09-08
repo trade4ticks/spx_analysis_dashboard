@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Equities Scan</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+
+  <style>
+    /* Equities Scan — page-scoped, prefixed .sc-.
+       WINDOWED DOM, NOT CANVAS. Measured on this machine at 120 cells a row:
+       a full repaint with every row in the document is 390 ms at 600 rows and
+       29 ms with only the viewport's rows present, while canvas-windowed is
+       2.4 ms. Windowing is the variable that matters; canvas is the escape
+       hatch if the expanded bands turn out expensive, and it would cost the
+       hover, the pin and the tooltip becoming hit-testing written by hand. */
+    html { color-scheme: dark; }
+    .sc-body { flex:1; display:flex; flex-direction:column; min-height:0;
+               padding:10px 12px; }
+
+    .sc-bar {
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:11px;
+    }
+    .sc-grp { display:flex; align-items:center; gap:6px; }
+    .sc-grp.sep { border-left:1px solid var(--border); padding-left:14px; }
+    .sc-lab { color:var(--muted); white-space:nowrap; }
+    .sc-num { font-variant-numeric:tabular-nums; color:var(--text);
+              font-weight:600; }
+    .sc-spacer { flex:1; }
+    .sc-inp, .sc-sel {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--text); font-size:11px; padding:3px 7px; border-radius:4px;
+      color-scheme: dark;
+    }
+    .sc-inp.n { width:74px; text-align:right; font-variant-numeric:tabular-nums; }
+    .sc-btn {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--muted); font-size:11px; padding:3px 9px; border-radius:4px;
+      cursor:pointer;
+    }
+    .sc-btn:hover { color:var(--text); }
+    .sc-btn.on { border-color:var(--accent); color:var(--accent); }
+    .sc-btn:disabled { opacity:0.4; cursor:default; }
+    input[type=range] { accent-color:var(--accent); width:120px; }
+    input[type=range].wide { width:150px; }
+
+    /* ── the percentile readout ────────────────────────────────────────
+       Beside the anchors, live, because otherwise placing them is guesswork.
+       "0.09 / 0.44 / 1.31" says immediately where the resolution should go,
+       and the reset button below snaps the anchors onto the outer two. */
+    .sc-pct { font-variant-numeric:tabular-nums; color:var(--accent);
+              font-weight:700; letter-spacing:0.3px; }
+    .sc-pct .mid { color:var(--text); }
+
+    .sc-warn {
+      background:rgba(232,67,147,0.14); border:1px solid #e84393;
+      color:#e84393; font-weight:600; font-size:11px;
+      padding:6px 12px; border-radius:5px; margin-bottom:8px;
+    }
+    .sc-note { font-size:10px; color:var(--muted); }
+
+    /* ── the grid ──────────────────────────────────────────────────────
+       A fixed-height scroller with a spacer sized to the full row count, and
+       only the visible rows in the document. The scrollbar has to describe
+       the whole list or it lies about how much grid there is. */
+    .sc-scroll {
+      flex:1; min-height:0; overflow:auto; position:relative;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px;
+    }
+    .sc-spacer-el { position:relative; width:100%; }
+    .sc-row {
+      position:absolute; left:0; right:0; display:flex; align-items:center;
+      height:18px; padding-left:6px; white-space:nowrap;
+      border-bottom:1px solid rgba(255,255,255,0.03);
+    }
+    .sc-row.pinned { background:rgba(52,152,219,0.10); }
+    .sc-row.open { background:rgba(255,255,255,0.04); }
+    .sc-sym {
+      width:62px; flex:none; font-size:11px; font-weight:700;
+      color:var(--text); letter-spacing:0.2px; cursor:pointer;
+    }
+    .sc-px {
+      width:62px; flex:none; font-size:10px; color:var(--muted);
+      text-align:right; padding-right:8px;
+      font-variant-numeric:tabular-nums;
+    }
+    /* THE TWO BARS CARRY THE PAGE. Measured, the quiet ratio ran p10 0.07,
+       p50 0.42, p90 1.22 — most names sit under 1.0 most of the time, so the
+       colour alone does not separate them and the range and the flow are what
+       actually decide whether a name is worth opening. They are wide, they
+       are labelled with their value, and they are not an afterthought beside
+       the grid. */
+    .sc-bar-cell { width:96px; flex:none; padding-right:6px; }
+    .sc-bar-track {
+      position:relative; height:11px; background:rgba(255,255,255,0.05);
+      border-radius:2px; overflow:hidden;
+    }
+    .sc-bar-fill { position:absolute; left:0; top:0; bottom:0; }
+    .sc-bar-fill.range { background:#9b59b6; }
+    .sc-bar-fill.vol { background:#e0a800; }
+    .sc-bar-fill.vol.under { background:#5a4a10; }
+    .sc-bar-txt {
+      position:absolute; right:3px; top:0; line-height:11px; font-size:9px;
+      color:#fff; font-variant-numeric:tabular-nums; text-shadow:0 0 3px #000;
+    }
+    .sc-cells { flex:none; display:flex; height:13px; }
+    .sc-cell { width:6px; margin-right:1px; height:13px; }
+    /* A GATED MINUTE IS STRUCK OUT, whatever the ratio says. A dead name is
+       quiet by default and must not light up the grid; hatching says "not
+       eligible" rather than pretending the minute had no character. */
+    .sc-cell.gated {
+      background-image:repeating-linear-gradient(
+        45deg, transparent, transparent 1px, #000a 1px, #000a 2px);
+    }
+    .sc-now {
+      width:34px; flex:none; margin-left:8px; height:13px; border-radius:2px;
+      border:1px solid rgba(255,255,255,0.25);
+    }
+    .sc-qual {
+      width:44px; flex:none; text-align:right; padding-right:10px;
+      font-size:10px; font-variant-numeric:tabular-nums; color:var(--text);
+      font-weight:600;
+    }
+    /* ── the expanded row ──────────────────────────────────────────────
+       Three bands in place — quiet, volume, range — each with its own ramp,
+       so all three histories for one name are readable at once. NOT a mode:
+       a mode means remembering which one you are in and getting it wrong at
+       the moment it matters. Hover expands, click pins, several pins
+       coexist. */
+    .sc-bands { display:flex; flex-direction:column; gap:1px; }
+    .sc-band { display:flex; height:7px; }
+    .sc-band .sc-cell { height:7px; }
+    .sc-bandlab {
+      position:absolute; font-size:8px; color:var(--muted);
+      letter-spacing:0.3px; pointer-events:none;
+    }
+    .sc-head {
+      display:flex; align-items:center; height:20px; padding-left:6px;
+      font-size:10px; color:var(--muted); border-bottom:1px solid var(--border);
+      position:sticky; top:0; background:var(--surface); z-index:2;
+    }
+    .sc-head > div { flex:none; }
+    .sc-empty { padding:26px; text-align:center; color:var(--muted);
+                font-size:12px; }
+  </style>
+</head>
+<body class="page" x-data="equitiesScan" x-init="init()">
+  {% set nav_active = "/equities-scan" %}{% include "_nav.html" %}
+
+  <div class="sc-body">
+
+    <template x-if="warning">
+      <div class="sc-warn" x-text="warning"></div>
+    </template>
+
+    <!-- ── the symbol set ───────────────────────────────────────────── -->
+    <div class="sc-bar">
+      <span class="sc-lab">seed</span>
+      <span class="sc-lab">range &ge;</span>
+      <input class="sc-inp n" type="number" step="0.5" min="0"
+             x-model.number="seedMinRange">
+      <span class="sc-lab">c</span>
+      <span class="sc-lab">$/min &ge;</span>
+      <input class="sc-inp n" type="number" step="50000" min="0"
+             x-model.number="seedMinDollar">
+      <button class="sc-btn" @click="seedList()" :disabled="busy">Seed</button>
+      <button class="sc-btn" @click="showManual = !showManual"
+              :class="showManual ? 'on' : ''">Edit list</button>
+      <span class="sc-note" x-text="setSummary()"></span>
+      <span class="sc-spacer"></span>
+      <span class="sc-note" x-text="connSummary()"></span>
+    </div>
+
+    <template x-if="showManual">
+      <div class="sc-bar">
+        <textarea class="sc-inp" rows="3" style="flex:1;min-width:320px"
+                  x-model="manualText"
+                  placeholder="AAPL MSFT TSLA — space, comma or newline separated. Replaces the held set."></textarea>
+        <button class="sc-btn" @click="applyManual()" :disabled="busy">Apply</button>
+        <button class="sc-btn" @click="fillManualFromHeld()">Load current</button>
+      </div>
+    </template>
+
+    <!-- ── the controls that do the work ────────────────────────────── -->
+    <div class="sc-bar">
+      <!-- THE VOLUME GATE FIRST, because it is what actually discriminates.
+           The default is arithmetic, not a percentile: at $17k round trips,
+           staying under a few percent of a minute's flow puts it near
+           $750k/min. A moving percentile would slide underneath the user as
+           the symbol set changed. -->
+      <div class="sc-grp">
+        <span class="sc-lab">volume floor</span>
+        <input type="range" class="wide" min="0" max="6" step="0.02"
+               x-model.number="floorLog" @input="onFloor()">
+        <span class="sc-num" x-text="fmtDollars(volumeFloor) + '/min'"></span>
+      </div>
+
+      <div class="sc-grp sep">
+        <span class="sc-lab">quiet anchors</span>
+        <input type="range" min="0" max="2.4" step="0.01"
+               x-model.number="ratioLow" @input="onAnchors()">
+        <span class="sc-num" x-text="ratioLow.toFixed(2)"></span>
+        <span class="sc-lab">&rarr;</span>
+        <input type="range" min="0" max="2.4" step="0.01"
+               x-model.number="ratioHigh" @input="onAnchors()">
+        <span class="sc-num" x-text="ratioHigh.toFixed(2)"></span>
+      </div>
+
+      <!-- The live distribution, beside the sliders it is there to aim.
+           Without it, placing an anchor is guesswork about a number nobody
+           can see. -->
+      <div class="sc-grp">
+        <span class="sc-lab">p10/p50/p90</span>
+        <span class="sc-pct">
+          <span x-text="fmtPct(pct.p10)"></span> /
+          <span class="mid" x-text="fmtPct(pct.p50)"></span> /
+          <span x-text="fmtPct(pct.p90)"></span>
+        </span>
+        <button class="sc-btn" @click="snapAnchors()"
+                title="Snap the anchors to the current p10 and p90">Reset</button>
+      </div>
+
+      <span class="sc-spacer"></span>
+      <span class="sc-note" x-text="sortSummary()"></span>
+    </div>
+
+    <!-- ── the grid ─────────────────────────────────────────────────── -->
+    <div class="sc-head">
+      <div style="width:62px">symbol</div>
+      <div style="width:62px;text-align:right;padding-right:8px">price</div>
+      <div style="width:96px">range (p10-p90)</div>
+      <div style="width:96px">$/min</div>
+      <div :style="'width:' + gridWidth() + 'px'"
+           x-text="'last ' + gridMinutes + ' minutes'"></div>
+      <div style="width:34px;margin-left:8px">now</div>
+      <div style="width:44px;text-align:right;padding-right:10px">qual</div>
+    </div>
+
+    <div class="sc-scroll" x-ref="scroll" @scroll="onScroll()">
+      <template x-if="!rows.length">
+        <div class="sc-empty" x-text="emptyMessage()"></div>
+      </template>
+      <div class="sc-spacer-el" :style="'height:' + totalHeight() + 'px'">
+        <template x-for="r in visible" :key="r.sym">
+          <div class="sc-row"
+               :class="rowClass(r)"
+               :style="rowStyle(r)"
+               @mouseenter="hover(r.sym)"
+               @mouseleave="unhover(r.sym)"
+               @click="togglePin(r.sym)">
+            <div class="sc-sym" x-text="r.sym"></div>
+            <div class="sc-px" x-text="fmtPrice(r.price)"></div>
+            <div class="sc-bar-cell">
+              <div class="sc-bar-track">
+                <div class="sc-bar-fill range"
+                     :style="'width:' + rangePct(r) + '%'"></div>
+                <div class="sc-bar-txt" x-text="fmtRange(r.range)"></div>
+              </div>
+            </div>
+            <div class="sc-bar-cell">
+              <div class="sc-bar-track">
+                <div class="sc-bar-fill vol"
+                     :class="r.dollars < volumeFloor ? 'under' : ''"
+                     :style="'width:' + volPct(r) + '%'"></div>
+                <div class="sc-bar-txt" x-text="fmtDollars(r.dollars)"></div>
+              </div>
+            </div>
+            <div class="sc-cells" x-html="r.html"></div>
+            <div class="sc-now" :style="'background:' + nowColour(r)"
+                 :title="nowTitle(r)"></div>
+            <div class="sc-qual" x-text="r.qual"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <script defer src={{ asset('js/equities_scan.js') }}></script>
+</body>
+</html>

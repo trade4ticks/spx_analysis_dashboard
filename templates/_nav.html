@@ -45,4 +45,11 @@
       <a class="nav-link{% if nav_active == "/equities-live" %} on{% endif %}"
          href="//{{ request.url.hostname }}:{{ live_port }}/"
          title="A separate service on port {{ live_port }} — if it crashes it does not take these with it">Equities Live</a>
+      {#- Equities Scan rides the SAME service as the tape, and not for tidiness:
+          the market-data account permits one upstream websocket, so the scan
+          holds its symbols on the tape's connection. Same port, same host
+          expression, for the same reason. -#}
+      <a class="nav-link{% if nav_active == "/equities-scan" %} on{% endif %}"
+         href="//{{ request.url.hostname }}:{{ live_port }}/scan"
+         title="The quietness grid — same service as Equities Live, because the feed allows one connection">Equities Scan</a>
     </nav>
