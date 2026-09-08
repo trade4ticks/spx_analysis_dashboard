@@ -530,6 +530,153 @@ async def symbols_from_db(limit: int, args) -> list[str]:
     return [r["symbol"] for r in rows]
 
 
+# -- the self-test ----------------------------------------------------------
+
+def self_test() -> int:
+    """Prove the harness measures WORK, not an early return.
+
+    The failure this exists to catch has happened in this project before, in
+    exactly this shape: a timed loop over a computation that quietly produces
+    nothing runs FASTER than one that works, so a broken rollup reports as
+    excellent capacity. Every number in the report would then be a measurement
+    of `return nan`.
+
+    So the rollup is run against a synthetic tape whose answers are known, and
+    a NaN ratio is a FAILURE rather than a shrug. Also checks the ring after
+    it has wrapped, because ordering is the one part of a ring buffer that is
+    wrong silently and only under load.
+    """
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+
+    # /proc parsing. A nan here means every cpu and rss figure in the report
+    # is nan, which reads as "not measured" only if you notice it.
+    if sys.platform.startswith("linux"):
+        c0 = cpu_seconds()
+        check(c0 == c0 and c0 >= 0,
+              f"cpu_seconds() returned {c0} on Linux -- /proc/self/stat "
+              f"parsing is wrong and every CPU figure would be nan")
+        junk = [x * x for x in range(400000)]
+        c1 = cpu_seconds()
+        check(c1 > c0, f"cpu_seconds() did not advance across real work "
+                       f"({c0} -> {c1}); it is not reading the counter")
+        del junk
+        r = rss_mb()
+        check(r == r and r > 1, f"rss_mb() returned {r}; VmRSS was not found")
+    else:
+        print("  (not Linux: /proc accounting is untested here and will "
+              "report nan -- run the real measurement on the VPS)")
+
+    # THE RING WRAPS WITHOUT LOSING ORDER. A ring is wrong silently and only
+    # under load, so this writes past the ceiling deliberately and checks the
+    # sequence rather than the count.
+    #
+    # 150 records one millisecond apart span 150 ms, all of it inside the
+    # 10-second retention -- so every eviction here is of a LIVE record, the
+    # ring grows to its ceiling, and past that the loss is counted. Both
+    # halves of the growth rule are exercised by the same loop.
+    b = SymbolBuf(10.0, 8, 100)
+    for i in range(150):
+        b.push(float(i), 10.0 + i, 1.0)
+    t, p, s = b.ordered()
+    check(t.size == 100,
+          f"ring holds {t.size} after 150 pushes into a ceiling of 100")
+    check(b.grows > 0,
+          "the ring never grew, though every eviction was of a record still "
+          "inside the retention window -- the busy names lose the back of "
+          "their range window exactly when it matters")
+    check(b.evicted_live == 50,
+          f"ring counted {b.evicted_live} live evictions at the ceiling, "
+          f"want 50 -- an unreported truncation draws a short range bar that "
+          f"is indistinguishable from a narrow one")
+    check(list(t[:3]) == [50.0, 51.0, 52.0],
+          f"wrapped ring came back out of order: starts {list(t[:3])}, "
+          f"want [50.0, 51.0, 52.0]")
+    check(t[-1] == 149.0, f"wrapped ring's newest is {t[-1]}, want 149.0")
+    check(bool(np.all(np.diff(t) == 1.0)),
+          "wrapped ring is not monotonic in time")
+    check(bool(np.all(np.diff(p) == 1.0)),
+          "price and time were reordered differently -- ordered() rolls the "
+          "three arrays independently and they no longer line up")
+
+    # AND IT DOES NOT GROW WHEN THE EVICTION IS CORRECT. Records FIVE seconds
+    # apart against a 10-second retention, so eight slots already hold forty
+    # seconds and the oldest is long outside the window by the time it is
+    # overwritten. That is the ring working, and it must allocate nothing.
+    # Without this case, "grow on overflow" grows forever on any symbol busy
+    # enough to fill its ring -- the memory failure the growth rule exists to
+    # avoid, arrived at from the other direction.
+    #
+    # The spacing has to beat retain_s / cap0, not merely be "wide". At one
+    # second apart an 8-slot ring holds 8 seconds against a 10-second window
+    # and is CORRECT to grow -- which is what this check asserted on its first
+    # writing, and it failed the code for doing the right thing.
+    q = SymbolBuf(10.0, 8, 100)
+    for i in range(60):
+        q.push(float(i * 5000), 10.0, 1.0)
+    check(q.grows == 0,
+          f"the ring grew {q.grows} times while evicting records already "
+          f"outside the retention window -- that is unbounded growth on every "
+          f"busy symbol")
+    check(q.cap == 8, f"capacity drifted to {q.cap} with nothing to retain")
+
+    # The rollup, against a tape with a KNOWN answer. Two 60s windows: the
+    # first jitters around 100.00, the second around 100.20 -- so the level
+    # shifts about 20 cents against an IQR of a few cents, and the ratio must
+    # come out well above 1. A quiet tape (no shift) must come out near 0.
+    now = time.time()
+    rng = np.random.default_rng(7)
+
+    def tape(shift_dollars):
+        buf = SymbolBuf(600.0, 512, 4000)
+        # 40 trades/min over the 80 seconds the rollup asks for, plus the
+        # five-minute slow window behind it.
+        for k in range(400):
+            age = 300.0 * (1.0 - k / 400.0)          # 300s ago -> now
+            base = 100.0 + (shift_dollars if age < 20.0 else 0.0)
+            buf.push((now - age) * 1000.0,
+                     base + float(rng.normal(0, 0.01)), 100.0)
+        return buf
+
+    loud = rollup_one(tape(0.20), now, quiet_window_s=60.0,
+                      slow_window_s=300.0, min_trades=10)
+    still = rollup_one(tape(0.0), now, quiet_window_s=60.0,
+                       slow_window_s=300.0, min_trades=10)
+    for name, got in (("moved", loud), ("still", still)):
+        check(got[0] == got[0],
+              f"{name} tape produced a NaN quiet ratio -- the rollup is "
+              f"computing nothing and its timing is meaningless")
+        check(got[1] == got[1] and got[1] > 0,
+              f"{name} tape produced range {got[1]}, want a positive span")
+        check(got[2] == got[2] and got[2] > 0,
+              f"{name} tape produced {got[2]} dollars/min, want positive")
+        check(got[3] >= 10, f"{name} tape saw {got[3]} slow-window trades")
+    check(loud[0] > still[0],
+          f"a tape that moved 20 cents scored {loud[0]:.3f}, no louder than "
+          f"one that did not ({still[0]:.3f}) -- the ratio is not responding "
+          f"to the shift it exists to measure")
+    check(still[0] < 1.0,
+          f"an unmoved tape scored {still[0]:.3f}; a still name must read "
+          f"quiet or the grid lights up on nothing")
+
+    # Dollar volume is checkable exactly, and it is worth checking rather
+    # than eyeballing: 400 trades of 100 shares near $100 is $4.0M over the
+    # 300-second slow window, so $800k a minute. The bounds are loose because
+    # this is a wiring check on the /60 normalisation -- getting that wrong by
+    # a factor of five is what the amber bar would silently render.
+    check(7e5 < still[2] < 9e5,
+          f"dollars/min came out {still[2]:.0f}; 400 x 100sh x ~$100 over "
+          f"300s is ~8.0e5, so the per-minute normalisation is wrong")
+
+    for f in fails:
+        print(f"  FAIL  {f}")
+    print(f"\n  self-test: {'PASS' if not fails else str(len(fails)) + ' FAILED'}")
+    return 1 if fails else 0
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(
         description="Measure the Equities Scan symbol ceiling.")
