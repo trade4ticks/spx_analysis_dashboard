@@ -31,6 +31,9 @@ pyyaml>=6.0.2
 # Lazy-imported with a weekend-only fallback so the app still serves
 # if pip hasn't run yet — install on VPS: pip install pandas_market_calendars
 pandas>=2.2.0
+# Replay reads the trade_quote parquet store directly; the dashboard had no
+# parquet reader before it.
+pyarrow>=15.0.0
 pandas_market_calendars>=4.4.0
 
 # Equities Live reads its arrival-rate comparison against the MARKET clock:

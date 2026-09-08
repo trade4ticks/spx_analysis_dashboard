@@ -74,6 +74,10 @@ GATES = [
        live_flag=True),
     _s("check_scalp_fills.py", note="the Schwab statement parser"),
     _s("check_scalp_metrics.py", note="no hardcoded metric names"),
+    # Replay reads PARQUET, so its gate fabricates a session instead: which
+    # minute a trade lands in, where the print/candle switch falls, and
+    # whether the payload is valid JSON are all decidable without the store.
+    _s("check_replay.py", note="replay candles, mode switch, readout"),
     # Runs the shipped component in node: a colour threshold must never
     # change which points draw or how far the axes reach.
     _s("check_scatter_invariants.py",
