@@ -340,6 +340,13 @@ async def run_step(symbols, args) -> dict:
     grows = sum(b.grows for b in st.bufs.values())
     lost = sum(b.evicted_live for b in st.bufs.values())
     ring_mb = sum(b.bytes_held() for b in st.bufs.values()) / 1048576.0
+    # WHAT THE FIXED-SIZE SCHEME WOULD HAVE COST, on the same symbols and the
+    # same retention. The first capacity run gave every symbol a ring sized
+    # from one assumed rate, which is the arrangement the growth rule
+    # replaced -- so the saving is the point of the change and belongs in the
+    # output rather than in someone's memory of a previous number.
+    fixed_mb = len(st.bufs) * (max(64, int(args.retain_s * args.max_rate))
+                               * 3 * 8) / 1048576.0
     out = {
         "symbols": len(symbols),
         "channels": ",".join(channels),
@@ -363,6 +370,7 @@ async def run_step(symbols, args) -> dict:
         "ring_grows": grows,
         "ring_evicted_live": lost,
         "ring_mb": ring_mb,
+        "ring_fixed_mb": fixed_mb,
         "unknown_symbol_records": st.unknown_syms,
         "status": st.status_msgs[:10],
     }
@@ -389,7 +397,10 @@ def report(r: dict, args) -> None:
         print("  rollup     not run (--no-rollup)")
     print(f"  coverage   {r['symbols_with_trades']}/{r['symbols']} symbols "
           f"printed at least once")
-    print(f"  rings      {r['ring_mb']:.1f} MB held, {r['ring_grows']} grows")
+    saved = (1.0 - r["ring_mb"] / r["ring_fixed_mb"]) * 100.0         if r["ring_fixed_mb"] else float("nan")
+    print(f"  rings      {r['ring_mb']:.1f} MB held, {r['ring_grows']} grows "
+          f"-- fixed-size would be {r['ring_fixed_mb']:.1f} MB "
+          f"({saved:.0f}% saved)")
     if r["ring_evicted_live"]:
         print(f"  WARNING    {r['ring_evicted_live']} live records evicted -- "
               f"rings hit the --max-rate ceiling, so the range bar is "
