@@ -163,7 +163,11 @@ function replayScope() {
       ev.preventDefault();
       const cv = this.$refs.cv;
       const rect = cv.getBoundingClientRect();
-      const k = Math.exp((ev.deltaY > 0 ? 1 : -1) * -0.18);
+      // Scroll UP zooms IN, on both axes. deltaY is positive scrolling
+      // down, so a positive exponent widens the window and a negative one
+      // narrows it -- the sign here is the whole gesture, and it was
+      // backwards.
+      const k = Math.exp((ev.deltaY > 0 ? 1 : -1) * 0.18);
       const v = this.view;
       // Shift (or alt) zooms PRICE. The default gesture is time, because
       // that is the axis being read.
@@ -289,12 +293,31 @@ function replayScope() {
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
         ctx.fillText(this.clock(t), x + 3, H - 4);
       }
-      for (let i = 1; i < 5; i++) {
-        const y = (H / 5) * i;
+      // PRICE LINES ON ROUND NUMBERS. Dividing the range into fifths gave
+      // 324.57 / 323.68 / 322.79 -- arbitrary values that carry no meaning on
+      // their own and cannot be compared between two views of the same name.
+      // The step comes off a fixed ladder and scales with the zoom: dollars
+      // when the range is wide, then 50c, 25c, 10c, 5c, 1c. Never finer than a
+      // cent, because there is no half tick to read.
+      const pstep = this.priceStep(v.p1 - v.p0);
+      for (let p = Math.ceil(v.p0 / pstep) * pstep; p <= v.p1; p += pstep) {
+        const y = Y(p);
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-        const p = v.p1 - (v.p1 - v.p0) * (i / 5);
         ctx.fillText(p.toFixed(2), 3, y - 3);
       }
+    },
+
+    // Coarsest first. The loop takes the first step that still puts at
+    // least four lines on screen, which keeps five to nine at any zoom and
+    // stops the axis becoming a hatch.
+    PRICE_STEPS: [500, 200, 100, 50, 20, 10, 5, 2, 1,
+                  0.5, 0.25, 0.1, 0.05, 0.01],
+
+    priceStep(range) {
+      for (const s of this.PRICE_STEPS) {
+        if (range / s >= 4) return s;
+      }
+      return 0.01;
     },
 
     drawPrints(ctx, X, Y, W, H) {
@@ -353,8 +376,10 @@ function replayScope() {
         if (t + 60 < v.t0 || t > v.t1) continue;
         const x = X(t + 30);
         const up = c.c[i] >= c.o[i];
-        ctx.strokeStyle = up ? 'rgba(107,214,160,0.85)' : 'rgba(232,107,107,0.85)';
-        ctx.fillStyle = up ? 'rgba(107,214,160,0.35)' : 'rgba(232,107,107,0.35)';
+        // Blue up, pink down -- this project's accents, not a charting
+        // library's green and red, which belong to a different tool.
+        ctx.strokeStyle = up ? 'rgba(52,152,219,0.85)' : 'rgba(232,67,147,0.85)';
+        ctx.fillStyle = up ? 'rgba(52,152,219,0.35)' : 'rgba(232,67,147,0.35)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(x, Y(c.h[i])); ctx.lineTo(x, Y(c.l[i]));
@@ -413,6 +438,75 @@ function replayScope() {
       return '1-minute candles — ' + this.win.count.toLocaleString() +
              ' trades in view, over the ' + this.printLimit.toLocaleString() +
              ' limit; zoom in for prints';
+    },
+
+    // ── the hand-off from Ranked candidates ───────────────────────────
+    //
+    // The ranked table dispatches, this listens on window. Two Alpine scopes
+    // on one page deliberately -- the scalp bundle has no reason to grow --
+    // so an event is the join rather than a shared object.
+    async onReplayLoad(detail) {
+      if (!detail || !detail.symbol) return;
+      const sym = String(detail.symbol).toUpperCase();
+      // THE CANDIDATE'S DATE, IF THERE IS PARQUET FOR IT. Ranked candidates
+      // read Postgres, which holds metrics for sessions whose raw parquet has
+      // already aged past the 45-day retention -- so the date is checked
+      // rather than assumed, and a mismatch is said out loud rather than
+      // silently drawing a different day than the row that was clicked.
+      const want = detail.date || '';
+      let note = '';
+      if (want && want !== this.date) {
+        if (this.sessions.some((x) => x.date === want)) {
+          await this.pickDate(want);
+        } else {
+          note = ' — no parquet for ' + want + ', showing ' + this.date;
+        }
+      }
+      if (!this.symbols.includes(sym)) {
+        this.error = sym + ' has no parquet on ' + this.date +
+                     ' (coverage varies by session)';
+        return;
+      }
+      await this.pickSymbol(sym);
+      if (note) this.error = 'loaded ' + sym + note;
+      const el = document.getElementById('replay');
+      if (el && el.scrollIntoView) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    },
+
+    // ── the span, and why it is renamed when the window is wide ────────
+    //
+    // Over 6.5 hours p10-p90 is how far price TRAVELLED, not the dispersion
+    // of prints at any moment. Left labelled "p10-p90" at that width it reads
+    // as a range that could be captured, which is exactly the conflation that
+    // made the scan metric useless.
+    //
+    // 120 seconds is the boundary because it is the widest window quiet.py
+    // treats as one (WINDOWS_SEC is 30/60/120), so it is this project's own
+    // line for where a price span still describes a capture rather than a
+    // journey -- not a number invented here.
+    SPAN_IS_RANGE_S: 120,
+
+    spanIsRange() {
+      return !!this.view &&
+             (this.view.t1 - this.view.t0) <= this.SPAN_IS_RANGE_S;
+    },
+    spanLabel() {
+      if (this.spanIsRange()) return 'p10-p90 ';
+      const s = this.view ? this.view.t1 - this.view.t0 : 0;
+      const w = s < 5400 ? (s / 60).toFixed(0) + ' min'
+                         : (s / 3600).toFixed(1) + ' h';
+      return 'span over ' + w + ' ';
+    },
+    spanTitle() {
+      return this.spanIsRange()
+        ? 'p10-p90 of trade prices in this window — the dispersion of prints, '
+          + 'which is the part that could be captured'
+        : 'How far price TRAVELLED over this window, not the dispersion of '
+          + 'prints at any moment, and not a range you could capture. Zoom to '
+          + this.SPAN_IS_RANGE_S + 's or less — the widest window quiet.py '
+          + 'treats as one — for the capture reading.';
     },
 
     fmt(v, places) {

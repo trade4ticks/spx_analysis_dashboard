@@ -122,6 +122,14 @@
     .rp-width { color:var(--text); font-variant-numeric:tabular-nums; }
     .rp-readout { color:var(--muted); font-variant-numeric:tabular-nums; }
     .rp-readout b { color:var(--text); }
+    /* A SESSION-WIDE SPAN IS NOT A RANGE ANYONE COULD CAPTURE. Over 6.5 hours
+       p10-p90 is how far price travelled, not the dispersion of prints at any
+       moment -- the same conflation that made the scan metric useless. Above
+       the widest window quiet.py treats as one (120s) it is renamed and
+       dimmed, so it reads as orientation rather than as a property of the
+       name. */
+    .rp-span-wide, .rp-span-wide b { color:#6b7480; font-style:italic;
+                                     font-weight:400; }
     .rp-hover { color:#e84393; font-weight:700; min-width:74px;
                 text-align:right; font-variant-numeric:tabular-nums; }
     .rp-stage { position:relative; height:520px; border:1px solid var(--border);
@@ -812,13 +820,20 @@
                 <template x-for="row in visibleRows()" :key="row.symbol">
                   <tr :class="{fail: !row.passes}" :title="failNote(row)">
                     <td>
-                      <!-- Opens this name in Ticker detail and scrolls to it.
-                           The ranked table answers "which name"; the detail
-                           panel answers "when in the day", and going from one
-                           to the other by retyping the ticker is the join a
-                           reader should not have to make by hand. -->
-                      <b class="sc-pick" @click="pickTicker(row.symbol)"
-                         :title="'Open ' + row.symbol + ' in Ticker detail'"
+                      <!-- Opens this name in Ticker detail AND loads it in
+                           Replay. The ranked table answers "which name", the
+                           detail panel answers "when in the day", and Replay
+                           answers "what did it actually look like" — going
+                           between them by retyping the ticker is the join a
+                           reader should not have to make by hand.
+
+                           Replay is a separate Alpine scope, so this is a
+                           dispatched event rather than a call: $dispatch
+                           bubbles to window and the panel listens there,
+                           which keeps the 83 KB scalp bundle out of it. -->
+                      <b class="sc-pick"
+                         @click="pickTicker(row.symbol); $dispatch('replay-load', {symbol: row.symbol, date: (meta && meta.date) || ''})"
+                         :title="'Open ' + row.symbol + ' in Ticker detail and Replay'"
                          x-text="row.symbol"></b>
                       <span class="sc-tag warn" x-show="!row.passes" x-cloak
                             style="margin-left:5px">excluded</span>
@@ -871,6 +886,96 @@
               Every column header carries its metric name and definition on
               hover; the column chooser lists all 232.
             </span>
+          </div>
+        </div>
+      </div>
+
+    <!-- ── Replay ──────────────────────────────────────────────────────────
+           The tape for a past session, read straight from parquet. Its OWN
+           Alpine scope rather than additions to equitiesScalp: it shares this
+           page and nothing else, and the scalp bundle is 83 KB with no reason
+           to grow. It is read-only, touches no database, and has no connection
+           to the live service or the scan grid.
+
+           NOT A METRIC. Four metric families have failed to identify a
+           tradeable name, each by formalising a description into something
+           subtly different. This exists so specific windows can be pointed at
+           and labelled, so the next metric is built against examples. -->
+      <div class="sc-panel" id="replay" x-data="replayScope()"
+           x-init="initReplay()"
+           @replay-load.window="onReplayLoad($event.detail)">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Replay</span>
+          <span class="sc-panel-sub">the tape as it happened — parquet, RTH
+            only, read-only</span>
+        </div>
+        <div class="sc-panel-body">
+
+          <div class="rp-bar">
+            <span class="rp-lab">session</span>
+            <select class="rp-sel" @change="pickDate($event.target.value)">
+              <template x-for="s in sessions" :key="s.date">
+                <option :value="s.date" :selected="s.date === date"
+                        x-text="dateLabel(s)"></option>
+              </template>
+            </select>
+            <span class="rp-lab">symbol</span>
+            <select class="rp-sel" @change="pickSymbol($event.target.value)">
+              <option value="">choose…</option>
+              <template x-for="s in symbols" :key="s">
+                <option :value="s" :selected="s === symbol" x-text="s"></option>
+              </template>
+            </select>
+            <label class="rp-chk">
+              <input type="checkbox" x-model="showNbbo" @change="fetchWindow()">
+              <span>bid / ask</span>
+            </label>
+            <span class="rp-spacer"></span>
+            <span class="rp-hint">scroll = zoom time · shift+scroll = price ·
+              drag = pan · double-click = whole session</span>
+          </div>
+
+          <template x-if="error">
+            <div class="rp-err" x-text="error"></div>
+          </template>
+
+          <div class="rp-status">
+            <span class="rp-mode" :class="mode === 'prints' ? 'prints' : ''"
+                  x-text="modeLabel()"></span>
+            <span class="rp-width" x-text="widthLabel()"></span>
+            <span class="rp-spacer"></span>
+            <template x-if="stats">
+              <span class="rp-readout">
+                <span x-text="fmtInt(stats.trades_per_min)"></span> trades/min
+                &middot;
+                <span x-text="fmtInt(stats.shares_per_min)"></span> sh/min
+                &middot;
+                <span :class="spanIsRange() ? '' : 'rp-span-wide'"
+                      :title="spanTitle()">
+                  <span x-text="spanLabel()"></span>
+                  <b x-text="fmt(stats.p10_p90_cents, 1)"></b>c
+                </span>
+                &middot; spread
+                <b x-text="fmt(stats.spread_cents_tw, 2)"></b>c
+              </span>
+            </template>
+            <span class="rp-hover" x-text="hoverLabel()"></span>
+          </div>
+
+          <div class="rp-stage" :class="dragging ? 'dragging' : ''">
+            <canvas x-ref="cv"
+                    @wheel="onWheel($event)"
+                    @mousedown="onDown($event)"
+                    @mousemove="onMove($event)"
+                    @mouseup="onUp()"
+                    @mouseleave="onLeave()"
+                    @dblclick="onDouble()"></canvas>
+            <template x-if="loading">
+              <div class="rp-loading">reading the session…</div>
+            </template>
+            <template x-if="!symbol && !loading">
+              <div class="rp-loading">pick a symbol</div>
+            </template>
           </div>
         </div>
       </div>
@@ -2112,89 +2217,6 @@
       </div><!-- /research panels -->
     </div><!-- /sc-mode-research -->
 
-    <!-- ── Replay ──────────────────────────────────────────────────────────
-         The tape for a past session, read straight from parquet. Its OWN
-         Alpine scope rather than additions to equitiesScalp: it shares this
-         page and nothing else, and the scalp bundle is 83 KB with no reason
-         to grow. It is read-only, touches no database, and has no connection
-         to the live service or the scan grid.
-
-         NOT A METRIC. Four metric families have failed to identify a
-         tradeable name, each by formalising a description into something
-         subtly different. This exists so specific windows can be pointed at
-         and labelled, so the next metric is built against examples. -->
-    <div class="sc-panel" x-data="replayScope()" x-init="initReplay()">
-      <div class="sc-panel-hdr">
-        <span class="sc-panel-title">Replay</span>
-        <span class="sc-panel-sub">the tape as it happened — parquet, RTH
-          only, read-only</span>
-      </div>
-      <div class="sc-panel-body">
-
-        <div class="rp-bar">
-          <span class="rp-lab">session</span>
-          <select class="rp-sel" @change="pickDate($event.target.value)">
-            <template x-for="s in sessions" :key="s.date">
-              <option :value="s.date" :selected="s.date === date"
-                      x-text="dateLabel(s)"></option>
-            </template>
-          </select>
-          <span class="rp-lab">symbol</span>
-          <select class="rp-sel" @change="pickSymbol($event.target.value)">
-            <option value="">choose…</option>
-            <template x-for="s in symbols" :key="s">
-              <option :value="s" :selected="s === symbol" x-text="s"></option>
-            </template>
-          </select>
-          <label class="rp-chk">
-            <input type="checkbox" x-model="showNbbo" @change="fetchWindow()">
-            <span>bid / ask</span>
-          </label>
-          <span class="rp-spacer"></span>
-          <span class="rp-hint">scroll = zoom time · shift+scroll = price ·
-            drag = pan · double-click = whole session</span>
-        </div>
-
-        <template x-if="error">
-          <div class="rp-err" x-text="error"></div>
-        </template>
-
-        <div class="rp-status">
-          <span class="rp-mode" :class="mode === 'prints' ? 'prints' : ''"
-                x-text="modeLabel()"></span>
-          <span class="rp-width" x-text="widthLabel()"></span>
-          <span class="rp-spacer"></span>
-          <template x-if="stats">
-            <span class="rp-readout">
-              <span x-text="fmtInt(stats.trades_per_min)"></span> trades/min
-              &middot;
-              <span x-text="fmtInt(stats.shares_per_min)"></span> sh/min
-              &middot; p10-p90
-              <b x-text="fmt(stats.p10_p90_cents, 1)"></b>c
-              &middot; spread
-              <b x-text="fmt(stats.spread_cents_tw, 2)"></b>c
-            </span>
-          </template>
-          <span class="rp-hover" x-text="hoverLabel()"></span>
-        </div>
-
-        <div class="rp-stage" :class="dragging ? 'dragging' : ''">
-          <canvas x-ref="cv"
-                  @wheel="onWheel($event)"
-                  @mousedown="onDown($event)"
-                  @mousemove="onMove($event)"
-                  @mouseup="onUp()"
-                  @mouseleave="onLeave()"
-                  @dblclick="onDouble()"></canvas>
-          <template x-if="loading">
-            <div class="rp-loading">reading the session…</div>
-          </template>
-          <template x-if="!symbol && !loading">
-            <div class="rp-loading">pick a symbol</div>
-          </template>
-        </div>
-      </div>
-    </div>
   </div><!-- /sc-body -->
 
   <script src={{ asset('js/equities_scalp.js') }}></script>
