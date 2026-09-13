@@ -90,6 +90,14 @@
       <div class="seg-btn" :class="{on: submode==='change'}" @click="onSubmodeChange('change')">1D Chg</div>
     </div>
 
+    <!-- Percentile-shading lookback (IV only), ending at the latest trade date -->
+    <div class="ctrl-div" x-show="mode==='iv'"></div>
+    <span class="ctrl-lbl" x-show="mode==='iv'">Window</span>
+    <div class="seg" x-show="mode==='iv'">
+      <div class="seg-btn" :class="{on: lookback==='90d'}" @click="onLookbackChange('90d')">90d</div>
+      <div class="seg-btn" :class="{on: lookback==='1y'}"  @click="onLookbackChange('1y')">1y</div>
+    </div>
+
     <div class="ctrl-div"></div>
 
     <!-- Date -->

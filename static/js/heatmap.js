@@ -128,7 +128,9 @@ document.addEventListener('alpine:init', () => {
         // Raw grid data from API
         current: [],  // [{dte, put_delta, v}, …]
         prev:    [],  // for 1D change
-        stats:   {},  // {dte_pd: {p05, p50, p95}} for IV raw coloring
+        stats:   {},  // {dte_pd: {p05, p50, p95}} for IV raw coloring — the active window's
+        lookback:   '90d',  // node_stats window: 90d | 1y
+        statsCache: {},     // {lookback: stats} — keyed so a switch never shows the other window
 
         // Derived sorted axis values
         dtes:       [],
@@ -187,6 +189,17 @@ document.addEventListener('alpine:init', () => {
             this.renderGrid();   // data already loaded; just recolor
         },
 
+        async onLookbackChange(lb) {
+            if (lb === this.lookback) return;
+            this.lookback = lb;
+            if (this.statsCache[lb]) {
+                this.stats = this.statsCache[lb];
+                this.renderGrid();   // already fetched this window; just recolor
+            } else {
+                await this.loadGrid();
+            }
+        },
+
         // ── Data loading ─────────────────────────────────────────────────────
         get prevDate() {
             const idx = this.dates.indexOf(this.date);
@@ -204,10 +217,13 @@ document.addEventListener('alpine:init', () => {
                     ? `date=${this.date}&time=${this.time}&prev_date=${prev}&prev_time=15:45`
                     : `date=${this.date}&time=${this.time}`;
 
+                // Captured before the await: if the toggle flips mid-flight, the
+                // response is still filed under the window it was requested for.
+                const lb = this.lookback;
                 const [gridRes, statsRes] = await Promise.all([
                     fetch(`/api/heatmap/${this.mode}?${query}`),
-                    this.mode === 'iv' && !Object.keys(this.stats).length
-                        ? fetch('/api/heatmap/node_stats')
+                    this.mode === 'iv' && !this.statsCache[lb]
+                        ? fetch(`/api/heatmap/node_stats?lookback=${lb}`)
                         : Promise.resolve(null),
                 ]);
 
@@ -216,8 +232,11 @@ document.addEventListener('alpine:init', () => {
                 this.prev    = grid.prev    ?? [];
 
                 if (statsRes) {
-                    this.stats = await statsRes.json();
+                    // Never cache an error body as if it were stats.
+                    if (!statsRes.ok) throw new Error(`node_stats?lookback=${lb} → HTTP ${statsRes.status}`);
+                    this.statsCache[lb] = await statsRes.json();
                 }
+                this.stats = this.statsCache[this.lookback] ?? {};
 
                 // Derive sorted axes
                 const dteSet   = new Set(this.current.map(r => r.dte));

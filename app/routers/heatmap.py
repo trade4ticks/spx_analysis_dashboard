@@ -4,15 +4,28 @@ Heatmap endpoints — full IV surface grid for a single snapshot.
 GET /api/heatmap/iv          — raw IV per (dte, put_delta)
 GET /api/heatmap/skew        — skew slope vs ATM forward per node
 GET /api/heatmap/term        — forward vol anchored at 30 DTE per node
-GET /api/heatmap/node_stats  — historical IV percentiles per node (for coloring)
+GET /api/heatmap/node_stats  — historical IV percentiles per node (for coloring),
+                               ?lookback=90d|1y
 """
+import logging
 import math
-from datetime import date as date_type, time as time_type
+from datetime import date as date_type, time as time_type, timedelta
+from time import perf_counter
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from app.db import get_pool
 
 router = APIRouter(tags=["heatmap"])
+
+# uvicorn configures its own loggers but not the root logger, so INFO from a
+# module-level logger would be silently dropped. Log through uvicorn's.
+log = logging.getLogger("uvicorn.error")
+
+# Percentile-shading lookback, in calendar days ending at the newest trade_date
+# present in spx_surface -- not today -- so a pipeline running a day or two
+# behind still yields a full window. A closed set on purpose: anything else is
+# a 400, never a fall-through to an unbounded scan of all history.
+NODE_STATS_LOOKBACK_DAYS = {"90d": 90, "1y": 365}
 
 
 # ── IV ────────────────────────────────────────────────────────────────────────
@@ -172,30 +185,64 @@ async def _fetch_term(conn, date: str, time: str) -> list[dict]:
 # ── Per-node IV statistics for colour scaling ─────────────────────────────────
 
 @router.get("/node_stats")
-async def heatmap_node_stats(pool=Depends(get_pool)) -> dict:
+async def heatmap_node_stats(
+    lookback: str = Query("90d"),
+    pool=Depends(get_pool),
+) -> dict:
     """
-    Historical IV percentiles (p05, p50, p95) per (dte, put_delta),
-    using the daily closest-to-15:45 snapshot for each trade date.
+    IV percentiles (p05, p50, p95) per (dte, put_delta) over the lookback
+    window, using each trade date's exact 15:45 snapshot. Days without one
+    (holidays, half-days) drop out of the sample; there is no fallback.
     p50 is used as the grey midpoint; p05/p95 pin the colour extremes.
     """
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT dte, put_delta,
-                   PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY iv) AS p05,
-                   PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY iv) AS p50,
-                   PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY iv) AS p95
-            FROM (
-                SELECT DISTINCT ON (trade_date, dte, put_delta)
-                    dte, put_delta, iv
-                FROM spx_surface
-                ORDER BY trade_date, dte, put_delta,
-                         ABS(EXTRACT(EPOCH FROM (quote_time - '15:45'::time)))
-            ) AS daily
-            GROUP BY dte, put_delta
-            ORDER BY dte, put_delta
-            """
+    days = NODE_STATS_LOOKBACK_DAYS.get(lookback)
+    if days is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"lookback must be one of {list(NODE_STATS_LOOKBACK_DAYS)}; "
+                   f"got {lookback!r}",
         )
+
+    t0 = perf_counter()
+    last_day = first_day = None
+    try:
+        async with pool.acquire() as conn:
+            last_day = await conn.fetchval("SELECT MAX(trade_date) FROM spx_surface")
+            if last_day is None:
+                return {}
+            # Inclusive on both ends, so the window is exactly `days` calendar days.
+            first_day = last_day - timedelta(days=days - 1)
+            t1 = perf_counter()
+            rows = await conn.fetch(
+                """
+                SELECT dte, put_delta,
+                       PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY iv) AS p05,
+                       PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY iv) AS p50,
+                       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY iv) AS p95
+                FROM spx_surface
+                WHERE trade_date BETWEEN $1 AND $2
+                  AND quote_time = '15:45'
+                GROUP BY dte, put_delta
+                ORDER BY dte, put_delta
+                """,
+                first_day,
+                last_day,
+            )
+    except Exception as exc:
+        # uvicorn logs the traceback itself; this adds what it can't know.
+        log.error(
+            "node_stats failed: lookback=%s window=%s..%s after %.0f ms — %s: %s",
+            lookback, first_day, last_day, (perf_counter() - t0) * 1000,
+            type(exc).__name__, exc,
+        )
+        raise
+    t2 = perf_counter()
+    log.info(
+        "node_stats lookback=%s window=%s..%s nodes=%d "
+        "acquire+max_date=%.0f ms stats_query=%.0f ms",
+        lookback, first_day, last_day, len(rows),
+        (t1 - t0) * 1000, (t2 - t1) * 1000,
+    )
 
     return {
         f"{r['dte']}_{r['put_delta']}": {
