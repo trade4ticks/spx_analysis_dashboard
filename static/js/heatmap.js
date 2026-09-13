@@ -3,10 +3,10 @@
  *
  * Color conventions
  * -----------------
- * IV Raw:
- *   p05 (low IV)  → pink  #ff1a8c
- *   p50 (median)  → dark  #2a2a2a
- *   p95 (high IV) → blue  #1a8cff
+ * IV Raw (shape of the displayed snapshot only — no history):
+ *   snapshot p05 IV    → pink  #ff1a8c   (anything lower clamps to pink)
+ *   snapshot median IV → dark  #2a2a2a
+ *   snapshot p95 IV    → blue  #1a8cff   (anything higher clamps to blue)
  *   Interpolated linearly between these stops.
  *
  * SKEW / TERM Raw:
@@ -78,6 +78,15 @@ function colorForChange(v, range) {
     return toHex(threeStop(t));
 }
 
+/** Quantile q of an ascending-sorted, non-empty array, linearly interpolated
+ *  between neighbouring values (the same definition as PERCENTILE_CONT). */
+function quantileSorted(sorted, q) {
+    const pos = (sorted.length - 1) * q;
+    const lo  = Math.floor(pos);
+    const hi  = Math.ceil(pos);
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
 /** Determine text color (black or white) for readability against bg. */
 function contrastColor(hex) {
     const r = parseInt(hex.slice(1, 3), 16);
@@ -128,9 +137,6 @@ document.addEventListener('alpine:init', () => {
         // Raw grid data from API
         current: [],  // [{dte, put_delta, v}, …]
         prev:    [],  // for 1D change
-        stats:   {},  // {dte_pd: {p05, p50, p95}} for IV raw coloring — the active window's
-        lookback:   '90d',  // node_stats window: 90d | 1y
-        statsCache: {},     // {lookback: stats} — keyed so a switch never shows the other window
 
         // Derived sorted axis values
         dtes:       [],
@@ -189,17 +195,6 @@ document.addEventListener('alpine:init', () => {
             this.renderGrid();   // data already loaded; just recolor
         },
 
-        async onLookbackChange(lb) {
-            if (lb === this.lookback) return;
-            this.lookback = lb;
-            if (this.statsCache[lb]) {
-                this.stats = this.statsCache[lb];
-                this.renderGrid();   // already fetched this window; just recolor
-            } else {
-                await this.loadGrid();
-            }
-        },
-
         // ── Data loading ─────────────────────────────────────────────────────
         get prevDate() {
             const idx = this.dates.indexOf(this.date);
@@ -217,26 +212,11 @@ document.addEventListener('alpine:init', () => {
                     ? `date=${this.date}&time=${this.time}&prev_date=${prev}&prev_time=15:45`
                     : `date=${this.date}&time=${this.time}`;
 
-                // Captured before the await: if the toggle flips mid-flight, the
-                // response is still filed under the window it was requested for.
-                const lb = this.lookback;
-                const [gridRes, statsRes] = await Promise.all([
-                    fetch(`/api/heatmap/${this.mode}?${query}`),
-                    this.mode === 'iv' && !this.statsCache[lb]
-                        ? fetch(`/api/heatmap/node_stats?lookback=${lb}`)
-                        : Promise.resolve(null),
-                ]);
+                const gridRes = await fetch(`/api/heatmap/${this.mode}?${query}`);
 
                 const grid = await gridRes.json();
                 this.current = grid.current ?? [];
                 this.prev    = grid.prev    ?? [];
-
-                if (statsRes) {
-                    // Never cache an error body as if it were stats.
-                    if (!statsRes.ok) throw new Error(`node_stats?lookback=${lb} → HTTP ${statsRes.status}`);
-                    this.statsCache[lb] = await statsRes.json();
-                }
-                this.stats = this.statsCache[this.lookback] ?? {};
 
                 // Derive sorted axes
                 const dteSet   = new Set(this.current.map(r => r.dte));
@@ -268,9 +248,27 @@ document.addEventListener('alpine:init', () => {
 
             const mode    = this.mode;
             const submode = this.submode;
-            const stats   = this.stats;
             const dtes    = this.dtes;
             const pds     = this.putDeltas;
+
+            // IV raw shading stops come from this snapshot alone, over its
+            // non-null nodes, recomputed on every render: p05 → pink, median →
+            // dark, p95 → blue. Nodes outside p05–p95 clamp to the end colours
+            // in threeStop. No values: stops stay null and cells paint '#222'.
+            // All values equal: p05 === p95, and colorForRaw's max === min
+            // guard paints mid-grey without dividing.
+            let ivP05 = null, ivP50 = null, ivP95 = null;
+            if (mode === 'iv') {
+                const vals = this.current
+                    .map(r => r.v)
+                    .filter(v => v != null && !isNaN(v))
+                    .sort((a, b) => a - b);
+                if (vals.length) {
+                    ivP05 = quantileSorted(vals, 0.05);
+                    ivP50 = quantileSorted(vals, 0.50);
+                    ivP95 = quantileSorted(vals, 0.95);
+                }
+            }
 
             // Choose change half-range
             const chgRange = mode === 'iv' ? IV_CHG_RANGE
@@ -313,18 +311,14 @@ document.addEventListener('alpine:init', () => {
                     } else {
                         // Raw mode
                         if (mode === 'iv') {
-                            const st  = stats[key];
-                            const p05 = st?.p05 ?? null;
-                            const p50 = st?.p50 ?? null;
-                            const p95 = st?.p95 ?? null;
-                            bg = (cur != null && p05 != null)
-                                ? colorForRaw(cur, p05, p50, p95)
+                            bg = (cur != null && ivP50 !== null)
+                                ? colorForRaw(cur, ivP05, ivP50, ivP95)
                                 : '#222';
                             displayVal = fmtCell('iv', 'raw', cur);
                             title = [
                                 `DTE=${dte}  Δ=${pdLabel(pd)}`,
                                 `IV: ${displayVal}`,
-                                `p05=${fmtPct(p05)}  p50=${fmtPct(p50)}  p95=${fmtPct(p95)}`,
+                                `Snapshot p05=${fmtPct(ivP05)}  p50=${fmtPct(ivP50)}  p95=${fmtPct(ivP95)}`,
                             ].join('\n');
                         } else if (mode === 'skew') {
                             bg = colorForRaw(cur, SKEW_RAW_MIN, (SKEW_RAW_MIN + SKEW_RAW_MAX) / 2, SKEW_RAW_MAX);

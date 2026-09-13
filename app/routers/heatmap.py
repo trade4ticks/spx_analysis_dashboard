@@ -184,6 +184,9 @@ async def _fetch_term(conn, date: str, time: str) -> list[dict]:
 
 # ── Per-node IV statistics for colour scaling ─────────────────────────────────
 
+# CURRENTLY UNUSED BY THE FRONTEND. IV shading is relative to the displayed
+# snapshot (computed in heatmap.js); this is kept as the starting point for a
+# separate historical z-score view.
 @router.get("/node_stats")
 async def heatmap_node_stats(
     lookback: str = Query("90d"),
