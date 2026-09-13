@@ -4,9 +4,9 @@
  * Color conventions
  * -----------------
  * IV Raw (shape of the displayed snapshot only — no history):
- *   snapshot p05 IV    → pink  #ff1a8c   (anything lower clamps to pink)
+ *   snapshot p01 IV    → pink  #ff1a8c   (anything lower clamps to pink)
  *   snapshot median IV → dark  #2a2a2a
- *   snapshot p95 IV    → blue  #1a8cff   (anything higher clamps to blue)
+ *   snapshot p99 IV    → blue  #1a8cff   (anything higher clamps to blue)
  *   Interpolated linearly between these stops.
  *
  * SKEW / TERM Raw:
@@ -252,21 +252,21 @@ document.addEventListener('alpine:init', () => {
             const pds     = this.putDeltas;
 
             // IV raw shading stops come from this snapshot alone, over its
-            // non-null nodes, recomputed on every render: p05 → pink, median →
-            // dark, p95 → blue. Nodes outside p05–p95 clamp to the end colours
+            // non-null nodes, recomputed on every render: p01 → pink, median →
+            // dark, p99 → blue. Nodes outside p01–p99 clamp to the end colours
             // in threeStop. No values: stops stay null and cells paint '#222'.
-            // All values equal: p05 === p95, and colorForRaw's max === min
+            // All values equal: p01 === p99, and colorForRaw's max === min
             // guard paints mid-grey without dividing.
-            let ivP05 = null, ivP50 = null, ivP95 = null;
+            let ivP01 = null, ivP50 = null, ivP99 = null;
             if (mode === 'iv') {
                 const vals = this.current
                     .map(r => r.v)
                     .filter(v => v != null && !isNaN(v))
                     .sort((a, b) => a - b);
                 if (vals.length) {
-                    ivP05 = quantileSorted(vals, 0.05);
+                    ivP01 = quantileSorted(vals, 0.01);
                     ivP50 = quantileSorted(vals, 0.50);
-                    ivP95 = quantileSorted(vals, 0.95);
+                    ivP99 = quantileSorted(vals, 0.99);
                 }
             }
 
@@ -312,13 +312,13 @@ document.addEventListener('alpine:init', () => {
                         // Raw mode
                         if (mode === 'iv') {
                             bg = (cur != null && ivP50 !== null)
-                                ? colorForRaw(cur, ivP05, ivP50, ivP95)
+                                ? colorForRaw(cur, ivP01, ivP50, ivP99)
                                 : '#222';
                             displayVal = fmtCell('iv', 'raw', cur);
                             title = [
                                 `DTE=${dte}  Δ=${pdLabel(pd)}`,
                                 `IV: ${displayVal}`,
-                                `Snapshot p05=${fmtPct(ivP05)}  p50=${fmtPct(ivP50)}  p95=${fmtPct(ivP95)}`,
+                                `Snapshot p01=${fmtPct(ivP01)}  p50=${fmtPct(ivP50)}  p99=${fmtPct(ivP99)}`,
                             ].join('\n');
                         } else if (mode === 'skew') {
                             bg = colorForRaw(cur, SKEW_RAW_MIN, (SKEW_RAW_MIN + SKEW_RAW_MAX) / 2, SKEW_RAW_MAX);
