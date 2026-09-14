@@ -158,13 +158,17 @@
              x-text="marketDetail ? 'hide detail' : 'show detail'"></a>
           <div class="ob-probe" x-show="marketDetail && market && market.ok">
             <div><b>coverage:</b> <span x-text="coverageLines().join(' · ')"></span></div>
+            <div style="margin-top:4px;"><b>zero-valued bars</b> (treated as missing):</div>
+            <template x-for="line in zeroDayLines()" :key="line">
+              <div x-text="line"></div>
+            </template>
             <div style="margin-top:4px;"><b>close not from 15:55:</b></div>
             <template x-for="line in fallbackLines()" :key="line">
               <div x-text="line"></div>
             </template>
-            <div style="margin-top:4px;"><b>bars per year</b> (days · 09:30 · 15:55 · valid 16:00 · pre-market):</div>
+            <div style="margin-top:4px;"><b>trading days per year</b> (days · 09:30 · 15:55 · valid 16:00 · pre-market · zero-filled):</div>
             <template x-for="y in (market && market.bar_labels ? market.bar_labels : [])" :key="y.year">
-              <div x-text="y.year + ': ' + y.days + ' · ' + y.days_with_0930 + ' · ' + y.days_with_1555 + ' · ' + y.days_with_valid_1600 + ' · ' + y.days_with_premarket"></div>
+              <div x-text="y.year + ': ' + y.days + ' · ' + y.days_with_0930 + ' · ' + y.days_with_1555 + ' · ' + y.days_with_valid_1600 + ' · ' + y.days_with_premarket + ' · ' + y.zero_filled_days"></div>
             </template>
             <div style="margin-top:4px;" x-text="market ? ('rollup: ' + market.days + ' sessions, built ' + market.built_at + ' in ' + market.build_s + 's') : ''"></div>
           </div>

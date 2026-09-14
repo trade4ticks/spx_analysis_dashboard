@@ -3,16 +3,28 @@
 index_ohlc is 5-minute bars, one row per (trade_date, quote_time), ET, LABELED
 BY START TIME: 09:30:00 is the first regular bar and 15:55:00 spans
 15:55-16:00, so its close is the session close. The 16:00:00 rows are partial
-or NaN and are never read. Missing values can be stored as 'NaN' rather than
-NULL -- the writer pushes pandas frames -- so every read goes through
-NULLIF(col, 'NaN') and "non-null" below means neither.
+or NaN and are never read.
+
+A VALUE IS VALID ONLY IF IT IS NOT NULL, NOT 'NaN', AND GREATER THAN ZERO.
+Found on the VPS (2026-09-14): the table carries ZERO-FILLED rows -- 78 bars of
+0.0 -- for every non-trading day (weekends and the NYSE holidays), and the
+writer also pushes pandas NaN as 'NaN' rather than NULL. The first version of
+this module nulled only 'NaN', so a zero-filled Sunday became a "session" with
+a close of 0: every Monday's previous row was that Sunday, every Monday gap
+came out null, and the Option Omega Gap cross-check crashed on it. _valid()
+applies at the BAR level, so a zero bar inside a real session is missing too,
+and a day with no valid bar at all is not a row of the rollup.
+
+Postgres sorts NaN ABOVE every number, so max() over a raw column with one
+NaN bar returns NaN. Values are made valid before any aggregate runs.
 
 This module is the ONLY thing on the page that queries index_ohlc. It does so
 two ways, both written here:
 
-  DAILY_ROLLUP_SQL   one row per trade_date: open (09:30 bar), high, low, and
-                     close = the last non-null bar at or before 15:55, for SPX,
-                     VIX, VIX3M, VIX9D; plus the PREVIOUS ROW's close. Never a
+  DAILY_ROLLUP_SQL   one row per TRADING day (a date with at least one valid
+                     bar): open (09:30 bar), high, low, and close = the last
+                     valid bar at or before 15:55, for SPX, VIX, VIX3M, VIX9D;
+                     plus the PREVIOUS ROW's close -- the previous trading day. Never a
                      close pinned to 15:55 -- early-close sessions end on the
                      12:55 bar and a fixed-time join drops them silently. How
                      often the fallback fires is reported (fallback_report).
@@ -50,8 +62,29 @@ LAST_BAR = time(15, 55)
 EARLY_CLOSE_LAST_BAR = time(13, 0)   # a session whose close bar is at/before this ended early
 
 
-def _nn(col: str) -> str:
-    return f"NULLIF({col}, 'NaN'::float8)"
+def _valid(col: str) -> str:
+    """The column where it is a real price, else NULL.
+
+    'NaN' must be tested explicitly: NaN > 0 is TRUE in Postgres.
+    """
+    return f"(CASE WHEN {col} = 'NaN'::float8 OR {col} <= 0 THEN NULL ELSE {col} END)"
+
+
+OHLC_FIELDS = ("open", "high", "low", "close")
+
+
+def _any_valid() -> str:
+    """Non-null when ANY series has a valid value on the bar (for bars already
+    passed through _valid)."""
+    return "COALESCE(" + ", ".join(f"{s}_{f}" for s in SERIES for f in OHLC_FIELDS) + ")"
+
+
+def _any_valid_raw() -> str:
+    return "COALESCE(" + ", ".join(_valid(f"{s}_{f}") for s in SERIES for f in OHLC_FIELDS) + ")"
+
+
+def _zero_bar(s: str) -> str:
+    return "(" + " OR ".join(f"{s}_{f} <= 0" for f in OHLC_FIELDS) + ")"
 
 
 def _daily_select() -> str:
@@ -67,12 +100,14 @@ def _daily_select() -> str:
     return ",\n           ".join(parts)
 
 
-_BAR_COLS = ",\n           ".join(f"{_nn(f'{s}_{f}')} AS {s}_{f}" for s in SERIES
-                                  for f in ("open", "high", "low", "close"))
+_BAR_COLS = ",\n           ".join(f"{_valid(f'{s}_{f}')} AS {s}_{f}" for s in SERIES
+                                  for f in OHLC_FIELDS)
 
-# One row per trade_date. Everything downstream reads this, never the bars.
+# One row per TRADING day. Everything downstream reads this, never the bars.
 # prev_* is the PREVIOUS ROW of the rollup -- the prior trading day -- not
-# trade_date - 1, which is wrong across every weekend and holiday.
+# trade_date - 1, which is wrong across every weekend and holiday. That is only
+# true because the HAVING below drops the zero-filled non-trading days; without
+# it the previous row of a Monday is a Sunday whose close is 0.
 DAILY_ROLLUP_SQL = f"""
 WITH bars AS (
     SELECT trade_date, quote_time,
@@ -82,10 +117,11 @@ WITH bars AS (
 ),
 daily AS (
     SELECT trade_date,
-           count(*) AS bar_count,
+           count({_any_valid()}) AS bar_count,
            {_daily_select()}
     FROM bars
     GROUP BY trade_date
+    HAVING count({_any_valid()}) > 0
 )
 SELECT d.*,
        LAG(d.trade_date) OVER w AS prev_trade_date,
@@ -102,12 +138,12 @@ _LEVEL_SERIES = ("vix", "vix3m", "vix9d")
 def _entry_lateral(s: str) -> str:
     return f"""
 LEFT JOIN LATERAL (
-    SELECT quote_time AS {s}_bar_time, {_nn(f'{s}_open')} AS {s}_entry
+    SELECT quote_time AS {s}_bar_time, {_valid(f'{s}_open')} AS {s}_entry
     FROM index_ohlc
     WHERE trade_date = t.d
       AND quote_time >= TIME '09:30'
       AND quote_time <= LEAST(t.tm, TIME '15:55')
-      AND {_nn(f'{s}_open')} IS NOT NULL
+      AND {_valid(f'{s}_open')} IS NOT NULL
     ORDER BY quote_time DESC
     LIMIT 1
 ) {s}_b ON true"""
@@ -123,27 +159,73 @@ ENTRY_BAR_SQL = (
     + "".join(_entry_lateral(s) for s in _LEVEL_SERIES)
 )
 
-FRESHNESS_SQL = """
-SELECT max(trade_date) AS latest_date,
+# The cache key reads the RAW latest row, so any new row (zero-filled or not)
+# rebuilds the rollup. What the page SHOWS is the latest VALID SPX bar in a
+# session: a zero-filled weekend at the end of the table is not "data through
+# Sunday".
+CACHE_KEY_SQL = """
+SELECT max(trade_date) AS raw_date,
        (SELECT max(quote_time) FROM index_ohlc
-         WHERE trade_date = (SELECT max(trade_date) FROM index_ohlc)) AS latest_time
+         WHERE trade_date = (SELECT max(trade_date) FROM index_ohlc)) AS raw_time
 FROM index_ohlc
+"""
+
+FRESHNESS_SQL = f"""
+SELECT trade_date AS latest_date, quote_time AS latest_time
+FROM index_ohlc
+WHERE quote_time BETWEEN TIME '09:30' AND TIME '15:55'
+  AND {_valid('spx_close')} IS NOT NULL
+ORDER BY trade_date DESC, quote_time DESC
+LIMIT 1
 """
 
 # How the table labels its bars, per year: a start-labeled session has a
 # 09:30 bar and no valid 16:00 bar. An end-labeled source (or a 5-minute
 # shift between the backfill and the live writer) shows up here as years with
 # no 09:30 bars or with valid 16:00 bars.
-BAR_LABEL_SQL = """
+# Counted over TRADING days only (a valid bar in the session); zero-filled
+# days are counted separately so they cannot inflate the others.
+BAR_LABEL_SQL = f"""
+WITH per_day AS (
+    SELECT trade_date,
+           count(*) FILTER (WHERE quote_time BETWEEN TIME '09:30' AND TIME '15:55'
+                            AND {_any_valid_raw()} IS NOT NULL) AS valid_bars,
+           bool_or(quote_time = TIME '09:30' AND {_valid('spx_open')} IS NOT NULL) AS has_0930,
+           bool_or(quote_time = TIME '15:55' AND {_valid('spx_close')} IS NOT NULL) AS has_1555,
+           bool_or(quote_time = TIME '16:00' AND {_valid('spx_close')} IS NOT NULL) AS valid_1600,
+           bool_or(quote_time < TIME '09:30') AS premarket
+    FROM index_ohlc
+    GROUP BY trade_date
+)
 SELECT extract(year FROM trade_date)::int AS year,
-       count(DISTINCT trade_date) AS days,
-       count(DISTINCT trade_date) FILTER (WHERE quote_time = TIME '09:30') AS days_with_0930,
-       count(DISTINCT trade_date) FILTER (WHERE quote_time = TIME '15:55') AS days_with_1555,
-       count(DISTINCT trade_date) FILTER (WHERE quote_time = TIME '16:00'
-             AND NULLIF(spx_close, 'NaN'::float8) IS NOT NULL) AS days_with_valid_1600,
-       count(DISTINCT trade_date) FILTER (WHERE quote_time < TIME '09:30') AS days_with_premarket
-FROM index_ohlc
+       count(*) FILTER (WHERE valid_bars > 0) AS days,
+       count(*) FILTER (WHERE valid_bars > 0 AND has_0930) AS days_with_0930,
+       count(*) FILTER (WHERE valid_bars > 0 AND has_1555) AS days_with_1555,
+       count(*) FILTER (WHERE valid_bars > 0 AND valid_1600) AS days_with_valid_1600,
+       count(*) FILTER (WHERE valid_bars > 0 AND premarket) AS days_with_premarket,
+       count(*) FILTER (WHERE valid_bars = 0) AS zero_filled_days
+FROM per_day
 GROUP BY 1 ORDER BY 1
+"""
+
+# Every session-window day that is either wholly without valid bars (zero-
+# filled) or a trading day carrying some zero/negative bars. Small: the first
+# kind is ~1 row per weekend day and holiday, the second should be rare.
+ZERO_DAYS_SQL = f"""
+WITH per_day AS (
+    SELECT trade_date,
+           count(*) AS bars,
+           count({_any_valid_raw()}) AS valid_bars,
+           {", ".join(f"count(*) FILTER (WHERE {_zero_bar(s)}) AS {s}_zero_bars" for s in SERIES)}
+    FROM index_ohlc
+    WHERE quote_time BETWEEN TIME '09:30' AND TIME '15:55'
+    GROUP BY trade_date
+)
+SELECT trade_date, extract(isodow FROM trade_date)::int AS isodow, bars, valid_bars,
+       {", ".join(f"{s}_zero_bars" for s in SERIES)}
+FROM per_day
+WHERE valid_bars = 0 OR {" OR ".join(f"{s}_zero_bars > 0" for s in SERIES)}
+ORDER BY trade_date
 """
 
 
@@ -153,31 +235,39 @@ GROUP BY 1 ORDER BY 1
 # bars, so it is cached per process and rebuilt when the table's latest
 # (trade_date, quote_time) moves. A freshness probe is two index lookups.
 
-_CACHE: dict = {"key": None, "daily": None, "labels": None, "built_at": None, "build_s": None}
+_CACHE: dict = {"key": None, "daily": None, "labels": None, "zero_days": None,
+                "built_at": None, "build_s": None}
 _LOCK = asyncio.Lock()
 
 
 async def get_daily(pool) -> tuple[pd.DataFrame, dict]:
     """(daily rollup DataFrame, freshness dict). Rebuilds when the table moved."""
     async with pool.acquire() as conn:
+        k = await conn.fetchrow(CACHE_KEY_SQL)
         fr = await conn.fetchrow(FRESHNESS_SQL)
-    key = (fr["latest_date"], fr["latest_time"])
-    fresh = {"latest_date": fr["latest_date"].isoformat() if fr["latest_date"] else None,
-             "latest_time": fr["latest_time"].strftime("%H:%M:%S") if fr["latest_time"] else None}
+    key = (k["raw_date"], k["raw_time"])
+    fresh = {"latest_date": fr["latest_date"].isoformat() if fr and fr["latest_date"] else None,
+             "latest_time": fr["latest_time"].strftime("%H:%M:%S") if fr and fr["latest_time"] else None,
+             "latest_raw_date": k["raw_date"].isoformat() if k["raw_date"] else None}
     async with _LOCK:
         if _CACHE["key"] != key or _CACHE["daily"] is None:
             t0 = _time.monotonic()
             async with pool.acquire() as conn:
                 rows = await conn.fetch(DAILY_ROLLUP_SQL)
                 labels = await conn.fetch(BAR_LABEL_SQL)
+                zeros = await conn.fetch(ZERO_DAYS_SQL)
             daily = pd.DataFrame([dict(r) for r in rows])
-            _CACHE.update(key=key, daily=daily, labels=[dict(r) for r in labels],
+            zsum = zero_days_summary([dict(r) for r in zeros])
+            _CACHE.update(key=key, daily=daily, labels=[dict(r) for r in labels], zero_days=zsum,
                           built_at=datetime.now().isoformat(timespec="seconds"),
                           build_s=round(_time.monotonic() - t0, 2))
             rep = fallback_report(daily)
             log.info("oo-backtest daily rollup: %d days through %s in %.2fs; close fallback "
                      "early-close=%d full-session=%s", len(daily), key[0], _CACHE["build_s"],
                      len(rep["spx"]["early_close_days"]), {s: rep[s]["full_session_count"] for s in SERIES})
+            log.info("oo-backtest index_ohlc: %d zero-filled days excluded (%d weekdays); %d trading "
+                     "days carry zero bars %s", zsum["zero_filled_days"], zsum["zero_filled_weekdays"],
+                     zsum["partial_zero_days"], zsum["partial_zero_bars_by_series"])
             for s in SERIES:
                 if rep[s]["full_session_count"]:
                     log.warning("oo-backtest: %s close fell back on %d FULL sessions (e.g. %s) -- "
@@ -189,6 +279,31 @@ async def get_daily(pool) -> tuple[pd.DataFrame, dict]:
 
 def bar_labels() -> list | None:
     return _CACHE["labels"]
+
+
+def zero_days() -> dict | None:
+    return _CACHE["zero_days"]
+
+
+def zero_days_summary(rows: list[dict]) -> dict:
+    """Zero-filled (no valid bar) days, split weekend/weekday, and trading days
+    that carry some zero bars, per series."""
+    filled = [r for r in rows if r["valid_bars"] == 0]
+    weekday = [r for r in filled if r["isodow"] <= 5]
+    partial = [r for r in rows if r["valid_bars"] > 0]
+    iso = lambda d: d.isoformat() if hasattr(d, "isoformat") else str(d)   # noqa: E731
+    return {
+        "zero_filled_days": len(filled),
+        "zero_filled_weekend": len(filled) - len(weekday),
+        "zero_filled_weekdays": len(weekday),
+        # All of them: ~10 a year, and they should read as the NYSE holidays.
+        "zero_filled_weekday_dates": [iso(r["trade_date"]) for r in weekday],
+        "partial_zero_days": len(partial),
+        "partial_zero_bars_by_series": {s: sum(r[f"{s}_zero_bars"] for r in partial) for s in SERIES},
+        "partial_zero_days_by_series": {s: sum(1 for r in partial if r[f"{s}_zero_bars"]) for s in SERIES},
+        "partial_zero_sample": [{"date": iso(r["trade_date"]), "valid_bars": r["valid_bars"],
+                                 **{s: r[f"{s}_zero_bars"] for s in SERIES}} for r in partial[:25]],
+    }
 
 
 # ── pure functions over the rollup (tested without a database) ─────────────
@@ -407,21 +522,31 @@ def gap_crosscheck(df: pd.DataFrame, daily: pd.DataFrame, tol_pct: float = 0.02,
     for align, col in (("previous_row", "spx_prev_close"), ("two_rows_back", "spx_prev2_close"),
                        ("same_day_close", "spx_close")):
         for unit in ("pct", "points"):
-            diffs = []
+            diffs, skipped = [], 0
             for dt, v in zip(dates, vendor):
                 r = by_date.get(dt)
                 if r is None or v is None or pd.isna(v):
                     continue
                 o, p = r.get("spx_open"), r.get(col)
-                if o is None or p is None or pd.isna(o) or pd.isna(p):
+                fo, fp = _float(o), _float(p)
+                if fo is None or fp is None:
+                    calc = None
+                elif unit == "pct":
+                    calc = _pct(fo, fp)          # None on a zero prior close
+                else:
+                    calc = fo - fp
+                # A diagnostic never aborts the join: a pair that cannot be
+                # computed (no open, no prior close, a zero close) is counted.
+                if calc is None or (isinstance(calc, float) and math.isnan(calc)):
+                    skipped += 1
                     continue
-                calc = _pct(o, p) if unit == "pct" else float(o) - float(p)
                 diffs.append((dt, float(v), calc))
             tol = tol_pct if unit == "pct" else tol_pts
             agree = sum(1 for _, v, c in diffs if abs(v - c) <= tol)
-            variants[(align, unit)] = (agree, diffs)
+            variants[(align, unit)] = (agree, diffs, skipped)
 
-    (align, unit), (agree, diffs) = max(variants.items(), key=lambda kv: (kv[1][0], kv[0][0] == "previous_row"))
+    (align, unit), (agree, diffs, skipped) = max(variants.items(),
+                                                 key=lambda kv: (kv[1][0], kv[0][0] == "previous_row"))
     worst = sorted(diffs, key=lambda x: -abs(x[1] - x[2]))[:5]
     prev_row = {u: variants[("previous_row", u)][0] for u in ("pct", "points")}
     return {
@@ -430,6 +555,7 @@ def gap_crosscheck(df: pd.DataFrame, daily: pd.DataFrame, tol_pct: float = 0.02,
         "best_unit": unit,
         "agree": agree,
         "disagree": len(diffs) - agree,
+        "skipped_uncomputable": skipped,
         "agree_previous_row": prev_row,
         "worst": [{"date": dt.isoformat(), "vendor": round(v, 4), "computed": round(c, 4)} for dt, v, c in worst],
         "tolerance": tol_pct if unit == "pct" else tol_pts,
@@ -445,13 +571,23 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     entry_rows = [dict(r) for r in rows]
     out = apply_market(df, daily, entry_rows, keys)
     known = set(daily["trade_date"]) if not daily.empty else set()
+    try:
+        crosscheck, crosscheck_error = gap_crosscheck(out, daily), None
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not cost the log its market data
+        log.exception("oo-backtest gap cross-check failed")
+        crosscheck, crosscheck_error = None, f"{type(exc).__name__}: {exc}"
     report = {
         "joined": True,
         "source": "main.index_ohlc",
         "freshness": fresh,
         "entry_time": entry_info,
         "entry_bars": entry_bar_report(out, keys),
-        "gap_crosscheck": gap_crosscheck(out, daily),
+        "gap_crosscheck": crosscheck,
+        "gap_crosscheck_error": crosscheck_error,
+        # How many trades got a gap at all. All-null here is what the zero-
+        # filled weekends produced for a Monday-only log, silently.
+        "gaps": {name: {"computed": int(out[col].notna().sum()), "null": int(out[col].isna().sum())}
+                 for name, col in (("spx", "gap"), ("vix", "vix_overnight_gap"))},
         # Entry dates the table has no session for: before coverage, or a
         # date that is not a trading day at all (a timezone slip can do that).
         "trades_without_daily_row": int(sum(1 for d in pd.to_datetime(out["date_opened"]).dt.date

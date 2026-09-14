@@ -315,13 +315,26 @@ document.addEventListener('alpine:init', () => {
       if (nulls.length) out.push({ warn: false, text: `No entry bar (null level): ${nulls.join(', ')}` });
       const pushed = Object.entries(mk.entry_bars || {}).filter(([, v]) => v.earlier_than_entry_bar).map(([k, v]) => `${k.toUpperCase()} ${v.earlier_than_entry_bar}`);
       if (pushed.length) out.push({ warn: false, text: `Entry bar was NaN, earlier bar used: ${pushed.join(', ')}` });
+      // All-null gaps are what the zero-filled weekends produced for a
+      // Monday-only log, with nothing on screen saying so.
+      for (const [name, v] of Object.entries(mk.gaps || {})) {
+        const total = v.computed + v.null;
+        if (v.null) {
+          out.push({ warn: v.null > total * 0.05,
+                     text: `${name.toUpperCase()} gap computed for ${v.computed.toLocaleString()} of ${total.toLocaleString()} trades` });
+        }
+      }
+      if (mk.gap_crosscheck_error) {
+        out.push({ warn: true, text: `Gap cross-check failed (market data still joined): ${mk.gap_crosscheck_error}` });
+      }
       const g = mk.gap_crosscheck;
       if (g) {
         const aligned = g.best_alignment === 'previous_row';
         out.push({
           warn: !aligned || g.disagree > 0,
           text: `Gap vs Option Omega's column: ${g.agree} of ${g.compared} agree (${g.best_unit}, ±${g.tolerance})` +
-                (aligned ? '' : ` — best match is ${g.best_alignment.replace(/_/g, ' ')}, not the previous session: off by one?`),
+                (aligned ? '' : ` — best match is ${g.best_alignment.replace(/_/g, ' ')}, not the previous session: off by one?`) +
+                (g.skipped_uncomputable ? `; ${g.skipped_uncomputable} not computable, skipped` : ''),
         });
       }
       return out;
@@ -350,6 +363,19 @@ document.addEventListener('alpine:init', () => {
     fallbackWarn() {
       const fb = (this.market && this.market.close_fallback) || {};
       return Object.values(fb).some(v => v.full_session_count > 0);
+    },
+
+    zeroDayLines() {
+      const z = this.market && this.market.zero_days;
+      if (!z) return [];
+      const out = [`${z.zero_filled_days} zero-filled days excluded (${z.zero_filled_weekend} weekend, ${z.zero_filled_weekdays} weekday)`];
+      if (z.zero_filled_weekdays) out.push(`weekday: ${z.zero_filled_weekday_dates.join(', ')}`);
+      out.push(`${z.partial_zero_days} trading days with some zero bars` +
+               (z.partial_zero_days ? ` — bars by series: ${Object.entries(z.partial_zero_bars_by_series).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ')}` : ''));
+      for (const d of (z.partial_zero_sample || []).slice(0, 10)) {
+        out.push(`  ${d.date}: ${d.valid_bars} valid bars; zero bars SPX ${d.spx}, VIX ${d.vix}, VIX3M ${d.vix3m}, VIX9D ${d.vix9d}`);
+      }
+      return out;
     },
 
     coverageLines() {

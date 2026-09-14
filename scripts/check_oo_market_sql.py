@@ -12,19 +12,30 @@ Postgres cluster, loads bars shaped exactly like the writer's
 DOUBLE PRECISION OHLC, NaN as 'NaN'), and runs the shipped statements
 through the shipped join_market().
 
-Fabricated sessions, all ET, start-labeled:
+Fabricated days, all ET, start-labeled. ZERO-FILLED means 78 bars of 0.0 --
+exactly how the real table stores every weekend and NYSE holiday. The first
+version of this check left non-trading days ABSENT, which is why it passed
+while every Monday gap on the VPS came out null.
+
+  2023-06-24/25   Sat/Sun  zero-filled, before any session (coverage must not start here)
   2023-06-29 Thu  full; junk 16:00 row and a pre-market row that must be ignored;
                   VIX3M absent (coverage starts the next day); first day -> no gap
   2023-06-30 Fri  full; SPX 15:55 close is 'NaN' -> close from 15:50 (a
                   full-session fallback, reported); VIX 15:55 open NaN
-  (weekend)
-  2023-07-03 Mon  EARLY CLOSE, last bar 12:55
-  (07-04 holiday)
-  2023-07-05 Wed  full; its gap must use 07-03's 12:55 close
+  2023-07-01/02   Sat/Sun  zero-filled weekend
+  2023-07-03 Mon  EARLY CLOSE, last bar 12:55; gap must use FRIDAY 06-30
+  2023-07-04 Tue  zero-filled holiday
+  2023-07-05 Wed  full; gap must use 07-03's 12:55 close; one bar's SPX high is
+                  'NaN' and another's SPX low is 0.0 (neither may reach high/low)
+  2023-07-06 Thu  full; the 10:00 VIX open is 0.0 (an entry there takes 09:55)
+  2023-07-07 Fri  zero-filled "holiday", then 07-08/09 zero-filled weekend
+  2023-07-10 Mon  full; gap must use THURSDAY 07-06
+  2023-07-15/16   Sat/Sun  zero-filled, after the last session (freshness must not report them)
 
 Planted faults, each of which must change the answer: a close pinned to
-15:55, a prior close from trade_date - 1, and an entry join reading the bar
-close.
+15:55, a prior close from trade_date - 1, an entry join reading the bar
+close, a raw max() over a NaN high, and a "previous row" that includes the
+zero-filled days.
 
 EXITS 3 (skipped), never 0, where it cannot run: no Postgres server binaries,
 no asyncpg, or running as root (initdb refuses root). scripts/gates.py shows
@@ -82,9 +93,16 @@ def find_bin() -> Path | None:
 
 # ── fabricated bars ─────────────────────────────────────────────────────────
 
-DAYS = [date(2023, 6, 29), date(2023, 6, 30), date(2023, 7, 3), date(2023, 7, 5)]
+DAYS = [date(2023, 6, 29), date(2023, 6, 30), date(2023, 7, 3), date(2023, 7, 5),
+        date(2023, 7, 6), date(2023, 7, 10)]
 EARLY = date(2023, 7, 3)
 NAN = "NaN"
+ZERO_WEEKEND = [date(2023, 6, 24), date(2023, 6, 25), date(2023, 7, 1), date(2023, 7, 2),
+                date(2023, 7, 8), date(2023, 7, 9), date(2023, 7, 15), date(2023, 7, 16)]
+ZERO_HOLIDAY = [date(2023, 7, 4), date(2023, 7, 7)]
+WED, THU, MON2 = date(2023, 7, 5), date(2023, 7, 6), date(2023, 7, 10)
+NAN_HIGH_BAR, ZERO_LOW_BAR = time(10, 20), time(11, 10)   # on WED
+ZERO_VIX_OPEN_BAR = time(10, 0)                            # on THU
 
 
 def session_times(d: date) -> list[time]:
@@ -119,15 +137,36 @@ def build_rows() -> list[tuple]:
             if d == DAYS[1] and t == time(15, 55):
                 vals["spx_close"] = NAN                 # 'NaN', not NULL
                 vals["vix_open"] = NAN
+            if d == WED and t == NAN_HIGH_BAR:
+                vals["spx_high"] = NAN                  # max() over raw highs would be NaN
+            if d == WED and t == ZERO_LOW_BAR:
+                vals["spx_low"] = 0.0                   # min() over raw lows would be 0
+            if d == THU and t == ZERO_VIX_OPEN_BAR:
+                vals["vix_open"] = 0.0                  # a zero bar inside a real session
             rows.append((d, t, vals))
         if d != EARLY:
             # 16:00 partial row with absurd values: must never be read.
             rows.append((d, time(16, 0), {f"{s}_{f}": 99999.0 for s in market.SERIES
                                          for f in ("open", "high", "low", "close")}))
+    # Zero-filled non-trading days, as the real table has them: every bar of
+    # the session window, every column 0.0.
+    for d in ZERO_WEEKEND + ZERO_HOLIDAY:
+        for t in session_times(date(2023, 6, 29)):
+            rows.append((d, t, {c: 0.0 for c in OHLC_COLS_ALL}))
     # A pre-market row on day one, also never read.
     rows.append((DAYS[0], time(9, 25), {f"{s}_{f}": -1.0 for s in market.SERIES
                                         for f in ("open", "high", "low", "close")}))
     return rows
+
+
+OHLC_COLS_ALL = [f"{s}_{f}" for s in market.SERIES for f in ("open", "high", "low", "close")]
+
+
+def expected_hi_lo(d: date) -> tuple[float, float]:
+    di, ts = DAYS.index(d), session_times(d)
+    hi = max(px("spx", di, k)["high"] for k, t in enumerate(ts) if not (d == WED and t == NAN_HIGH_BAR))
+    lo = min(px("spx", di, k)["low"] for k, t in enumerate(ts) if not (d == WED and t == ZERO_LOW_BAR))
+    return hi, lo
 
 
 def expected_close(s: str, d: date) -> tuple[float, time]:
@@ -209,6 +248,9 @@ async def load(pool) -> None:
         await conn.copy_records_to_table("index_ohlc", records=recs, columns=["trade_date", "quote_time", *OHLC_COLS])
         n_nan = await conn.fetchval("SELECT count(*) FROM index_ohlc WHERE spx_close = 'NaN'::float8")
         assert n_nan == 1, n_nan   # the fixture really stores NaN, not NULL
+        n_zero_days = await conn.fetchval("""SELECT count(DISTINCT trade_date) FROM index_ohlc
+                                             WHERE spx_close = 0 AND vix_close = 0""")
+        assert n_zero_days == len(ZERO_WEEKEND + ZERO_HOLIDAY), n_zero_days   # really zero-filled, not absent
 
 
 async def run(dsn: str) -> None:
@@ -228,22 +270,30 @@ async def check_daily(pool) -> None:
     print("daily rollup")
     daily, fresh = await market.get_daily(pool)
     by = {r["trade_date"]: r for r in daily.to_dict("records")}
-    check(sorted(by) == DAYS, f"one row per trade_date, weekend/holiday absent ({len(by)})")
-    check(fresh["latest_date"] == "2023-07-05" and fresh["latest_time"] == "16:00:00",
-          f"freshness reads the table's latest bar ({fresh['latest_date']} {fresh['latest_time']})")
+    check(sorted(by) == DAYS,
+          f"one row per TRADING day; the {len(ZERO_WEEKEND + ZERO_HOLIDAY)} zero-filled days are not rows ({len(by)})")
+    check(fresh["latest_date"] == "2023-07-10" and fresh["latest_time"] == "15:55:00"
+          and fresh["latest_raw_date"] == "2023-07-16",
+          f"freshness is the last VALID session bar, not the trailing zero-filled weekend "
+          f"({fresh['latest_date']} {fresh['latest_time']}; raw {fresh['latest_raw_date']})")
     for d in DAYS:
         r = by[d]
         want, wt = expected_close("spx", d)
         check(r["spx_close"] == want and r["spx_close_time"] == wt,
               f"{d}: SPX close {r['spx_close']} from {r['spx_close_time']} (want {want} @ {wt})")
         check(r["spx_open"] == bar_open("spx", d, time(9, 30)), f"{d}: SPX open from the 09:30 bar, not 09:25")
-        hi = max(px("spx", DAYS.index(d), k)["high"] for k in range(len(session_times(d))))
-        check(r["spx_high"] == hi, f"{d}: high ignores the 16:00 row ({r['spx_high']} vs {hi})")
+        hi, lo = expected_hi_lo(d)
+        check(r["spx_high"] == hi and r["spx_low"] == lo,
+              f"{d}: high/low ignore the 16:00 row, a 'NaN' high and a zero low ({r['spx_high']}/{r['spx_low']} vs {hi}/{lo})")
     check(by[DAYS[3]]["prev_trade_date"] == EARLY, "07-05's previous row is 07-03 (not the 07-04 holiday)")
     check(by[DAYS[3]]["spx_prev_close"] == expected_close("spx", EARLY)[0],
           "07-05's prior close is 07-03's 12:55 close")
-    check(by[DAYS[2]]["spx_prev_close"] == expected_close("spx", DAYS[1])[0],
-          "07-03 (Monday) prior close is Friday 06-30's, across the weekend")
+    check(by[DAYS[2]]["prev_trade_date"] == DAYS[1] and by[DAYS[2]]["spx_prev_close"] == expected_close("spx", DAYS[1])[0],
+          "Monday 07-03's previous row is FRIDAY 06-30, not the zero-filled Sunday")
+    check(by[MON2]["prev_trade_date"] == THU and by[MON2]["spx_prev_close"] == expected_close("spx", THU)[0],
+          "Monday 07-10's previous row is THURSDAY 07-06, across a zero-filled Friday holiday and weekend")
+    check(by[DAYS[3]]["vix_prev_close"] == expected_close("vix", EARLY)[0],
+          "VIX prior close follows the same trading-day rows")
     check(pd.isna(by[DAYS[0]]["spx_prev_close"]), "first date: no prior close -> null")
     check(pd.isna(by[DAYS[0]]["vix3m_close"]) and by[DAYS[1]]["vix3m_close"] is not None,
           "VIX3M null before its coverage")
@@ -255,11 +305,18 @@ async def check_daily(pool) -> None:
     check(rep["vix"]["full_session_count"] == 0, "VIX: no full-session fallback (its 15:55 close is fine)")
     cov = market.coverage(daily)
     check(cov == {"spx": "2023-06-29", "vix": "2023-06-29", "vix3m": "2023-06-30", "vix9d": "2023-06-29"},
-          f"coverage per series from real non-null closes {cov}")
+          f"coverage from real closes, not from the zero-filled 06-24 {cov}")
     labels = market.bar_labels()
     y = labels[0]
-    check(y["days"] == 4 and y["days_with_0930"] == 4 and y["days_with_valid_1600"] == 3 and y["days_with_premarket"] == 1,
-          f"bar-label diagnostics count what is there {y}")
+    check(y["days"] == 6 and y["days_with_0930"] == 6 and y["days_with_1555"] == 4   # 06-30 NaN close, 07-03 early
+          and y["days_with_valid_1600"] == 5 and y["days_with_premarket"] == 1 and y["zero_filled_days"] == 10,
+          f"bar-label diagnostics count trading days only, zero-filled days apart {y}")
+    z = market.zero_days()
+    check(z["zero_filled_days"] == 10 and z["zero_filled_weekdays"] == 2
+          and z["zero_filled_weekday_dates"] == ["2023-07-04", "2023-07-07"],
+          f"zero-filled days reported, weekdays named ({z['zero_filled_weekday_dates']})")
+    check(z["partial_zero_days"] == 2 and z["partial_zero_bars_by_series"] == {"spx": 1, "vix": 1, "vix3m": 0, "vix9d": 0},
+          f"trading days carrying zero bars are counted per series {z['partial_zero_bars_by_series']}")
 
 
 def trades() -> pd.DataFrame:
@@ -272,6 +329,8 @@ def trades() -> pd.DataFrame:
         (DAYS[0], "16:00:00"),      # 4 at the close -> 15:55 bar, never the 16:00 row
         (DAYS[1], "3:57 PM"),       # 5 VIX 15:55 open is NaN -> 15:50 bar; VIX3M/VIX9D keep 15:55
         (DAYS[3], "10:02:30"),      # 6 mid-bar -> 10:00 bar's OPEN
+        (MON2, "09:30:00"),         # 7 Monday after a zero-filled Friday + weekend
+        (THU, "10:00:00"),          # 8 VIX 10:00 open is 0.0 -> 09:55 for VIX only
     ]
     return pd.DataFrame({"date_opened": pd.to_datetime([d for d, _ in rows]),
                          "time_opened": [t for _, t in rows], "pnl": [1.0] * len(rows)})
@@ -293,16 +352,27 @@ async def check_entry_join(pool) -> None:
           "NaN VIX open on the entry bar -> 15:50 for VIX only; VIX3M keeps 15:55 ('3:57 PM' parsed)")
     check(L[6]["vix_level"] == bar_open("vix", DAYS[3], time(10, 0)), "mid-bar entry takes the bar OPEN")
     check(pd.isna(L[1]["vix3m_level"]), "VIX3M before its coverage -> null")
+    check(L[8]["vix_bar_time"] == "09:55:00" and L[8]["vix_level"] == bar_open("vix", THU, time(9, 55))
+          and L[8]["vix3m_bar_time"] == "10:00:00",
+          "a ZERO VIX open on the entry bar -> 09:55 for VIX only, never a level of 0")
     e = rep["entry_time"]
-    check(e["entry_time_found"] == 6 and e["entry_time_fallback_0930"] == 1 and e["before_open"] == 1,
+    check(e["entry_time_found"] == 8 and e["entry_time_fallback_0930"] == 1 and e["before_open"] == 1,
           f"entry-time coverage reported {e}")
-    check(rep["entry_bars"]["vix"]["earlier_than_entry_bar"] == 1, "a bar pushed back by NaN is counted")
+    check(rep["entry_bars"]["vix"]["earlier_than_entry_bar"] == 2, "bars pushed back by NaN and by zero are counted")
 
     print("gaps and ratios")
     d3c = expected_close("spx", EARLY)[0]
     want = (bar_open("spx", DAYS[3], time(9, 30)) - d3c) / d3c * 100
     check(math.isclose(L[6]["gap"], want, rel_tol=1e-12), f"07-05 SPX gap vs 07-03 12:55 close ({L[6]['gap']:.5f}%)")
-    check(pd.isna(L[1]["gap"]), "first date gap is null, not zero")
+    check(pd.isna(L[1]["gap"]), "first date gap is null, not zero (the zero-filled 06-25 is not its prior day)")
+    fc = expected_close("spx", DAYS[1])[0]
+    check(math.isclose(L[0]["gap"], (bar_open("spx", EARLY, time(9, 30)) - fc) / fc * 100),
+          f"Monday 07-03 SPX gap is against FRIDAY's close ({L[0]['gap']:.5f}%), not null")
+    tc = expected_close("spx", THU)[0]
+    check(math.isclose(L[7]["gap"], (bar_open("spx", MON2, time(9, 30)) - tc) / tc * 100),
+          f"Monday 07-10 SPX gap is against THURSDAY's close ({L[7]['gap']:.5f}%)")
+    g = rep["gaps"]
+    check(g["spx"] == {"computed": 7, "null": 2}, f"gap computed/null counts reported (both 06-29 trades null) {g['spx']}")
     vprev = expected_close("vix", DAYS[1])[0]
     check(math.isclose(L[0]["vix_overnight_gap"], (bar_open("vix", EARLY, time(9, 30)) - vprev) / vprev * 100),
           "VIX gap: 09:30 open vs prior row's close")
@@ -327,6 +397,16 @@ async def check_entry_join(pool) -> None:
     check(y["best_alignment"] == "two_rows_back",
           f"an off-by-one vendor column is IDENTIFIED as off by one ({y['best_alignment']})")
 
+    # Containment: a diagnostic over a rollup with a zero prior close -- the
+    # exact input that crashed the join on the VPS -- skips and counts.
+    poisoned = daily.copy()
+    poisoned.loc[poisoned["trade_date"] == MON2, "spx_prev_close"] = 0.0
+    try:
+        z = market.gap_crosscheck(good, poisoned)
+        check(z["skipped_uncomputable"] >= 1, f"a zero prior close is skipped and counted ({z['skipped_uncomputable']}), not raised")
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"a zero prior close is skipped and counted, not raised — raised {type(exc).__name__}: {exc}")
+
 
 async def check_planted(pool) -> None:
     print("planted faults")
@@ -335,14 +415,23 @@ async def check_planted(pool) -> None:
                                         WHERE trade_date = $1 AND quote_time = TIME '15:55'""", EARLY)
         cal_prev = await conn.fetchval("""SELECT NULLIF(spx_close, 'NaN'::float8) FROM index_ohlc
                                           WHERE trade_date = $1::date - 1 AND quote_time = TIME '15:55'""", DAYS[3])
+        raw_high = await conn.fetchval("SELECT max(spx_high) FROM index_ohlc WHERE trade_date = $1 AND "
+                                       "quote_time BETWEEN TIME '09:30' AND TIME '15:55'", WED)
+        raw_prev_row_close = await conn.fetchval("""SELECT spx_close FROM index_ohlc
+            WHERE trade_date = (SELECT max(trade_date) FROM index_ohlc WHERE trade_date < $1)
+              AND quote_time = TIME '15:55'""", EARLY)
         bar_close = await conn.fetchval("""SELECT vix_close FROM index_ohlc
                                            WHERE trade_date = $1 AND quote_time = TIME '10:00'""", DAYS[3])
     daily, _ = await market.get_daily(pool)
     by = {r["trade_date"]: r for r in daily.to_dict("records")}
     check(pinned is None and by[EARLY]["spx_close"] is not None,
           "a close pinned to 15:55 loses the early-close day; the rollup does not")
-    check(cal_prev is None and by[DAYS[3]]["spx_prev_close"] is not None,
-          "a prior close from trade_date - 1 finds nothing after a holiday; the previous row does")
+    check(cal_prev in (None, 0.0) and by[DAYS[3]]["spx_prev_close"] == expected_close("spx", EARLY)[0],
+          f"a prior close from trade_date - 1 lands on the zero-filled holiday ({cal_prev}); the previous row does not")
+    check(isinstance(raw_high, float) and math.isnan(raw_high) and not math.isnan(by[WED]["spx_high"]),
+          f"a raw max() over a 'NaN' high IS NaN in Postgres ({raw_high}); the rollup's high is {by[WED]['spx_high']}")
+    check(raw_prev_row_close == 0.0 and by[EARLY]["prev_trade_date"] == DAYS[1],
+          "a previous row over ALL dates gives Monday a close of 0 (the zero-filled Sunday); the rollup gives Friday")
     df, _ = await market.join_market(pool, trades())
     check(df.loc[6, "vix_level"] != bar_close, "the entry join is not reading the bar's close (5 min lookahead)")
 

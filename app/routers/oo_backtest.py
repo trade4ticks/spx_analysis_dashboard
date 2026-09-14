@@ -141,4 +141,5 @@ async def market_status(pool=Depends(get_pool)):
         "coverage": market.coverage(daily),
         "close_fallback": market.fallback_report(daily),
         "bar_labels": market.bar_labels(),
+        "zero_days": market.zero_days(),
     }
