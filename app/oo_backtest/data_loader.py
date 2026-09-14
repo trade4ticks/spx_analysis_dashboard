@@ -11,7 +11,9 @@ body is kept as it was. Two deliberate removals, nothing else:
     join in place would feed all-NaN vrp/iv_rv/vov columns into the binning
     and produce plausible garbage rather than an error.
 
-join_market_data() stays here, where the source put it.
+join_market_data() is kept as the source had it but is NOT CALLED: it gives
+every trade its entry date's daily CLOSE, which is lookahead. The page joins
+market data through app/oo_backtest/market.py instead.
 
 parse_mesosim_json() IS REWRITTEN (2026-09-14) against a field spec for the
 MesoSim 3.1 event stream, checked on the real `allantis - v2` export and on
@@ -22,9 +24,10 @@ trade count was right; what it got wrong, and what changed:
                     target: 1291.521"); unknown messages passed through raw,
                     one category per threshold. Now: known patterns -> fixed
                     labels, anything else cut at the first colon and stripped
-                    of parenthesised numbers. The signal used is the last one
-                    BEFORE the ExitPosition -- three positions in the sample
-                    fire two signals on the exit bar.
+                    of parenthesised numbers. Where several signals fire on
+                    the exit bar, EXIT_PRECEDENCE decides (price > adjustments
+                    > time), and a case where that disagrees with file order
+                    is reported.
   * P/L             Vars.pos_realized_pnl, falling back to pos_pnl only where a
                     version has no realized field (2.13 has none). The source
                     preferred pos_pnl. Disagreements are reported.
@@ -181,6 +184,48 @@ def _simplify_exit_reason(message: str) -> str:
     return msg or "Unknown"
 
 
+# When more than one exit signal fires on a position's exit bar, a PRICE exit
+# outranks an adjustment-count exit, which outranks the TIME limit. The
+# order MesoSim writes them in is an implementation detail -- across 3.1 and
+# 2.13 it happens to put time first and price second, and the P/L agreed with
+# the price signal in all nine cases -- but two versions are already in play,
+# so the rule is stated rather than inferred from file order. Lower wins.
+EXIT_PRECEDENCE = {"Profit Target": 0, "Stop Loss": 0, "Max Adjustments": 1, "Max Time in Trade": 2}
+_UNKNOWN_PRECEDENCE = 1
+
+
+def _resolve_exit_reason(signals: list, exit_idx: int, exit_event: dict) -> tuple[str, dict]:
+    """The exit reason for one position, and how it was decided.
+
+    Candidates are the signals written before the ExitPosition on the exit's
+    own bar; if none share that bar, the last signal before the exit. Among
+    candidates the lowest EXIT_PRECEDENCE wins, ties to the later in file.
+    `precedence_overrode_order` is True where that differs from simply taking
+    the last signal -- the case that means MesoSim's ordering has changed.
+    """
+    prior = [(i, e) for i, e in signals if i < exit_idx]
+    if not prior:
+        return "Unknown", {"candidates": 0, "precedence_overrode_order": False, "last_in_file": None}
+    same_bar = [(i, e) for i, e in prior if e.get("SimTime") == exit_event.get("SimTime")]
+    candidates = same_bar or prior[-1:]
+    labelled = [(i, _simplify_exit_reason(e.get("Message", ""))) for i, e in candidates]
+    chosen = min(labelled, key=lambda x: (EXIT_PRECEDENCE.get(x[1], _UNKNOWN_PRECEDENCE), -x[0]))[1]
+    last = _simplify_exit_reason(prior[-1][1].get("Message", ""))
+    return chosen, {"candidates": len(candidates), "precedence_overrode_order": chosen != last,
+                    "last_in_file": last}
+
+
+def _leg_fill_premium(fills: list) -> float:
+    """Sum of Price * Qty * Multiplier over the entry-bar fills (short legs carry
+    a negative Qty). Rounded to cents; the float sum is not (10364.999999999993)."""
+    total = 0.0
+    for trade in fills:
+        te = trade.get("TradeEvent") or {}
+        multiplier = (te.get("Contract") or {}).get("Multiplier", 100)
+        total += te.get("Price", 0) * te.get("Qty", 0) * multiplier
+    return round(total, 2)
+
+
 def _parse_start_message(msg: str) -> dict:
     """{"BacktestName": ..., "StrategyName": ...} from the Start event text."""
     out = {}
@@ -239,6 +284,9 @@ def parse_mesosim_json(contents: str | bytes, filename: str = "") -> pd.DataFram
         "open_positions": len(open_ids),
         "open_position_ids": open_ids,
         "multi_signal_positions": 0,
+        "precedence_vs_order": [],
+        "pnl_contradicts_reason": [],
+        "premium_leg_mismatch": [],
         "pnl_mismatch": [],
         "missing_data_at_fill": [],
         "pnl_field": None,
@@ -272,28 +320,28 @@ def parse_mesosim_json(contents: str | bytes, filename: str = "") -> pd.DataFram
 
         enter_vars = enter_event.get("Vars") or {}
         initial = [t for t in entry_trades[pid] if t.get("SimTime") == enter_event["SimTime"]]
+        leg_sum = _leg_fill_premium(initial)
         if enter_vars.get("entry_net_premium") is not None:
             premium = enter_vars["entry_net_premium"]
             premium_fields.add("entry_net_premium")
+            # 3.1 carries both, which validates the 2.13 fallback -- sign
+            # included. A flipped premium reads as a different strategy, not
+            # as a parse error, so any disagreement is reported.
+            if initial and abs(leg_sum - float(premium)) > 0.01:
+                notes["premium_leg_mismatch"].append(
+                    {"position_id": pid, "entry_net_premium": premium, "leg_sum": leg_sum})
         else:
-            # Sum of Price * Qty * Multiplier over the fills on the entry bar.
-            premium = 0
-            for trade in initial:
-                te = trade.get("TradeEvent") or {}
-                multiplier = (te.get("Contract") or {}).get("Multiplier", 100)
-                premium += te.get("Price", 0) * te.get("Qty", 0) * multiplier
-            # Prices are cents; the float sum is not (10364.999999999993).
-            premium = round(premium, 2)
+            premium = leg_sum
             premium_fields.add("leg fills")
 
-        # The signal that closed it is the last one BEFORE the exit event.
-        # MesoSim can fire two on the exit bar, the time limit first and a
-        # price limit second. In all nine such positions across the 3.1 and
-        # 2.13 exports the P/L agrees with the second (target met / stop hit).
-        prior = [e for i, e in signals.get(pid, []) if i < exit_idx]
-        if len(prior) > 1:
+        exit_reason, reason_notes = _resolve_exit_reason(signals.get(pid, []), exit_idx, exit_event)
+        if reason_notes["candidates"] > 1:
             notes["multi_signal_positions"] += 1
-        exit_reason = _simplify_exit_reason(prior[-1].get("Message", "")) if prior else "Unknown"
+        if reason_notes["precedence_overrode_order"]:
+            notes["precedence_vs_order"].append({"position_id": pid, "chosen": exit_reason,
+                                                 "last_in_file": reason_notes["last_in_file"]})
+        if (exit_reason == "Profit Target" and pnl <= 0) or (exit_reason == "Stop Loss" and pnl >= 0):
+            notes["pnl_contradicts_reason"].append({"position_id": pid, "reason": exit_reason, "pnl": pnl})
 
         at_fill = [k for k, ev in (("entry", enter_event), ("exit", exit_event))
                    if ev.get("SimTime") in missing_times.get(pid, ())]
@@ -366,6 +414,8 @@ def get_date_range(df: pd.DataFrame) -> tuple[datetime, datetime]:
 
 def join_market_data(trades_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
     """
+    NOT USED -- lookahead (daily close assigned at entry). See market.py.
+
     Join trade data with market data based on trade open date.
 
     Adds VIX, VIX3M, VIX9D levels at trade entry, overnight gaps, and ratios.

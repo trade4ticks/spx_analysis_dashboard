@@ -26,7 +26,11 @@ TRADE_COLUMNS = [
     "date_opened", "time_opened", "date_closed", "time_closed", "pnl", "premium", "exit_reason",
     "margin_req", "legs", "days_in_trade", "day_of_week", "year", "is_win",
     "vix_level", "vix3m_level", "vix9d_level",
-    "gap", "vix_overnight_gap", "vix3m_vix_ratio", "vix_vix9d_ratio",
+    "vix_bar_time", "vix3m_bar_time", "vix9d_bar_time",
+    "gap", "vix_overnight_gap",
+    # Both ratio bases until one is chosen (registry `basis`).
+    "vix3m_vix_ratio_entry", "vix3m_vix_ratio_close", "vix_vix9d_ratio_entry", "vix_vix9d_ratio_close",
+    "csv_gap",
     # CSV-only extras (null for Mesosim)
     "spx_open_price", "spx_close_price", "contracts", "pnl_pct",
     "max_profit", "max_loss", "strategy",
@@ -34,18 +38,17 @@ TRADE_COLUMNS = [
     "position_id", "missing_data_at_fill",
 ]
 
-# Every numeric Var on a Mesosim EnterPosition (profit_target, stop_loss,
-# pos_delta, ...). Which of them will matter is not known yet, so the parser
-# keeps all of them under this prefix rather than a list here. Vendor fields
-# only -- nothing this app joins can carry the prefix.
-ENTRY_VAR_PREFIX = "entry_var_"
+# The parser keeps every Mesosim EnterPosition Var as entry_var_* on the
+# DataFrame, but none reach the page: ~20 auto-included columns would undo the
+# explicit whitelist above. Add one here by name when it is wanted.
 
 
 def allowed_column(name: str) -> bool:
-    return name in TRADE_COLUMNS or name.startswith(ENTRY_VAR_PREFIX)
+    return name in TRADE_COLUMNS
 
 DATE_COLUMNS = ("date_opened", "date_closed")
-TEXT_COLUMNS = ("exit_reason", "legs", "strategy", "time_opened", "time_closed", "missing_data_at_fill")
+TEXT_COLUMNS = ("exit_reason", "legs", "strategy", "time_opened", "time_closed", "missing_data_at_fill",
+                "vix_bar_time", "vix3m_bar_time", "vix9d_bar_time")
 INT_COLUMNS = ("days_in_trade", "day_of_week", "year", "position_id")
 
 
@@ -61,9 +64,7 @@ def _num(v):
 
 def trades_to_payload(df: pd.DataFrame) -> dict:
     cols: dict[str, list] = {}
-    names = [c for c in TRADE_COLUMNS if c in df.columns]
-    names += sorted(c for c in df.columns if c.startswith(ENTRY_VAR_PREFIX))
-    for c in names:
+    for c in [c for c in TRADE_COLUMNS if c in df.columns]:
         s = df[c]
         if c in DATE_COLUMNS:
             d = pd.to_datetime(s, errors="coerce")

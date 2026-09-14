@@ -47,7 +47,7 @@ import pandas as pd  # noqa: E402
 from app.oo_backtest import calculations as calc  # noqa: E402
 from app.oo_backtest import data_loader  # noqa: E402
 from app.oo_backtest.payload import TRADE_COLUMNS, allowed_column, trades_to_payload  # noqa: E402
-from app.oo_backtest.registry import REGISTRY  # noqa: E402
+from app.oo_backtest.registry import REGISTRY, registry_with_coverage  # noqa: E402
 from app.routers.oo_backtest import _parse  # noqa: E402
 
 JS = ROOT / "static" / "js" / "oo_backtest.js"
@@ -138,9 +138,20 @@ def check_binning() -> None:
     # Planted fault: flip the ratio bins to left-closed. If the comparison
     # cannot tell, every pass above is vacuous.
     m = next(x for x in ranges if x["key"] == "vix3m_vix")
-    flipped = dict(m["bins"], right=not m["bins"]["right"])
+    flipped = dict(m["bins"], closed="left" if m["bins"]["closed"] == "right" else "right")
     fault = run_js({"f": {"values": job["vix3m_vix"]["values"], "bins": flipped}})["f"]
     check(fault != expect["vix3m_vix"], "a left/right-closed swap on the ratio bins IS detected")
+
+    # A spec without an explicit side must not bin at all.
+    unsided = {k: v for k, v in m["bins"].items() if k != "closed"}
+    try:
+        run_js({"f": {"values": [1.0], "bins": unsided}})
+        check(False, "a bin spec with no `closed` side is refused by obBinIndex")
+    except RuntimeError as exc:
+        check("no closed side" in str(exc), "a bin spec with no `closed` side is refused by obBinIndex")
+    check({x["key"]: x["bins"]["closed"] for x in ranges if x["key"] in ("vix3m_vix", "vix_vix9d", "vix")}
+          == {"vix3m_vix": "right", "vix_vix9d": "right", "vix": "left"},
+          "ratio bins are explicitly right-closed, the others left-closed")
 
 
 SOURCE_ROOT = ROOT.parent / "Options-Backtest-Dashboard"
@@ -203,20 +214,29 @@ def check_registry() -> None:
         check(True, "serialises without NaN/inf")
     except ValueError as exc:
         check(False, f"serialises without NaN/inf: {exc}")
-    need = {"key", "label", "column", "type", "min", "max", "step", "bins", "hasScatter", "minDate"}
+    need = {"key", "label", "column", "type", "min", "max", "step", "bins", "hasScatter", "minDate",
+            "series", "basis"}
     for m in REGISTRY:
         miss = need - set(m)
         check(not miss, f"{m['key']}: has {sorted(need)}" + (f" — missing {sorted(miss)}" if miss else ""))
-    order = [m["column"] for m in REGISTRY if m["section"]]
-    brief = ["day_of_week", "year", "gap", "vix_overnight_gap", "premium", "vix_level",
-             "vix3m_level", "vix9d_level", "vix3m_vix_ratio", "vix_vix9d_ratio"]
+    order = [m["key"] for m in REGISTRY if m["section"]]
+    brief = ["day_of_week", "year", "gap", "vix_gap", "premium", "vix",
+             "vix3m", "vix9d", "vix3m_vix", "vix_vix9d"]
     check(order == brief, f"section order matches the brief: {order}")
     check(len({m["key"] for m in REGISTRY}) == len(REGISTRY), "keys are unique")
     for m in REGISTRY:
         if m["type"] == "categorical":
             check(not m["hasScatter"], f"{m['key']}: categorical has no scatter")
         else:
-            check(m["column"] in TRADE_COLUMNS, f"{m['key']}: column {m['column']} is in the payload whitelist")
+            cols = list(m["basis"].values()) if m["basis"] else [m["column"]]
+            check(all(c in TRADE_COLUMNS for c in cols) and m["column"] in cols,
+                  f"{m['key']}: columns {cols} are in the payload whitelist")
+    cov = registry_with_coverage({"spx": "2017-01-03", "vix": "2017-01-03", "vix3m": "2017-01-03", "vix9d": "2019-05-01"})
+    by = {m["key"]: m for m in cov}
+    check(by["vix9d"]["minDate"] == "2019-05-01" and by["vix_vix9d"]["minDate"] == "2019-05-01"
+          and by["vix3m_vix"]["minDate"] == "2017-01-03" and by["premium"]["minDate"] is None,
+          "minDate from coverage: a two-series metric takes the later first date; non-market metrics stay None")
+    check(all(m["minDate"] is None for m in REGISTRY), "the static REGISTRY is not mutated by coverage")
     r = calc.ratio_bin_spec()
     check(len(r["labels"]) == 22 and r["labels"][0] == "<0.70" and r["labels"][-1] == ">1.50"
           and abs(r["bins"][1] - 0.70) < 1e-12 and abs(r["bins"][-2] - 1.50) < 1e-9,
@@ -361,8 +381,17 @@ def check_real_mesosim() -> None:
           "v3.1: every other entry at 15:30:00")
     check(p["suggested_name"] == "*allantis - v2: 5+4+1, PT SPX*.35, 60DIT, mon, 2021-2026"
           and t[0]["strategy"] == "allantis", "v3.1: save name from BacktestName, strategy from StrategyName")
-    check("entry_var_profit_target" in p["columns"] and "entry_var_pos_vega" in p["columns"],
-          "v3.1: EnterPosition Vars kept (entry_var_*)")
+    df_v3 = data_loader.parse_mesosim_json(v3_raw, "v3.events.json")
+    check("entry_var_profit_target" in df_v3.columns and "entry_var_pos_vega" in df_v3.columns,
+          "v3.1: EnterPosition Vars kept on the parsed DataFrame (entry_var_*)")
+    check(not any(k.startswith("entry_var_") for k in p["columns"]),
+          "v3.1: ...and none of them reach the payload")
+    check(not n["precedence_vs_order"] and not n["pnl_contradicts_reason"] and not n["premium_leg_mismatch"],
+          "v3.1: precedence agrees with file order, P/L agrees with reasons, legs sum to entry_net_premium")
+    # P&L agreement as an assertion, on every trade the fixture has.
+    pt = df_v3[df_v3["exit_reason"] == "Profit Target"]
+    check(len(pt) and bool((pt["pnl"] >= pt["entry_var_profit_target"]).all()),
+          f"v3.1: every Profit Target exit has P/L >= its target ({len(pt)})")
     check(not n["missing_data_at_fill"] and not n["pnl_mismatch"], "v3.1: no MissingData at fills, no P/L disagreement")
 
     # Planted faults. Each must change the output the way the rule says.
@@ -374,6 +403,15 @@ def check_real_mesosim() -> None:
     exit0["Vars"]["pos_pnl"] = exit0["Vars"]["pos_realized_pnl"] + 50
     ev.append({"EventType": "ExitSignal", "PositionId": 26, "SimTime": "2099-01-01T15:30:00",
                "Message": "Reached stop loss: 1"})
+    # A time signal written AFTER position 26's profit-target signal on the
+    # same bar, ahead of the exit. File order now says "time"; precedence must
+    # still say "Profit Target", and must report the disagreement.
+    exit26 = next(i for i, e in enumerate(ev) if e["EventType"] == "ExitPosition" and e["PositionId"] == 26)
+    ev.insert(exit26, {"EventType": "ExitSignal", "PositionId": 26, "SimTime": ev[exit26]["SimTime"],
+                       "Message": "Max time in trade reached: 60 days"})
+    # A leg fill on position 0's entry bar that entry_net_premium does not include.
+    ev.append({"EventType": "EntryTrade", "PositionId": 0, "SimTime": enter0["SimTime"],
+               "TradeEvent": {"Price": 1.0, "Qty": 1, "Contract": {"Multiplier": 100}}})
     f = _parse(json.dumps(ev).encode(), "planted.json")
     ft, fn = _by_pid(f), f["notes"]
     check(fn["missing_data_at_fill"] == [{"position_id": 0, "at": ["entry"]}] and ft[0]["missing_data_at_fill"] == "entry",
@@ -381,6 +419,10 @@ def check_real_mesosim() -> None:
     check(len(fn["pnl_mismatch"]) == 1 and ft[0]["pnl"] == 1461.56,
           "planted: pos_pnl disagreeing with realized is reported, realized still used")
     check(ft[26]["exit_reason"] == "Profit Target", "planted: a signal AFTER the exit does not change the reason")
+    check([x["position_id"] for x in fn["precedence_vs_order"]] == [26],
+          "planted: time signal written last on the exit bar -> precedence keeps Profit Target, disagreement reported")
+    check([x["position_id"] for x in fn["premium_leg_mismatch"]] == [0] and ft[0]["premium"] == 11215,
+          "planted: legs not summing to entry_net_premium are reported; entry_net_premium still used")
 
     for msg, want in [("Delta limit breached (12 >= 10): 0.35", "Delta limit breached"),
                       ("Reached stop loss: 3690.06", "Stop Loss"),
@@ -396,6 +438,7 @@ def check_real_mesosim() -> None:
     check(all(v is None for v in p["columns"]["margin_req"]), "v2.13: no pos_margin -> margin null, not stop_loss")
     check(all(v == round(v, 2) for v in p["columns"]["premium"]), "v2.13: leg-sum premium rounded to cents")
     check(t[54]["exit_reason"] == "Stop Loss" and t[54]["pnl"] < 0, "v2.13: time + stop on the exit bar -> Stop Loss")
+    check(not n["precedence_vs_order"] and not n["pnl_contradicts_reason"], "v2.13: precedence agrees with order and P/L")
     check((t[42]["date_opened"], t[42]["time_opened"]) == ("2024-11-29", "12:30:00"),
           "v2.13: early-close entry 2024-11-29 12:30:00 kept")
     check(n["open_positions"] == 1 and 72 not in t, "v2.13: open position 72 excluded and reported")

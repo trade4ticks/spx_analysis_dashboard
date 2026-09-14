@@ -122,49 +122,70 @@
           <div class="ob-loaded" x-show="loaded">
             <div x-text="loadedLabel()"></div>
             <div class="ob-dim" x-text="sourceLabel() + ' · ' + (meta ? meta.filename : '')"></div>
-            <template x-for="note in parseNotes()" :key="note.text">
+            <template x-for="note in parseNotes().concat(marketNotes())" :key="note.text">
               <div class="ob-parse-note" :class="{ warn: note.warn }" x-text="note.text"></div>
             </template>
+            <a href="#" class="ob-dim" x-show="meta && meta.market && meta.market.gap_crosscheck"
+               @click.prevent="loadDetail = !loadDetail"
+               x-text="loadDetail ? 'hide gap disagreements' : 'show gap disagreements'"></a>
+            <div class="ob-probe" x-show="loadDetail && meta && meta.market && meta.market.gap_crosscheck">
+              <template x-for="w in ((meta && meta.market && meta.market.gap_crosscheck) ? meta.market.gap_crosscheck.worst : [])" :key="w.date">
+                <div x-text="w.date + ': Option Omega ' + w.vendor + ' vs computed ' + w.computed"></div>
+              </template>
+            </div>
           </div>
 
           <div class="ob-row">
-            <span class="ob-lbl">Saved logs</span><span class="ob-phase">P2</span>
+            <span class="ob-lbl">Saved logs</span><span class="ob-phase">P2b</span>
           </div>
           <select class="ob-sel" disabled style="margin-top:4px;">
-            <option>Saved strategies arrive in Phase 2</option>
+            <option>Saved strategies arrive in Phase 2b</option>
           </select>
 
+          <!-- Read-only: index_ohlc is maintained by the VPS pipeline. There is
+               deliberately no update action here. -->
           <div class="ob-row" style="margin-top:12px;">
             <span class="ob-lbl">Market data</span>
             <button class="btn" style="margin-left:auto;" @click="loadMarketStatus()"
-                    :disabled="marketLoading">Re-check</button>
+                    :disabled="marketLoading" title="Re-read freshness (read-only)">Re-check</button>
           </div>
           <div class="ob-note" style="margin-top:4px;" x-text="marketSummary()"></div>
-          <div class="ob-dim" x-show="market && !market.joined">Not joined to trades yet (Phase 2).</div>
-          <a href="#" class="ob-dim" x-show="market" @click.prevent="marketDetail = !marketDetail"
-             x-text="marketDetail ? 'hide probe detail' : 'show probe detail'"></a>
-          <div class="ob-probe" x-show="marketDetail && market">
-            <template x-for="c in (market ? market.candidates : [])" :key="c.db + '.' + c.table">
-              <div style="margin-top:6px;">
-                <b x-text="c.db + '.' + c.table"></b>
-                <div x-text="c.columns.join(', ')"></div>
-                <template x-for="row in (c.coverage || [])" :key="(row.ticker || '') + row.first">
-                  <div x-text="coverageLine(row)"></div>
-                </template>
-                <div class="ob-err" x-show="c.error" x-text="c.error"></div>
-              </div>
+          <div class="ob-parse-note warn" x-show="marketStale()"
+               x-text="'Stale — expected the ' + (market ? market.expected_session : '') + ' session'"></div>
+          <div class="ob-parse-note warn" x-show="fallbackWarn()">Close fell back on full sessions — see detail</div>
+          <div class="ob-err" x-show="coverageError" x-text="'Coverage unavailable: ' + coverageError"></div>
+          <a href="#" class="ob-dim" x-show="market && market.ok" @click.prevent="marketDetail = !marketDetail"
+             x-text="marketDetail ? 'hide detail' : 'show detail'"></a>
+          <div class="ob-probe" x-show="marketDetail && market && market.ok">
+            <div><b>coverage:</b> <span x-text="coverageLines().join(' · ')"></span></div>
+            <div style="margin-top:4px;"><b>close not from 15:55:</b></div>
+            <template x-for="line in fallbackLines()" :key="line">
+              <div x-text="line"></div>
             </template>
-            <div style="margin-top:6px;" x-show="market && market.databases.length">
-              <b>databases:</b> <span x-text="market ? market.databases.join(', ') : ''"></span>
-            </div>
-            <template x-for="e in (market ? market.errors : [])" :key="e">
-              <div class="ob-err" x-text="e"></div>
+            <div style="margin-top:4px;"><b>bars per year</b> (days · 09:30 · 15:55 · valid 16:00 · pre-market):</div>
+            <template x-for="y in (market && market.bar_labels ? market.bar_labels : [])" :key="y.year">
+              <div x-text="y.year + ': ' + y.days + ' · ' + y.days_with_0930 + ' · ' + y.days_with_1555 + ' · ' + y.days_with_valid_1600 + ' · ' + y.days_with_premarket"></div>
             </template>
+            <div style="margin-top:4px;" x-text="market ? ('rollup: ' + market.days + ' sessions, built ' + market.built_at + ' in ' + market.build_s + 's') : ''"></div>
           </div>
         </div>
       </div>
 
       <div class="ob-err" x-show="registryError" x-text="registryError"></div>
+
+      <!-- Temporary: both ratio bases are built until one is chosen. -->
+      <div class="ob-card" x-show="hasBasisMetrics()">
+        <div class="ob-card-hdr"><span class="ob-card-title">Ratio basis</span>
+          <span class="ob-card-sub">temporary</span></div>
+        <div class="ob-card-body">
+          <div class="seg">
+            <button class="seg-btn" :class="{ on: ratioBasis === 'entry' }" @click="ratioBasis = 'entry'">Entry time</button>
+            <button class="seg-btn" :class="{ on: ratioBasis === 'close' }" @click="ratioBasis = 'close'">Daily close</button>
+          </div>
+          <div class="ob-dim" style="margin-top:6px;"
+               x-text="ratioBasis === 'entry' ? 'VIX-family bars at each trade\'s entry time' : 'Entry date\'s daily closes (the old app\'s basis — lookahead)'"></div>
+        </div>
+      </div>
 
       <div class="ob-card">
         <div class="ob-card-hdr">
@@ -181,7 +202,10 @@
             <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P3</span>
             <span class="ob-card-sub" x-text="m.type === 'range' ? 'range · step ' + m.step : 'checkboxes'"></span>
           </div>
-          <div class="ob-card-body ob-dim" x-text="loaded ? columnSummary(m) : 'Load a trade log'"></div>
+          <div class="ob-card-body ob-dim">
+            <div x-text="loaded ? columnSummary(m) : 'Load a trade log'"></div>
+            <div class="ob-parse-note warn" x-show="coverageNote(m)" x-text="coverageNote(m)"></div>
+          </div>
         </div>
       </template>
     </aside>
@@ -218,11 +242,11 @@
           <div class="ob-card-hdr">
             <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P4</span>
             <span class="ob-card-sub"
-                  x-text="m.column + (m.bins ? ' · ' + binCount(m) + ' bins' : ' · categorical')"></span>
+                  x-text="metricColumn(m) + (m.bins ? ' · ' + binCount(m) + ' bins, ' + m.bins.closed + '-closed' + (m.bins.labelEdge === 'left' ? ', labelled by left edge' : '') : ' · categorical')"></span>
           </div>
           <div class="ob-card-body">
             <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'">
-              Skipped — this log has no values in <span x-text="' ' + m.column"></span>
+              Skipped — this log has no values in <span x-text="' ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></span>
             </div>
             <div class="ob-sec-grid" :class="{ two: !m.hasScatter }" x-show="sectionState(m) !== 'skipped'">
               <div class="ob-placeholder">Avg P/L by bin</div>

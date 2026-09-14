@@ -10,9 +10,10 @@
  * FILTERING HAPPENS HERE, NOT ON THE SERVER. The whole trade log arrives once,
  * columnar, with ISO date strings; a filter change never makes a request.
  *
- * Phase 1: the scaffold. Upload + parse are real, the registry drives the
- * sidebar and section skeletons, and the market-data probe is shown. Filters,
- * stats and charts are labelled stubs.
+ * Phase 2: uploads are joined to main.index_ohlc on the server (VIX levels at
+ * the entry bar, gaps against the prior session, both ratio bases); the
+ * sidebar shows read-only market freshness, the ratio-basis toggle and per-
+ * metric coverage. Filters, stats and charts are still labelled stubs.
  * ==========================================================================*/
 
 const OB_BLUE = '#3498db';   // positive (theme --accent)
@@ -27,14 +28,19 @@ const OB_DATA = { columns: null, n: 0 };
 
 /* Which bin a value falls in, matching pd.cut over the registry's spec.
  * `edges` are the INNER edges; the outer two are -inf/+inf.
- *   right=false  bins are [e(i-1), e(i))  -> index = #edges <= v
- *   right=true   bins are (e(i-1), e(i)]  -> index = #edges <  v
+ *   closed "left"   bins are [e(i-1), e(i))  -> index = #edges <= v
+ *   closed "right"  bins are (e(i-1), e(i)]  -> index = #edges <  v
+ * The side is an explicit registry field; anything else is a registry bug and
+ * throws rather than silently binning one way.
  * Null / NaN -> -1 (no bin), as pd.cut gives NaN. */
 function obBinIndex(v, bins) {
   if (v === null || v === undefined || Number.isNaN(v)) return -1;
+  if (bins.closed !== 'left' && bins.closed !== 'right') {
+    throw new Error(`bin spec has no closed side: ${JSON.stringify(bins.closed)}`);
+  }
   const e = bins.edges;
   let lo = 0, hi = e.length;
-  if (bins.right) {
+  if (bins.closed === 'right') {
     while (lo < hi) { const m = (lo + hi) >> 1; if (e[m] < v) lo = m + 1; else hi = m; }
   } else {
     while (lo < hi) { const m = (lo + hi) >> 1; if (e[m] <= v) lo = m + 1; else hi = m; }
@@ -91,6 +97,13 @@ document.addEventListener('alpine:init', () => {
     marketLoading: false,
     marketError: '',
     marketDetail: false,
+    loadDetail: false,
+    coverageError: '',
+
+    // Which ratio basis the sections read: entry-time bars (default) or the
+    // entry date's daily closes. Temporary -- one basis is deleted, and this
+    // toggle with it, once both have been looked at on a real log.
+    ratioBasis: 'entry',
 
     async init() {
       await Promise.all([this.loadRegistry(), this.loadMarketStatus()]);
@@ -100,7 +113,9 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await fetch('/api/oo-backtest/registry');
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        this.registry = (await r.json()).metrics || [];
+        const body = await r.json();
+        this.registry = body.metrics || [];
+        this.coverageError = body.coverage_error || '';
       } catch (e) {
         console.error('oo-backtest registry', e);
         this.registryError = `Registry failed to load: ${e.message}`;
@@ -174,7 +189,29 @@ document.addEventListener('alpine:init', () => {
     filterMetrics() { return this.registry.filter(m => m.filter); },
     sectionMetrics() { return this.registry.filter(m => m.section); },
 
-    hasColumn(m) { return this.presentColumns.includes(m.column); },
+    /* The column a metric reads now: its basis column where it has more than
+     * one (the ratios), else its only column. */
+    metricColumn(m) { return m.basis ? m.basis[this.ratioBasis] : m.column; },
+
+    hasColumn(m) { return this.presentColumns.includes(this.metricColumn(m)); },
+
+    hasBasisMetrics() { return this.registry.some(m => m.basis); },
+
+    /* Trades in the loaded log that open before a metric's coverage. A range
+     * filter drops trades with no value, so filtering on this metric would
+     * drop these too -- said before it happens, not discovered after. */
+    tradesBeforeCoverage(m) {
+      if (!this.loaded || !m.minDate || !OB_DATA.columns) return 0;
+      let k = 0;
+      for (const d of OB_DATA.columns.date_opened) if (d && d < m.minDate) k++;
+      return k;
+    },
+
+    coverageNote(m) {
+      const k = this.tradesBeforeCoverage(m);
+      if (!k) return '';
+      return `Data starts ${m.minDate} — filtering on this drops ${k.toLocaleString()} earlier trade${k === 1 ? '' : 's'}`;
+    },
 
     binCount(m) { return m.bins ? m.bins.labels.length : null; },
 
@@ -183,7 +220,7 @@ document.addEventListener('alpine:init', () => {
     columnSummary(m) {
       if (!this.loaded) return '';
       if (!this.hasColumn(m)) return 'no values in this log';
-      const vals = OB_DATA.columns[m.column];
+      const vals = OB_DATA.columns[this.metricColumn(m)];
       if (m.type === 'range') {
         const x = obExtent(vals);
         return `${obFmt(x.min, m.format)} … ${obFmt(x.max, m.format)}  (${x.n} trades)`;
@@ -220,7 +257,16 @@ document.addEventListener('alpine:init', () => {
         out.push({ warn: true, text: `${plural(n.pnl_mismatch.length, 'trade', 'trades')}: pos_realized_pnl ≠ pos_pnl (realized used)` });
       }
       if (n.multi_signal_positions) {
-        out.push({ warn: false, text: `${plural(n.multi_signal_positions, 'position', 'positions')} fired two exit signals on the exit bar; the later one is used` });
+        out.push({ warn: false, text: `${plural(n.multi_signal_positions, 'position', 'positions')} fired several exit signals on the exit bar; resolved by precedence (price > adjustments > time)` });
+      }
+      if ((n.precedence_vs_order || []).length) {
+        out.push({ warn: true, text: `${plural(n.precedence_vs_order.length, 'position', 'positions')}: precedence chose a different reason than the last signal in the file — MesoSim's ordering may have changed` });
+      }
+      if ((n.pnl_contradicts_reason || []).length) {
+        out.push({ warn: true, text: `${plural(n.pnl_contradicts_reason.length, 'trade', 'trades')}: exit reason contradicts P/L (profit target with a loss, or stop with a gain)` });
+      }
+      if ((n.premium_leg_mismatch || []).length) {
+        out.push({ warn: true, text: `${plural(n.premium_leg_mismatch.length, 'trade', 'trades')}: entry_net_premium ≠ sum of entry leg fills` });
       }
       if (n.pnl_field === 'pos_pnl') {
         out.push({ warn: false, text: 'P/L from pos_pnl — this MesoSim version has no realized P/L field' });
@@ -242,22 +288,73 @@ document.addEventListener('alpine:init', () => {
              `${this.meta.date_min} – ${this.meta.date_max})`;
     },
 
-    /* ── market probe ──────────────────────────────────────────────────── */
+    /* ── market data: what the join did on this log ───────────────────── */
+
+    /* Said on load, because each of these is invisible in the charts: a 0%
+     * entry-time coverage makes every VIX metric a daily-open proxy, and an
+     * off-by-one prior close shifts every gap while the page looks normal. */
+    marketNotes() {
+      const mk = this.meta && this.meta.market;
+      if (!mk) return [];
+      if (!mk.joined) {
+        return [{ warn: true, text: `Market data not joined — ${mk.error || 'unknown reason'}. VIX and gap sections will show as skipped.` }];
+      }
+      const out = [];
+      const e = mk.entry_time || {};
+      out.push({
+        warn: e.entry_time_found < e.trades,
+        text: `Entry time found for ${(e.entry_time_found || 0).toLocaleString()} of ${(e.trades || 0).toLocaleString()} trades` +
+              (e.entry_time_fallback_0930 ? ` — ${e.entry_time_fallback_0930} use the 09:30 bar` : ''),
+      });
+      if (e.before_open) out.push({ warn: true, text: `${e.before_open} entries before 09:30 — no bar that day, VIX levels null` });
+      if (e.after_close) out.push({ warn: true, text: `${e.after_close} entries after 16:00 — check the log's time zone` });
+      if (mk.trades_without_daily_row) {
+        out.push({ warn: true, text: `${mk.trades_without_daily_row} trades open on a date index_ohlc has no session for` });
+      }
+      const nulls = Object.entries(mk.entry_bars || {}).filter(([, v]) => v.null).map(([k, v]) => `${k.toUpperCase()} ${v.null}`);
+      if (nulls.length) out.push({ warn: false, text: `No entry bar (null level): ${nulls.join(', ')}` });
+      const pushed = Object.entries(mk.entry_bars || {}).filter(([, v]) => v.earlier_than_entry_bar).map(([k, v]) => `${k.toUpperCase()} ${v.earlier_than_entry_bar}`);
+      if (pushed.length) out.push({ warn: false, text: `Entry bar was NaN, earlier bar used: ${pushed.join(', ')}` });
+      const g = mk.gap_crosscheck;
+      if (g) {
+        const aligned = g.best_alignment === 'previous_row';
+        out.push({
+          warn: !aligned || g.disagree > 0,
+          text: `Gap vs Option Omega's column: ${g.agree} of ${g.compared} agree (${g.best_unit}, ±${g.tolerance})` +
+                (aligned ? '' : ` — best match is ${g.best_alignment.replace(/_/g, ' ')}, not the previous session: off by one?`),
+        });
+      }
+      return out;
+    },
+
+    /* ── market freshness (read-only) ─────────────────────────────────── */
 
     marketSummary() {
       if (this.marketLoading) return 'Checking…';
-      if (this.marketError) return `Probe failed: ${this.marketError}`;
+      if (this.marketError) return `Status failed: ${this.marketError}`;
       if (!this.market) return '';
-      const found = (this.market.candidates || []).filter(c => (c.coverage || []).length);
-      // A probe that errored has not shown the table is absent — say which.
-      const errs = this.market.errors || [];
-      if (!found.length) return errs.length ? `Probe incomplete — ${errs[0]}` : 'No SPX/VIX daily table found';
-      return found.map(c => `${c.db}.${c.table}`).join(', ');
+      if (!this.market.ok) return `index_ohlc unavailable — ${this.market.error}`;
+      return `index_ohlc through ${this.market.latest_date} ${(this.market.latest_time || '').slice(0, 5)}`;
     },
 
-    coverageLine(row) {
-      return (row.ticker ? row.ticker + ': ' : '') +
-             `${row.first || '—'} → ${row.last || '—'}` + (row.n != null ? ` (${row.n})` : '');
+    marketStale() { return !!(this.market && this.market.ok && this.market.stale); },
+
+    fallbackLines() {
+      const fb = (this.market && this.market.close_fallback) || {};
+      return Object.entries(fb).map(([s, v]) =>
+        `${s.toUpperCase()}: ${v.early_close_days.length} early-close, ${v.full_session_count} full-session` +
+        (v.full_session_count ? ` (e.g. ${v.full_session_sample.slice(0, 3).join(', ')})` : '') +
+        (v.no_close_days ? `, ${v.no_close_days} days with no close` : ''));
+    },
+
+    fallbackWarn() {
+      const fb = (this.market && this.market.close_fallback) || {};
+      return Object.values(fb).some(v => v.full_session_count > 0);
+    },
+
+    coverageLines() {
+      const c = (this.market && this.market.coverage) || {};
+      return Object.entries(c).map(([s, d]) => `${s.toUpperCase()} from ${d || '—'}`);
     },
   }));
 });

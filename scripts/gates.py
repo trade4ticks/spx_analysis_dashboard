@@ -88,6 +88,10 @@ GATES = [
     # about which side of an edge a value falls on is invisible on screen.
     _s("check_oo_backtest.py",
        note="JS binning == pd.cut; parsers; no dropped-scope columns"),
+    # Starts a throwaway Postgres and runs the shipped index_ohlc SQL: early
+    # closes, 'NaN' bars, the prior-session row, the entry bar's open.
+    _s("check_oo_market_sql.py",
+       note="market SQL on a temp cluster; skips without initdb"),
 
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
