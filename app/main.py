@@ -18,7 +18,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp, oo_backtest
 from app.routers import replay as replay_router
 
 BASE_DIR = Path(__file__).parent.parent  # project root
@@ -119,6 +119,9 @@ app.include_router(equity_structures.router, prefix="/api/equity-iv")
 # optional and the page reports "not connected" -- so registration is
 # unconditional and the endpoint answers either way.
 app.include_router(equities_scalp.router,   prefix="/api/equities-scalp")
+# OO/Mesosim Backtest: parses uploaded trade logs and stores saved ones. The
+# page filters in the browser, so nothing here answers a filter change.
+app.include_router(oo_backtest.router,      prefix="/api/oo-backtest")
 
 # REPLAY reads PARQUET, not Postgres, and carries its own /api/replay
 # prefix rather than sitting under equities-scalp. It shares the page and
@@ -180,6 +183,11 @@ async def equity_iv_page(request: Request):
 @app.get("/equities-scalp")
 async def equities_scalp_page(request: Request):
     return templates.TemplateResponse(request, "equities_scalp.html")
+
+
+@app.get("/oo-backtest")
+async def oo_backtest_page(request: Request):
+    return templates.TemplateResponse(request, "oo_backtest.html")
 
 
 @app.get("/backtest-iv-analysis")

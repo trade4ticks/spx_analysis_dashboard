@@ -83,6 +83,12 @@ GATES = [
     _s("check_scatter_invariants.py",
        note="colour thresholds cannot change membership or extent"),
 
+    # ── the OO/Mesosim backtest page ─────────────────────────────────────
+    # It bins in the browser against edges defined in Python; a disagreement
+    # about which side of an edge a value falls on is invisible on screen.
+    _s("check_oo_backtest.py",
+       note="JS binning == pd.cut; parsers; no dropped-scope columns"),
+
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
        note="no aggregation, caps hold, resubscribe on reconnect"),
@@ -123,7 +129,7 @@ GATES = [
 ]
 
 JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js",
-            "static/js/equities_live.js"]
+            "static/js/equities_live.js", "static/js/oo_backtest.js"]
 
 # A gate can fail because THIS HOST lacks something rather than because the
 # code is wrong. Those are reported as ENV, never as PASS -- but also not as

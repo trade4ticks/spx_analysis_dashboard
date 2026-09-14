@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — OO/Mesosim Backtest</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+
+  <style>
+    /* ── OO/Mesosim Backtest — page-scoped styles ─────────────────────────
+       Every rule is prefixed `.ob-` so nothing leaks onto other pages.
+       Colours come from theme.css tokens; blue positive, pink negative. */
+
+    /* Sidebar ~25% with its own scroll, main column beside it with its own. */
+    .ob-body {
+      flex:1; min-height:0; display:grid;
+      grid-template-columns:minmax(280px, 25%) 1fr;
+    }
+    .ob-side {
+      overflow-y:auto; padding:12px; border-right:1px solid var(--border);
+      background:var(--bg);
+    }
+    .ob-main { overflow-y:auto; padding:12px 14px; min-width:0; }
+
+    .ob-card {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; margin-bottom:10px;
+    }
+    .ob-card-hdr {
+      display:flex; align-items:center; gap:8px; padding:6px 10px;
+      border-bottom:1px solid var(--border); background:var(--raised);
+      border-top-left-radius:6px; border-top-right-radius:6px;
+    }
+    .ob-card-title { font-size:12px; font-weight:700; letter-spacing:.3px; }
+    .ob-card-sub { font-size:10px; color:var(--dim); margin-left:auto; white-space:nowrap; }
+    .ob-card-body { padding:10px; }
+
+    .ob-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; }
+    .ob-note { font-size:11px; color:var(--muted); }
+    .ob-dim { font-size:11px; color:var(--dim); }
+    .ob-err { font-size:11px; color:var(--danger); white-space:pre-wrap; }
+
+    .ob-drop {
+      display:block; border:1px dashed var(--border); border-radius:5px;
+      padding:16px 10px; text-align:center; cursor:pointer;
+      color:var(--muted); font-size:12px; background:rgba(0,0,0,.12);
+    }
+    .ob-drop.over { border-color:var(--accent); color:var(--accent); background:rgba(52,152,219,.08); }
+    .ob-drop input { display:none; }
+
+    .ob-sel {
+      width:100%; background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 8px; border-radius:4px; color-scheme:dark;
+    }
+    .ob-sel option { background:var(--raised); color:var(--text); }
+    .ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
+
+    .ob-loaded {
+      margin-top:8px; padding:6px 8px; border-radius:4px; font-size:11px;
+      background:rgba(52,152,219,.08); border:1px solid rgba(52,152,219,.35); color:var(--text);
+    }
+
+    .ob-placeholder {
+      display:flex; align-items:center; justify-content:center; text-align:center;
+      min-height:70px; padding:12px; color:var(--dim); font-size:12px;
+      border:1px dashed var(--border); border-radius:4px; background:rgba(0,0,0,.12);
+    }
+    .ob-phase {
+      font-size:9px; font-weight:700; letter-spacing:.3px; text-transform:uppercase;
+      padding:1px 6px; border-radius:3px; margin-left:6px;
+      background:rgba(52,152,219,.12); color:var(--accent); border:1px solid var(--accent);
+    }
+    .ob-empty { padding:50px 20px; text-align:center; color:var(--dim); font-size:13px; }
+
+    .ob-sec-grid { display:grid; gap:10px; grid-template-columns:repeat(3, minmax(0,1fr)); }
+    .ob-sec-grid.two { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    .ob-probe { font-size:10px; color:var(--muted); margin-top:6px; line-height:1.5; word-break:break-word; }
+    .ob-probe b { color:var(--text); font-weight:600; }
+  </style>
+
+  <!-- NOT deferred: must register the alpine:init listener before the deferred
+       Alpine bundle starts (see scripts/check_rendered_assets.py). -->
+  <script src={{ asset('js/oo_backtest.js') }}></script>
+</head>
+
+<body x-data="ooBacktest" x-init="init()">
+
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    {% set nav_active = "/oo-backtest" %}{% include "_nav.html" %}
+    <div class="topbar-right">
+      <span x-text="loaded ? loadedLabel() : 'No trade log loaded'"></span>
+    </div>
+  </div>
+
+  <div class="ob-body">
+
+    <!-- ── Sidebar ────────────────────────────────────────────────────── -->
+    <aside class="ob-side">
+
+      <div class="ob-card">
+        <div class="ob-card-hdr"><span class="ob-card-title">Data source</span></div>
+        <div class="ob-card-body">
+
+          <label class="ob-drop" :class="{ over: dragOver }"
+                 @dragover.prevent="dragOver = true" @dragleave.prevent="dragOver = false"
+                 @drop.prevent="onDrop($event)">
+            <input type="file" accept=".csv,.json" @change="onPick($event)">
+            <span x-show="!uploading">Drop a trade log here, or click to choose<br>
+              <span class="ob-dim">Option Omega .csv · Mesosim .json</span></span>
+            <span x-show="uploading">Parsing…</span>
+          </label>
+          <div class="ob-err" x-show="uploadError" x-text="uploadError" style="margin-top:6px;"></div>
+
+          <div class="ob-loaded" x-show="loaded">
+            <div x-text="loadedLabel()"></div>
+            <div class="ob-dim" x-text="sourceLabel() + ' · ' + (meta ? meta.filename : '')"></div>
+          </div>
+
+          <div class="ob-row">
+            <span class="ob-lbl">Saved logs</span><span class="ob-phase">P2</span>
+          </div>
+          <select class="ob-sel" disabled style="margin-top:4px;">
+            <option>Saved strategies arrive in Phase 2</option>
+          </select>
+
+          <div class="ob-row" style="margin-top:12px;">
+            <span class="ob-lbl">Market data</span>
+            <button class="btn" style="margin-left:auto;" @click="loadMarketStatus()"
+                    :disabled="marketLoading">Re-check</button>
+          </div>
+          <div class="ob-note" style="margin-top:4px;" x-text="marketSummary()"></div>
+          <div class="ob-dim" x-show="market && !market.joined">Not joined to trades yet (Phase 2).</div>
+          <a href="#" class="ob-dim" x-show="market" @click.prevent="marketDetail = !marketDetail"
+             x-text="marketDetail ? 'hide probe detail' : 'show probe detail'"></a>
+          <div class="ob-probe" x-show="marketDetail && market">
+            <template x-for="c in (market ? market.candidates : [])" :key="c.db + '.' + c.table">
+              <div style="margin-top:6px;">
+                <b x-text="c.db + '.' + c.table"></b>
+                <div x-text="c.columns.join(', ')"></div>
+                <template x-for="row in (c.coverage || [])" :key="(row.ticker || '') + row.first">
+                  <div x-text="coverageLine(row)"></div>
+                </template>
+                <div class="ob-err" x-show="c.error" x-text="c.error"></div>
+              </div>
+            </template>
+            <div style="margin-top:6px;" x-show="market && market.databases.length">
+              <b>databases:</b> <span x-text="market ? market.databases.join(', ') : ''"></span>
+            </div>
+            <template x-for="e in (market ? market.errors : [])" :key="e">
+              <div class="ob-err" x-text="e"></div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-err" x-show="registryError" x-text="registryError"></div>
+
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Date range</span><span class="ob-phase">P3</span>
+        </div>
+        <div class="ob-card-body ob-dim"
+             x-text="loaded ? (meta.date_min + ' → ' + meta.date_max) : 'Load a trade log'"></div>
+      </div>
+
+      <!-- One card per registry entry with filter: true. -->
+      <template x-for="m in filterMetrics()" :key="m.key">
+        <div class="ob-card">
+          <div class="ob-card-hdr">
+            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P3</span>
+            <span class="ob-card-sub" x-text="m.type === 'range' ? 'range · step ' + m.step : 'checkboxes'"></span>
+          </div>
+          <div class="ob-card-body ob-dim" x-text="loaded ? columnSummary(m) : 'Load a trade log'"></div>
+        </div>
+      </template>
+    </aside>
+
+    <!-- ── Main column ────────────────────────────────────────────────── -->
+    <main class="ob-main">
+
+      <div class="ob-card" x-show="!loaded">
+        <div class="ob-empty">
+          Drop an Option Omega CSV or a Mesosim JSON trade log in the sidebar to begin.
+        </div>
+      </div>
+
+      <div class="ob-card">
+        <div class="ob-card-hdr"><span class="ob-card-title">Summary</span><span class="ob-phase">P3</span></div>
+        <div class="ob-card-body">
+          <div class="ob-placeholder">
+            # Trades · Win % · Avg P/L · Total P/L · Avg Days · Max DD · Avg Win · Avg Loss · Max Win · Max Loss
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card">
+        <div class="ob-card-hdr"><span class="ob-card-title">Performance over time</span><span class="ob-phase">P3</span></div>
+        <div class="ob-card-body ob-sec-grid two">
+          <div class="ob-placeholder">Cumulative P/L</div>
+          <div class="ob-placeholder">Drawdown (max-DD point marked)</div>
+        </div>
+      </div>
+
+      <!-- One card per registry entry with section: true, in registry order. -->
+      <template x-for="m in sectionMetrics()" :key="m.key">
+        <div class="ob-card">
+          <div class="ob-card-hdr">
+            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P4</span>
+            <span class="ob-card-sub"
+                  x-text="m.column + (m.bins ? ' · ' + binCount(m) + ' bins' : ' · categorical')"></span>
+          </div>
+          <div class="ob-card-body">
+            <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'">
+              Skipped — this log has no values in <span x-text="' ' + m.column"></span>
+            </div>
+            <div class="ob-sec-grid" :class="{ two: !m.hasScatter }" x-show="sectionState(m) !== 'skipped'">
+              <div class="ob-placeholder">Avg P/L by bin</div>
+              <div class="ob-placeholder">Total P/L by bin</div>
+              <div class="ob-placeholder" x-show="m.hasScatter">P/L vs metric (OLS)</div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </main>
+  </div>
+</body>
+</html>
