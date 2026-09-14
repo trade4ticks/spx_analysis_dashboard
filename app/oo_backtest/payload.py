@@ -23,18 +23,30 @@ import pandas as pd
 # Columnar: {name: [values]}. A few thousand rows of ~20 columns is small
 # either way; columns also filter faster in JS than an array of objects.
 TRADE_COLUMNS = [
-    "date_opened", "date_closed", "pnl", "premium", "exit_reason",
+    "date_opened", "time_opened", "date_closed", "time_closed", "pnl", "premium", "exit_reason",
     "margin_req", "legs", "days_in_trade", "day_of_week", "year", "is_win",
     "vix_level", "vix3m_level", "vix9d_level",
     "gap", "vix_overnight_gap", "vix3m_vix_ratio", "vix_vix9d_ratio",
     # CSV-only extras (null for Mesosim)
     "spx_open_price", "spx_close_price", "contracts", "pnl_pct",
     "max_profit", "max_loss", "strategy",
+    # Mesosim-only (null for CSV)
+    "position_id", "missing_data_at_fill",
 ]
 
+# Every numeric Var on a Mesosim EnterPosition (profit_target, stop_loss,
+# pos_delta, ...). Which of them will matter is not known yet, so the parser
+# keeps all of them under this prefix rather than a list here. Vendor fields
+# only -- nothing this app joins can carry the prefix.
+ENTRY_VAR_PREFIX = "entry_var_"
+
+
+def allowed_column(name: str) -> bool:
+    return name in TRADE_COLUMNS or name.startswith(ENTRY_VAR_PREFIX)
+
 DATE_COLUMNS = ("date_opened", "date_closed")
-TEXT_COLUMNS = ("exit_reason", "legs", "strategy")
-INT_COLUMNS = ("days_in_trade", "day_of_week", "year")
+TEXT_COLUMNS = ("exit_reason", "legs", "strategy", "time_opened", "time_closed", "missing_data_at_fill")
+INT_COLUMNS = ("days_in_trade", "day_of_week", "year", "position_id")
 
 
 def _num(v):
@@ -49,9 +61,9 @@ def _num(v):
 
 def trades_to_payload(df: pd.DataFrame) -> dict:
     cols: dict[str, list] = {}
-    for c in TRADE_COLUMNS:
-        if c not in df.columns:
-            continue
+    names = [c for c in TRADE_COLUMNS if c in df.columns]
+    names += sorted(c for c in df.columns if c.startswith(ENTRY_VAR_PREFIX))
+    for c in names:
         s = df[c]
         if c in DATE_COLUMNS:
             d = pd.to_datetime(s, errors="coerce")
@@ -66,10 +78,11 @@ def trades_to_payload(df: pd.DataFrame) -> dict:
         else:
             cols[c] = [_num(x) for x in s]
 
-    # Order by open date so cumulative P/L and drawdown read left to right
-    # without the client re-sorting. Stable, so same-day trades keep file order.
+    # Order by open date and time so cumulative P/L and drawdown read left to
+    # right without the client re-sorting. Stable, so ties keep file order.
     n = len(df)
-    order = sorted(range(n), key=lambda i: (cols["date_opened"][i] or "", i))
+    times = cols.get("time_opened") or [None] * n
+    order = sorted(range(n), key=lambda i: (cols["date_opened"][i] or "", times[i] or "", i))
     if order != list(range(n)):
         cols = {k: [v[i] for i in order] for k, v in cols.items()}
 
@@ -80,11 +93,23 @@ def trades_to_payload(df: pd.DataFrame) -> dict:
         "columns": cols,
         "date_min": min(opened) if opened else None,
         "date_max": max(closed) if closed else None,
+        "notes": _jsonable(df.attrs.get("parse_notes") or {}),
     }
 
 
+def _jsonable(obj):
+    """parse_notes may hold numpy scalars; make them plain JSON."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if hasattr(obj, "item"):
+        return obj.item()
+    return obj
+
+
 def assert_no_dropped_columns(payload: dict) -> None:
-    extra = set(payload["columns"]) - set(TRADE_COLUMNS)
+    extra = {c for c in payload["columns"] if not allowed_column(c)}
     if extra:
         raise AssertionError(f"payload carries non-whitelisted columns: {sorted(extra)}")
 

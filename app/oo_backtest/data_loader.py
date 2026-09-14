@@ -12,10 +12,41 @@ body is kept as it was. Two deliberate removals, nothing else:
     and produce plausible garbage rather than an error.
 
 join_market_data() stays here, where the source put it.
+
+parse_mesosim_json() IS REWRITTEN (2026-09-14) against a field spec for the
+MesoSim 3.1 event stream, checked on the real `allantis - v2` export and on
+six MesoSim 2.13 exports. The source already reduced by PositionId, so the
+trade count was right; what it got wrong, and what changed:
+
+  * exit reason     free text with thresholds embedded ("Reached profit
+                    target: 1291.521"); unknown messages passed through raw,
+                    one category per threshold. Now: known patterns -> fixed
+                    labels, anything else cut at the first colon and stripped
+                    of parenthesised numbers. The signal used is the last one
+                    BEFORE the ExitPosition -- three positions in the sample
+                    fire two signals on the exit bar.
+  * P/L             Vars.pos_realized_pnl, falling back to pos_pnl only where a
+                    version has no realized field (2.13 has none). The source
+                    preferred pos_pnl. Disagreements are reported.
+  * premium         Vars.entry_net_premium where present; the leg-fill sum
+                    only as the fallback (2.13 has no entry_net_premium).
+  * margin          Vars.pos_margin, else null. The source substituted
+                    stop_loss, which is not a margin.
+  * times           time_opened/time_closed kept. SimTime is exchange-local
+                    Eastern -- EndOfDay fires at 13:00 on the early-close
+                    days. The source normalised the times away.
+  * strategy name   parsed by key, not first word: the source turned
+                    "allantis - weekly entry - Mon" into "allantis".
+  * open positions  still excluded, now REPORTED (df.attrs["parse_notes"]).
+  * entry Vars      every numeric EnterPosition Var kept as entry_var_*,
+                    since which ones matter later is not known yet.
+  * MissingData     flagged where it lands on a position's entry or exit bar,
+                    rather than trusting that fill silently.
 """
 
 import io
 import json
+import re
 from collections import defaultdict
 from datetime import datetime
 
@@ -49,15 +80,6 @@ COLUMN_MAPPING = {
     "Max Profit": "max_profit",
     "Max Loss": "max_loss",
 }
-
-# Exit reason mapping for Mesosim ExitSignal messages
-MESOSIM_EXIT_REASONS = {
-    "profit target": "Profit Target",
-    "stop loss": "Stop Loss",
-    "max time in trade": "Max DIT",
-    "adjustment count": "Max Adjustments",
-}
-
 
 def _decode_upload_contents(contents: str | bytes) -> str:
     """Decode base64-encoded Dash upload contents to string."""
@@ -126,126 +148,182 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
     return df
 
 
+# Exit reason labels for Mesosim ExitSignal messages. Matched as substrings of
+# the lower-cased message; first match wins.
+MESOSIM_EXIT_REASONS = [
+    ("profit target", "Profit Target"),
+    ("stop loss", "Stop Loss"),
+    ("max time in trade", "Max Time in Trade"),
+    ("adjustment count", "Max Adjustments"),
+]
+
+# Start event keys, in any order: "BacktestName: <x> StrategyName: <y>
+# MesoSimVersion: <z>" (3.1) or "... TemplateName: <y> ..." (2.13).
+_START_KEYS = ("BacktestName", "StrategyName", "TemplateName", "MesoSimVersion")
+_START_KEY_RE = re.compile(r"\b(" + "|".join(_START_KEYS) + r"):\s*")
+
+
 def _simplify_exit_reason(message: str) -> str:
-    """Convert Mesosim ExitSignal message to a simplified exit reason."""
-    msg_lower = message.lower()
-    for pattern, label in MESOSIM_EXIT_REASONS.items():
-        if pattern in msg_lower:
+    """A stable label for an ExitSignal message.
+
+    Known reasons map to fixed labels. Anything else is cut at the first colon
+    and stripped of parenthesised numbers, so a threshold in the text cannot
+    make every trade its own category.
+    """
+    msg = (message or "").strip()
+    low = msg.lower()
+    for pattern, label in MESOSIM_EXIT_REASONS:
+        if pattern in low:
             return label
-    return message
+    msg = msg.split(":", 1)[0]
+    msg = re.sub(r"\([^)]*\d[^)]*\)", "", msg)
+    msg = re.sub(r"\s+", " ", msg).strip(" ,.;")
+    return msg or "Unknown"
+
+
+def _parse_start_message(msg: str) -> dict:
+    """{"BacktestName": ..., "StrategyName": ...} from the Start event text."""
+    out = {}
+    matches = list(_START_KEY_RE.finditer(msg or ""))
+    for i, m in enumerate(matches):
+        stop = matches[i + 1].start() if i + 1 < len(matches) else len(msg)
+        out[m.group(1)] = msg[m.end():stop].strip()
+    return out
 
 
 def parse_mesosim_json(contents: str | bytes, filename: str = "") -> pd.DataFrame:
     """
     Parse a DeltaRay Mesosim events JSON file.
 
-    Extracts per-position trade data by grouping events by PositionId
-    and extracting entry/exit information.
+    The file is an EVENT STREAM (EndOfDay, EntryTrade/ExitTrade leg fills,
+    adjustments, ...), not a trade log. One trade = one PositionId with both an
+    EnterPosition and an ExitPosition. Leg fills are read only as the premium
+    fallback; counting them as trades would inflate the count ~16x.
 
-    Args:
-        contents: JSON file contents (string or bytes)
-        filename: Original filename (for error messages)
-
-    Returns:
-        DataFrame with standardized column names and parsed dates
+    Returns a DataFrame with standardized column names. Parse diagnostics are
+    in df.attrs["parse_notes"].
     """
     contents = _decode_upload_contents(contents)
     events = json.loads(contents)
+    if not isinstance(events, list):
+        raise ValueError(f"{filename}: expected a Mesosim events array")
 
-    # Group events by PositionId
-    positions = defaultdict(list)
-    strategy = None
+    start = next((e for e in events if e.get("EventType") == "Start"), None)
+    names = _parse_start_message(start.get("Message", "") if start else "")
+    strategy = names.get("StrategyName") or names.get("TemplateName") or None
+    backtest_name = names.get("BacktestName") or None
 
-    for event in events:
-        # Extract strategy name from Start event
-        if event.get("EventType") == "Start" and strategy is None:
-            msg = event.get("Message", "")
-            # Parse: "... StrategyName: allantis MesoSimVersion: ..."
-            # Newer Mesosim versions use "BacktestName:" instead of "StrategyName:"
-            for key in ("StrategyName:", "BacktestName:"):
-                if key in msg:
-                    parts = msg.split(key)
-                    strategy = parts[1].split()[0].strip() if len(parts) > 1 else None
-                    break
-
-        pos_id = event.get("PositionId")
-        if pos_id is not None:
-            positions[pos_id].append(event)
-
-    # Extract trade data from each position
-    trades = []
-    for pos_id, pos_events in positions.items():
-        enter_event = None
-        exit_event = None
-        exit_signal = None
-        entry_trades = []
-
-        for event in pos_events:
-            event_type = event.get("EventType")
-            if event_type == "EnterPosition":
-                enter_event = event
-            elif event_type == "ExitPosition":
-                exit_event = event
-            elif event_type == "ExitSignal":
-                exit_signal = event
-            elif event_type == "EntryTrade":
-                entry_trades.append(event)
-
-        # Skip positions without both entry and exit
-        if not enter_event or not exit_event:
+    # Index the events that matter by PositionId, remembering file position.
+    enter, exit_ = {}, {}
+    signals, entry_trades, missing_times = defaultdict(list), defaultdict(list), defaultdict(set)
+    for idx, event in enumerate(events):
+        et = event.get("EventType")
+        pid = event.get("PositionId")
+        if pid is None:
             continue
+        if et == "EnterPosition":
+            if pid in enter:
+                raise ValueError(f"{filename}: PositionId {pid} is entered twice")
+            enter[pid] = (idx, event)
+        elif et == "ExitPosition":
+            exit_[pid] = (idx, event)
+        elif et == "ExitSignal":
+            signals[pid].append((idx, event))
+        elif et == "EntryTrade":
+            entry_trades[pid].append(event)
+        elif et == "MissingData":
+            missing_times[pid].add(event.get("SimTime"))
 
-        # Extract dates (date portion of SimTime)
-        date_opened = pd.to_datetime(enter_event["SimTime"]).normalize()
-        date_closed = pd.to_datetime(exit_event["SimTime"]).normalize()
+    open_ids = sorted(pid for pid in enter if pid not in exit_)
+    notes = {
+        "open_positions": len(open_ids),
+        "open_position_ids": open_ids,
+        "multi_signal_positions": 0,
+        "pnl_mismatch": [],
+        "missing_data_at_fill": [],
+        "pnl_field": None,
+        "premium_field": None,
+        "backtest_name": backtest_name,
+    }
+    pnl_fields, premium_fields = set(), set()
 
-        # PnL from exit position vars
-        # Field name varies by Mesosim version: "pos_pnl" (newer) or "pos_realized_pnl" (older)
+    trades = []
+    for pid, (_enter_idx, enter_event) in enter.items():
+        if pid not in exit_:
+            continue
+        exit_idx, exit_event = exit_[pid]
+
+        opened = pd.to_datetime(enter_event["SimTime"])
+        closed = pd.to_datetime(exit_event["SimTime"])
+
         exit_vars = exit_event.get("Vars") or {}
-        pnl = exit_vars.get("pos_pnl", exit_vars.get("pos_realized_pnl", 0))
+        realized, pos_pnl = exit_vars.get("pos_realized_pnl"), exit_vars.get("pos_pnl")
+        if realized is not None:
+            pnl = realized
+            pnl_fields.add("pos_realized_pnl")
+            if pos_pnl is not None and abs(float(realized) - float(pos_pnl)) > 0.01:
+                notes["pnl_mismatch"].append({"position_id": pid, "pos_realized_pnl": realized,
+                                              "pos_pnl": pos_pnl})
+        elif pos_pnl is not None:
+            pnl = pos_pnl
+            pnl_fields.add("pos_pnl")
+        else:
+            raise ValueError(f"{filename}: ExitPosition for PositionId {pid} carries no P/L")
 
-        # Margin from enter position vars
-        # Field name varies: "pos_margin" (older) or fall back to "stop_loss" as proxy
         enter_vars = enter_event.get("Vars") or {}
-        margin_req = enter_vars.get("pos_margin", enter_vars.get("stop_loss", 0))
+        initial = [t for t in entry_trades[pid] if t.get("SimTime") == enter_event["SimTime"]]
+        if enter_vars.get("entry_net_premium") is not None:
+            premium = enter_vars["entry_net_premium"]
+            premium_fields.add("entry_net_premium")
+        else:
+            # Sum of Price * Qty * Multiplier over the fills on the entry bar.
+            premium = 0
+            for trade in initial:
+                te = trade.get("TradeEvent") or {}
+                multiplier = (te.get("Contract") or {}).get("Multiplier", 100)
+                premium += te.get("Price", 0) * te.get("Qty", 0) * multiplier
+            # Prices are cents; the float sum is not (10364.999999999993).
+            premium = round(premium, 2)
+            premium_fields.add("leg fills")
 
-        # Premium: sum of Price * Qty * Multiplier from initial EntryTrade events
-        # Initial entry trades share the same SimTime as EnterPosition
-        enter_time = enter_event["SimTime"]
-        initial_entry_trades = [
-            t for t in entry_trades if t["SimTime"] == enter_time
-        ]
-        premium = 0
-        for trade in initial_entry_trades:
-            te = trade.get("TradeEvent") or {}
-            price = te.get("Price", 0)
-            qty = te.get("Qty", 0)
-            multiplier = (te.get("Contract") or {}).get("Multiplier", 100)
-            premium += price * qty * multiplier
+        # The signal that closed it is the last one BEFORE the exit event.
+        # MesoSim can fire two on the exit bar, the time limit first and a
+        # price limit second. In all nine such positions across the 3.1 and
+        # 2.13 exports the P/L agrees with the second (target met / stop hit).
+        prior = [e for i, e in signals.get(pid, []) if i < exit_idx]
+        if len(prior) > 1:
+            notes["multi_signal_positions"] += 1
+        exit_reason = _simplify_exit_reason(prior[-1].get("Message", "")) if prior else "Unknown"
 
-        # Exit reason from ExitSignal message
-        exit_reason = "Unknown"
-        if exit_signal:
-            exit_reason = _simplify_exit_reason(exit_signal.get("Message", "Unknown"))
+        at_fill = [k for k, ev in (("entry", enter_event), ("exit", exit_event))
+                   if ev.get("SimTime") in missing_times.get(pid, ())]
+        if at_fill:
+            notes["missing_data_at_fill"].append({"position_id": pid, "at": at_fill})
 
-        # Leg count from initial entry trades
-        legs = len(initial_entry_trades)
-
-        trades.append({
-            "date_opened": date_opened,
-            "date_closed": date_closed,
+        row = {
+            "position_id": pid,
+            "date_opened": opened.normalize(),
+            "time_opened": opened.strftime("%H:%M:%S"),
+            "date_closed": closed.normalize(),
+            "time_closed": closed.strftime("%H:%M:%S"),
             "pnl": pnl,
             "premium": premium,
             "exit_reason": exit_reason,
-            "margin_req": margin_req,
+            "margin_req": enter_vars.get("pos_margin"),
             "strategy": strategy,
-            "legs": legs,
-        })
+            "legs": len(initial),
+            "missing_data_at_fill": ",".join(at_fill) or None,
+        }
+        for k, v in enter_vars.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                row[f"entry_var_{k}"] = v
+        trades.append(row)
 
     if not trades:
         raise ValueError(f"No complete positions found in {filename}")
 
     df = pd.DataFrame(trades)
+    df["margin_req"] = pd.to_numeric(df["margin_req"], errors="coerce")
 
     # Calculate derived fields (same as CSV path)
     df["days_in_trade"] = (df["date_closed"] - df["date_opened"]).dt.days
@@ -254,6 +332,9 @@ def parse_mesosim_json(contents: str | bytes, filename: str = "") -> pd.DataFram
     df["year"] = df["date_opened"].dt.year
     df["is_win"] = df["pnl"] > 0
 
+    notes["pnl_field"] = " + ".join(sorted(pnl_fields))
+    notes["premium_field"] = " + ".join(sorted(premium_fields))
+    df.attrs["parse_notes"] = notes
     return df
 
 

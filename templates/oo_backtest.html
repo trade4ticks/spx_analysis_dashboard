@@ -62,6 +62,11 @@
       background:rgba(52,152,219,.08); border:1px solid rgba(52,152,219,.35); color:var(--text);
     }
 
+    .ob-parse-note { margin-top:4px; font-size:10px; color:var(--muted); }
+    .ob-parse-note::before { content:"· "; }
+    .ob-parse-note.warn { color:var(--warning); }
+    .ob-parse-note.warn::before { content:"⚠ "; }
+
     .ob-placeholder {
       display:flex; align-items:center; justify-content:center; text-align:center;
       min-height:70px; padding:12px; color:var(--dim); font-size:12px;
@@ -117,6 +122,9 @@
           <div class="ob-loaded" x-show="loaded">
             <div x-text="loadedLabel()"></div>
             <div class="ob-dim" x-text="sourceLabel() + ' · ' + (meta ? meta.filename : '')"></div>
+            <template x-for="note in parseNotes()" :key="note.text">
+              <div class="ob-parse-note" :class="{ warn: note.warn }" x-text="note.text"></div>
+            </template>
           </div>
 
           <div class="ob-row">

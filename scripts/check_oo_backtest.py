@@ -22,6 +22,10 @@ Also checked, against fabricated logs rather than files on disk:
     come in the brief's order
   * no dropped-scope name (SharpTwo, skew, regime) appears in the page JS or
     the registry
+  * REAL MesoSim exports (3.1 and 2.13, trimmed into scripts/fixtures/mesosim)
+    reduce to one trade per closed position, report open positions, resolve
+    two exit signals on one bar to the later, keep the 12:30 early-close
+    entry, and flag MissingData / P&L disagreement when planted
 
     python scripts/check_oo_backtest.py
 """
@@ -41,7 +45,8 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd  # noqa: E402
 
 from app.oo_backtest import calculations as calc  # noqa: E402
-from app.oo_backtest.payload import TRADE_COLUMNS, trades_to_payload  # noqa: E402
+from app.oo_backtest import data_loader  # noqa: E402
+from app.oo_backtest.payload import TRADE_COLUMNS, allowed_column, trades_to_payload  # noqa: E402
 from app.oo_backtest.registry import REGISTRY  # noqa: E402
 from app.routers.oo_backtest import _parse  # noqa: E402
 
@@ -277,7 +282,7 @@ ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def check_payload(p: dict, label: str, n: int) -> None:
     cols = p["columns"]
     check(p["n"] == n and all(len(v) == n for v in cols.values()), f"{label}: {n} trades, columns aligned")
-    check(set(cols) <= set(TRADE_COLUMNS), f"{label}: only whitelisted columns")
+    check(all(allowed_column(k) for k in cols), f"{label}: only whitelisted columns")
     dates = cols["date_opened"] + cols["date_closed"]
     check(all(isinstance(d, str) and ISO.match(d) for d in dates), f"{label}: dates are ISO strings")
     check(cols["date_opened"] == sorted(cols["date_opened"]), f"{label}: ordered by open date")
@@ -314,12 +319,97 @@ def check_parsers() -> None:
         check(True, "a CSV without Date Opened is rejected (KeyError -> 400 in the route)")
 
 
+FIXTURES = ROOT / "scripts" / "fixtures" / "mesosim"
+
+
+def _by_pid(p: dict) -> dict:
+    c = p["columns"]
+    return {pid: {k: v[i] for k, v in c.items()} for i, pid in enumerate(c["position_id"])}
+
+
+def check_real_mesosim() -> None:
+    """Real MesoSim events, trimmed to the positions that exercise each rule.
+
+    v3_1: allantis v2 (MesoSim 3.1.11) — pos_realized_pnl, entry_net_premium,
+          a position with two exit signals on its exit bar, the 2023-07-03
+          12:30 early-close entry, a max-adjustments exit, two open positions.
+    v2_13: allantis weekly Fri (MesoSim 2.13.4) — no realized P/L field, no
+          entry_net_premium, TemplateName, a double signal ending in a stop.
+    """
+    print("real MesoSim exports (trimmed)")
+    v3_raw = (FIXTURES / "v3_1_allantis_v2_mon.json").read_bytes()
+    p = _parse(v3_raw, "v3.events.json")
+    t, n = _by_pid(p), p["notes"]
+    events = json.loads(v3_raw)
+    fills = sum(e["EventType"] == "EntryTrade" for e in events)
+    check(p["n"] == 4 and fills > 4 * p["n"],
+          f"v3.1: one trade per closed PositionId ({p['n']}), not per leg fill ({fills})")
+    check(n["open_positions"] == 2 and n["open_position_ids"] == [222, 223] and not ({222, 223} & set(t)),
+          "v3.1: open positions 222, 223 excluded and reported")
+    check(t[0]["pnl"] == 1461.56 and n["pnl_field"] == "pos_realized_pnl", "v3.1: P/L from pos_realized_pnl")
+    check(t[0]["premium"] == 11215 and n["premium_field"] == "entry_net_premium",
+          "v3.1: premium from entry_net_premium")
+    check(t[0]["margin_req"] == 16640.6, "v3.1: margin from pos_margin")
+    check(t[26]["exit_reason"] == "Profit Target" and n["multi_signal_positions"] == 1,
+          "v3.1: two signals on the exit bar -> the later one (Profit Target), counted")
+    check(t[122]["exit_reason"] == "Max Adjustments", "v3.1: 'Maximum adjustment count reached (25 >= 25)' -> Max Adjustments")
+    reasons = set(p["columns"]["exit_reason"])
+    check(not any(re.search(r"[\d:()]", r) for r in reasons), f"v3.1: no threshold survives in a label {sorted(reasons)}")
+    check((t[106]["date_opened"], t[106]["time_opened"]) == ("2023-07-03", "12:30:00"),
+          "v3.1: early-close entry kept as 2023-07-03 12:30:00 (P2 entry-time join fixture)")
+    check(all(x == "15:30:00" for pid, x in ((k, r["time_opened"]) for k, r in t.items()) if pid != 106),
+          "v3.1: every other entry at 15:30:00")
+    check(p["suggested_name"] == "*allantis - v2: 5+4+1, PT SPX*.35, 60DIT, mon, 2021-2026"
+          and t[0]["strategy"] == "allantis", "v3.1: save name from BacktestName, strategy from StrategyName")
+    check("entry_var_profit_target" in p["columns"] and "entry_var_pos_vega" in p["columns"],
+          "v3.1: EnterPosition Vars kept (entry_var_*)")
+    check(not n["missing_data_at_fill"] and not n["pnl_mismatch"], "v3.1: no MissingData at fills, no P/L disagreement")
+
+    # Planted faults. Each must change the output the way the rule says.
+    ev = json.loads(v3_raw)
+    enter0 = next(e for e in ev if e["EventType"] == "EnterPosition" and e["PositionId"] == 0)
+    ev.append({"EventType": "MissingData", "PositionId": 0, "SimTime": enter0["SimTime"],
+               "Message": "No data for given contract 'X' at current time"})
+    exit0 = next(e for e in ev if e["EventType"] == "ExitPosition" and e["PositionId"] == 0)
+    exit0["Vars"]["pos_pnl"] = exit0["Vars"]["pos_realized_pnl"] + 50
+    ev.append({"EventType": "ExitSignal", "PositionId": 26, "SimTime": "2099-01-01T15:30:00",
+               "Message": "Reached stop loss: 1"})
+    f = _parse(json.dumps(ev).encode(), "planted.json")
+    ft, fn = _by_pid(f), f["notes"]
+    check(fn["missing_data_at_fill"] == [{"position_id": 0, "at": ["entry"]}] and ft[0]["missing_data_at_fill"] == "entry",
+          "planted: MissingData on the entry bar is flagged on that trade")
+    check(len(fn["pnl_mismatch"]) == 1 and ft[0]["pnl"] == 1461.56,
+          "planted: pos_pnl disagreeing with realized is reported, realized still used")
+    check(ft[26]["exit_reason"] == "Profit Target", "planted: a signal AFTER the exit does not change the reason")
+
+    for msg, want in [("Delta limit breached (12 >= 10): 0.35", "Delta limit breached"),
+                      ("Reached stop loss: 3690.06", "Stop Loss"),
+                      ("Max time in trade reached: 60 days", "Max Time in Trade"),
+                      ("", "Unknown")]:
+        got = data_loader._simplify_exit_reason(msg)
+        check(got == want, f"exit reason {msg!r} -> {want!r} (got {got!r})")
+
+    p = _parse((FIXTURES / "v2_13_allantis_weekly.json").read_bytes(), "v213.events.json")
+    t, n = _by_pid(p), p["notes"]
+    check(n["pnl_field"] == "pos_pnl" and n["premium_field"] == "leg fills",
+          "v2.13: P/L falls back to pos_pnl, premium to leg fills, and the page is told")
+    check(all(v is None for v in p["columns"]["margin_req"]), "v2.13: no pos_margin -> margin null, not stop_loss")
+    check(all(v == round(v, 2) for v in p["columns"]["premium"]), "v2.13: leg-sum premium rounded to cents")
+    check(t[54]["exit_reason"] == "Stop Loss" and t[54]["pnl"] < 0, "v2.13: time + stop on the exit bar -> Stop Loss")
+    check((t[42]["date_opened"], t[42]["time_opened"]) == ("2024-11-29", "12:30:00"),
+          "v2.13: early-close entry 2024-11-29 12:30:00 kept")
+    check(n["open_positions"] == 1 and 72 not in t, "v2.13: open position 72 excluded and reported")
+    check(p["suggested_name"] == "allantis - weekly entry - Fri" and t[0]["strategy"] == "allantis",
+          "v2.13: full BacktestName kept (the source cut it to 'allantis'); TemplateName as strategy")
+
+
 def main() -> int:
     check_registry()
     check_against_source()
     check_binning()
     check_dropped_scope()
     check_parsers()
+    check_real_mesosim()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

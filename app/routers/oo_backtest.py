@@ -56,6 +56,10 @@ def _parse(content: bytes, filename: str) -> dict:
     assert_no_dropped_columns(payload)
     strategies = payload["columns"].get("strategy") or []
     named = next((s for s in strategies if s), None)
+    # Mesosim's BacktestName ("allantis - v2: 5+4+1, PT SPX*.35, 60DIT, mon,
+    # 2021-2026") says which variant this is; StrategyName ("allantis") does
+    # not, and five variants of one strategy would all save under one name.
+    named = payload["notes"].get("backtest_name") or named
     payload.update({
         "filename": filename,
         "source": "mesosim_json" if filename.lower().endswith(".json") else "oo_csv",

@@ -202,6 +202,35 @@ document.addEventListener('alpine:init', () => {
       return this.hasColumn(m) ? 'ready' : 'skipped';
     },
 
+    /* What the parser dropped or had to decide, said on load rather than left
+     * for the numbers to hide. `warn` lines are about trades the stats exclude
+     * or fills that may not be trustworthy; the rest say where a field came
+     * from when the export's version lacked the preferred one. */
+    parseNotes() {
+      const n = (this.meta && this.meta.notes) || {};
+      const out = [];
+      const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+      if (n.open_positions) {
+        out.push({ warn: true, text: `${plural(n.open_positions, 'position', 'positions')} still open at backtest end, excluded` });
+      }
+      if ((n.missing_data_at_fill || []).length) {
+        out.push({ warn: true, text: `${plural(n.missing_data_at_fill.length, 'trade has', 'trades have')} MissingData on the entry or exit bar — that fill may be stale` });
+      }
+      if ((n.pnl_mismatch || []).length) {
+        out.push({ warn: true, text: `${plural(n.pnl_mismatch.length, 'trade', 'trades')}: pos_realized_pnl ≠ pos_pnl (realized used)` });
+      }
+      if (n.multi_signal_positions) {
+        out.push({ warn: false, text: `${plural(n.multi_signal_positions, 'position', 'positions')} fired two exit signals on the exit bar; the later one is used` });
+      }
+      if (n.pnl_field === 'pos_pnl') {
+        out.push({ warn: false, text: 'P/L from pos_pnl — this MesoSim version has no realized P/L field' });
+      }
+      if ((n.premium_field || '').includes('leg fills')) {
+        out.push({ warn: false, text: 'Premium summed from entry leg fills — no entry_net_premium in this export' });
+      }
+      return out;
+    },
+
     sourceLabel() {
       if (!this.meta) return '';
       return this.meta.source === 'mesosim_json' ? 'Mesosim JSON' : 'Option Omega CSV';
