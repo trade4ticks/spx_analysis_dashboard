@@ -178,9 +178,10 @@
         <div class="ob-card-hdr"><span class="ob-card-title">Ratio basis</span>
           <span class="ob-card-sub">temporary</span></div>
         <div class="ob-card-body">
+          <!-- The main dashboard's toggle, as-is (templates/index.html "Mode toggle"). -->
           <div class="seg">
-            <button class="seg-btn" :class="{ on: ratioBasis === 'entry' }" @click="ratioBasis = 'entry'">Entry time</button>
-            <button class="seg-btn" :class="{ on: ratioBasis === 'close' }" @click="ratioBasis = 'close'">Daily close</button>
+            <div class="seg-btn" :class="{on: ratioBasis==='entry'}" @click="ratioBasis = 'entry'">Entry time</div>
+            <div class="seg-btn" :class="{on: ratioBasis==='close'}" @click="ratioBasis = 'close'">Daily close</div>
           </div>
           <div class="ob-dim" style="margin-top:6px;"
                x-text="ratioBasis === 'entry' ? 'VIX-family bars at each trade\'s entry time' : 'Entry date\'s daily closes (the old app\'s basis — lookahead)'"></div>

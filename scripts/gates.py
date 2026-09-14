@@ -20,6 +20,13 @@ and the summary says so in words.
     python scripts/gates.py scalp        only gates whose name contains 'scalp'
     python scripts/gates.py --live       pass --live to the harnesses that take it
     python scripts/gates.py --slow       include the slow ones (off by default)
+    python scripts/gates.py --deploy     a gate that could not run on this host
+                                         FAILS the run instead of being listed
+
+A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
+(no Postgres binaries, running as root). That is reported as SKIP, never PASS.
+Under --deploy it is a FAIL: a deploy check that did not exercise the SQL has
+not checked the SQL.
 """
 from __future__ import annotations
 
@@ -33,13 +40,19 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
 
+EXIT_SKIPPED = 3
+
+
 class Gate:
-    def __init__(self, name, argv, note="", slow=False, live_flag=False):
+    def __init__(self, name, argv, note="", slow=False, live_flag=False, can_skip=False):
         self.name = name
         self.argv = argv
         self.note = note
         self.slow = slow
         self.live_flag = live_flag
+        # Only a gate that declares it may exit EXIT_SKIPPED has 3 read as a
+        # skip; for any other gate a 3 is an ordinary failure.
+        self.can_skip = can_skip
 
 
 def _s(script, *extra, **kw):
@@ -90,8 +103,8 @@ GATES = [
        note="JS binning == pd.cut; parsers; no dropped-scope columns"),
     # Starts a throwaway Postgres and runs the shipped index_ohlc SQL: early
     # closes, 'NaN' bars, the prior-session row, the entry bar's open.
-    _s("check_oo_market_sql.py",
-       note="market SQL on a temp cluster; skips without initdb"),
+    _s("check_oo_market_sql.py", can_skip=True,
+       note="market SQL on a temp cluster; SKIP without initdb or as root"),
 
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
@@ -192,6 +205,7 @@ def main() -> int:
     args = [a for a in sys.argv[1:]]
     live = "--live" in args
     slow = "--slow" in args
+    deploy = "--deploy" in args
     pats = [a for a in args if not a.startswith("--")]
 
     gates = [g for g in GATES if slow or not g.slow]
@@ -214,6 +228,12 @@ def main() -> int:
         status, detail = "PASS", g.note
         if g.name in NEEDS_ARGS:
             status, detail = "SKIP", NEEDS_ARGS[g.name]
+        elif g.can_skip and code == EXIT_SKIPPED:
+            if deploy:
+                status, detail = "FAIL", "could not run on this host (--deploy): " + (last_line(out) or "skipped")
+                failures.append((g.name, (out + err)))
+            else:
+                status, detail = "SKIP", last_line(out) or "could not run on this host"
         elif code != 0:
             gap = ENV_GAPS.get(g.name)
             if gap and gap[0] in (out + err):
@@ -251,10 +271,12 @@ def main() -> int:
         # Named again at the bottom. A skip mentioned once in a table is a
         # skip that gets read as a pass.
         for g, code, out, _, err in results:
-            if g.name in NEEDS_ARGS or (
+            if g.name in NEEDS_ARGS or (g.can_skip and code == EXIT_SKIPPED) or (
                     code != 0 and ENV_GAPS.get(g.name)
                     and ENV_GAPS[g.name][0] in (out + err)):
                 print(f"    not run: {g.name}")
+        if not deploy and any(g.can_skip and code == EXIT_SKIPPED for g, code, *_ in results):
+            print("    (a deploy check must not skip these: rerun with --deploy as a non-root user)")
     if not slow:
         n = sum(1 for g in GATES if g.slow)
         print(f"    {n} slow gates omitted; add --slow to include them")

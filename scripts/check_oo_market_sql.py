@@ -26,8 +26,10 @@ Planted faults, each of which must change the answer: a close pinned to
 15:55, a prior close from trade_date - 1, and an entry join reading the bar
 close.
 
-SKIPS -- loudly -- where no Postgres server binaries are found. Set PG_BIN to
-the directory holding initdb/pg_ctl if they are somewhere unusual.
+EXITS 3 (skipped), never 0, where it cannot run: no Postgres server binaries,
+no asyncpg, or running as root (initdb refuses root). scripts/gates.py shows
+that as SKIP, and as FAIL under --deploy. Set PG_BIN to the directory holding
+initdb/pg_ctl if they are somewhere unusual.
 
     python scripts/check_oo_market_sql.py
 """
@@ -53,6 +55,9 @@ import pandas as pd  # noqa: E402
 from app.oo_backtest import market  # noqa: E402
 
 FAILS: list[str] = []
+
+# Not 0. A check that did not run must not be counted as one that passed.
+EXIT_SKIPPED = 3
 
 
 def check(ok: bool, msg: str) -> None:
@@ -374,17 +379,17 @@ async def check_end_to_end(pool) -> None:
 def main() -> int:
     if os.name == "posix" and os.geteuid() == 0:
         print("SKIP: running as root — initdb refuses to create a cluster as root; run as an ordinary user")
-        return 0
+        return EXIT_SKIPPED
     bindir = find_bin()
     if bindir is None:
         print("SKIP: no Postgres server binaries (initdb, pg_ctl) found — set PG_BIN to run this check")
-        return 0
+        return EXIT_SKIPPED
     print(f"postgres binaries: {bindir}")
     try:
         import asyncpg  # noqa: F401
     except ImportError:
         print("SKIP: asyncpg not installed")
-        return 0
+        return EXIT_SKIPPED
     with Cluster(bindir) as c:
         asyncio.run(run(c.dsn))
     print()
