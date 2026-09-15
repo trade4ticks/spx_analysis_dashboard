@@ -55,6 +55,11 @@
       font-size:12px; padding:5px 8px; border-radius:4px; color-scheme:dark;
     }
     .ob-sel option { background:var(--raised); color:var(--text); }
+    .ob-input {
+      width:100%; margin-top:4px; background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 8px; border-radius:4px; font-family:inherit; resize:vertical; color-scheme:dark;
+    }
+    .ob-save { margin-top:10px; padding-top:8px; border-top:1px solid var(--border); }
     .ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
 
     .ob-loaded {
@@ -129,17 +134,46 @@
           <div class="ob-loaded" x-show="loaded">
             <div x-text="loadedLabel()"></div>
             <div class="ob-dim" x-text="sourceLabel() + ' · ' + (meta ? meta.filename : '')"></div>
-            <template x-for="note in parseNotes().concat(marketNotes())" :key="note.text">
+            <div class="ob-dim" x-show="meta && meta.saved && meta.saved.notes" x-text="meta && meta.saved ? meta.saved.notes : ''"
+                 style="white-space:pre-wrap; margin-top:4px;"></div>
+            <template x-for="note in savedNotes().concat(parseNotes(), marketNotes())" :key="note.text">
               <div class="ob-parse-note" :class="{ warn: note.warn }" x-text="note.text"></div>
             </template>
           </div>
 
-          <div class="ob-row">
-            <span class="ob-lbl">Saved logs</span><span class="ob-phase">P2b</span>
+          <!-- Save what was just uploaded. Only an upload can be saved: the
+               server re-parses the file bytes, never page-supplied rows. -->
+          <div class="ob-save" x-show="loaded && hasUploadFile">
+            <div class="ob-lbl">Save this log</div>
+            <input class="ob-input" type="text" x-model="saveName" maxlength="200" placeholder="Name">
+            <textarea class="ob-input" rows="2" x-model="saveNotes" maxlength="4000" placeholder="Notes (optional)"></textarea>
+            <div class="ob-row" style="margin-top:4px;">
+              <button class="btn primary" @click="saveStrategy()" :disabled="saveBusy || !saveName.trim()"
+                      x-text="saveBusy ? 'Saving…' : 'Save'"></button>
+            </div>
+            <div class="ob-err" x-show="saveError" x-text="saveError"></div>
+            <div class="ob-note" x-show="saveMsg" x-text="saveMsg" style="margin-top:4px;"></div>
           </div>
-          <select class="ob-sel" disabled style="margin-top:4px;">
-            <option>Saved strategies arrive in Phase 2b</option>
+
+          <div class="ob-row" style="margin-top:12px;">
+            <span class="ob-lbl">Saved strategies</span>
+            <span class="ob-dim" style="margin-left:auto;" x-text="savedList.length ? savedList.length + ' saved' : ''"></span>
+          </div>
+          <select class="ob-sel" style="margin-top:4px;" x-model="selectedSavedId" :disabled="!savedList.length"
+                  x-effect="savedList.length; $nextTick(() => $el.value = selectedSavedId)">
+            <option value="" x-text="savedList.length ? '— choose a saved strategy —' : 'No saved strategies yet'"></option>
+            <template x-for="sv in savedList" :key="sv.id">
+              <option :value="String(sv.id)" x-text="savedLabel(sv)"></option>
+            </template>
           </select>
+          <div class="ob-row">
+            <button class="btn" @click="loadSelected()" :disabled="!selectedSavedId || savedBusy"
+                    x-text="savedBusy ? 'Loading…' : 'Load'"></button>
+            <button class="btn" @click="deleteSaved()" :disabled="!selectedSavedId || savedBusy">Delete</button>
+          </div>
+          <div class="ob-dim" x-show="selectedSaved() && selectedSaved().notes" x-text="selectedSaved() ? selectedSaved().notes : ''"
+               style="white-space:pre-wrap; margin-top:4px;"></div>
+          <div class="ob-err" x-show="savedError" x-text="savedError"></div>
 
           <!-- Read-only: index_ohlc is maintained by the VPS pipeline. There is
                deliberately no update action here. -->

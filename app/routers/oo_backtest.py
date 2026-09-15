@@ -12,6 +12,15 @@ Endpoints:
   GET  /market-status  READ-ONLY freshness of main.index_ohlc: latest bar,
                        staleness, per-series coverage, close-fallback counts,
                        bar-label diagnostics
+  GET    /strategies           saved strategies (no file content)
+  POST   /strategies           multipart file + name + notes [+ replace]; 409
+                               when the name exists and replace is not set
+  GET    /strategies/{id}/load the saved file re-parsed and re-joined -- the
+                               same payload as /parse, plus `saved`
+  DELETE /strategies/{id}
+
+A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
+today's market data; see app/oo_backtest/store.py.
 
 There is no write path to market data. index_ohlc is maintained by the
 Thetadata_Raw_SPX pipeline on the VPS; a fetch here would be a second writer.
@@ -25,10 +34,11 @@ from datetime import datetime
 from pathlib import PurePath
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
 from app.db import get_pool
-from app.oo_backtest import data_loader, market
+from app.oo_backtest import data_loader, market, store
 from app.oo_backtest.payload import assert_no_dropped_columns, trades_to_payload
 from app.oo_backtest.registry import registry_with_coverage
 
@@ -80,14 +90,12 @@ def _parse(content: bytes, filename: str) -> dict:
     return _payload(_parse_df(content, filename), filename, {"joined": False, "error": "not requested"})
 
 
-@router.post("/parse")
-async def parse_trade_log(file: UploadFile = File(...), pool=Depends(get_pool)):
-    name = file.filename or ""
-    content = await file.read()
+async def _parse_or_400(content: bytes, name: str):
+    """Parse, turning a bad file into a 400 that names the problem."""
     if not content:
         raise HTTPException(400, "The file is empty.")
     try:
-        df = await asyncio.to_thread(_parse_df, content, name)
+        return await asyncio.to_thread(_parse_df, content, name)
     except (ValueError, KeyError, UnicodeDecodeError) as exc:
         # KeyError is what a CSV without "Date Opened" produces -- the loader
         # indexes the renamed column directly. Name the column as it appears
@@ -106,6 +114,12 @@ async def parse_trade_log(file: UploadFile = File(...), pool=Depends(get_pool)):
         log.exception("oo-backtest parse failed for %r", name)
         raise HTTPException(422, f"Could not parse {name}: {type(exc).__name__}: {exc}")
 
+
+async def _analyze(content: bytes, name: str, pool) -> dict:
+    """Parse + market join + payload: the ONE path both a fresh upload and a
+    saved strategy's load go through, so the two cannot drift apart."""
+    df = await _parse_or_400(content, name)
+
     # The trades are good even when market data is not. A failed join is
     # reported on the page -- the VIX and gap sections then show as skipped
     # with the reason -- rather than refusing a log that parsed.
@@ -119,6 +133,75 @@ async def parse_trade_log(file: UploadFile = File(...), pool=Depends(get_pool)):
     except Exception as exc:  # noqa: BLE001
         log.exception("oo-backtest payload build failed for %r", name)
         raise HTTPException(422, f"Could not build the trade payload for {name}: {type(exc).__name__}: {exc}")
+
+
+@router.post("/parse")
+async def parse_trade_log(file: UploadFile = File(...), pool=Depends(get_pool)):
+    return await _analyze(await file.read(), file.filename or "", pool)
+
+
+# ── saved strategies ────────────────────────────────────────────────────────
+
+def _source_of(filename: str) -> str:
+    return "mesosim_json" if filename.lower().endswith(".json") else "oo_csv"
+
+
+@router.get("/strategies")
+async def list_saved(pool=Depends(get_pool)):
+    return {"strategies": await store.list_strategies(pool)}
+
+
+@router.post("/strategies")
+async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes: str = Form(""),
+                     replace: bool = Form(False), pool=Depends(get_pool)):
+    filename = file.filename or ""
+    content = await file.read()
+    # The count and date range stored with the file come from the SERVER's
+    # parse of these exact bytes, not from anything the page sends.
+    df = await _parse_or_400(content, filename)
+    dates_open = df["date_opened"].dropna()
+    dates_close = df["date_closed"].dropna()
+    try:
+        saved = await store.save_strategy(
+            pool, name=name, notes=notes, source=_source_of(filename), filename=filename, content=content,
+            trade_count=int(len(df)),
+            date_min=dates_open.min().date() if len(dates_open) else None,
+            date_max=dates_close.max().date() if len(dates_close) else None,
+            replace=replace)
+    except store.NameTaken as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc), "existing_id": exc.existing_id})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    log.info("oo-backtest saved strategy %r (id %s, %d trades, replace=%s)",
+             saved["name"], saved["id"], saved["trade_count"], replace)
+    return {"strategy": saved}
+
+
+@router.get("/strategies/{strategy_id}/load")
+async def load_saved(strategy_id: int, pool=Depends(get_pool)):
+    try:
+        found = await store.load_strategy_file(pool, strategy_id)
+    except ValueError as exc:
+        log.error("oo-backtest saved strategy %s unreadable: %s", strategy_id, exc)
+        raise HTTPException(500, str(exc))
+    if found is None:
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    meta, content = found
+    payload = await _analyze(content, meta["filename"], pool)
+    payload["saved"] = meta
+    # The stored facts were computed when it was saved; a parser change since
+    # can move them. Say so rather than show two different trade counts.
+    if payload["n"] != meta["trade_count"]:
+        payload["saved_count_changed"] = {"when_saved": meta["trade_count"], "now": payload["n"]}
+    return payload
+
+
+@router.delete("/strategies/{strategy_id}")
+async def delete_saved(strategy_id: int, pool=Depends(get_pool)):
+    if not await store.delete_strategy(pool, strategy_id):
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    log.info("oo-backtest deleted saved strategy id %s", strategy_id)
+    return {"ok": True}
 
 
 @router.get("/market-status")

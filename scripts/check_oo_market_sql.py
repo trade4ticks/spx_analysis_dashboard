@@ -263,6 +263,7 @@ async def run(dsn: str) -> None:
         await check_diagnostics(pool)
         await check_planted(pool)
         await check_end_to_end(pool)
+        await check_saved_strategies(pool)
     finally:
         await pool.close()
 
@@ -429,6 +430,78 @@ async def check_planted(pool) -> None:
     check(df.loc[6, "vix_level"] != bar_close, "the entry join is not reading the bar's close (5 min lookahead)")
 
 
+async def check_saved_strategies(pool) -> None:
+    """Saved strategies: the stored record is the original file, byte for byte,
+    and a load goes through the same parse + join as an upload."""
+    print("saved strategies")
+    import gzip
+    import hashlib
+    from app.oo_backtest import store
+    from app.routers.oo_backtest import _parse_df, _payload
+
+    raw = (ROOT / "scripts" / "fixtures" / "mesosim" / "v3_1_allantis_v2_mon.json").read_bytes()
+    raw2 = (ROOT / "scripts" / "fixtures" / "mesosim" / "v2_13_allantis_weekly.json").read_bytes()
+    common = dict(source="mesosim_json", filename="v3.events.json", date_min=date(2021, 1, 4), date_max=date(2023, 12, 12))
+
+    a = await store.save_strategy(pool, name="  allantis   v2 ", notes="first", content=raw, trade_count=4,
+                                  replace=False, **common)
+    check(a["name"] == "allantis v2" and a["trade_count"] == 4 and a["same_file_as"] == [],
+          f"saved, name whitespace-normalised ({a['name']!r})")
+    try:
+        await store.save_strategy(pool, name="allantis v2", notes="dup", content=raw2, trade_count=5,
+                                  replace=False, **common)
+        check(False, "saving over an existing name without replace is refused")
+    except store.NameTaken as exc:
+        check(exc.existing_id == a["id"], "saving over an existing name without replace is refused (NameTaken, id given)")
+
+    b = await store.save_strategy(pool, name="allantis v2", notes="replaced", content=raw2, trade_count=5,
+                                  replace=True, **common)
+    check(b["id"] == a["id"] and b["trade_count"] == 5 and b["notes"] == "replaced" and b["updated_at"] >= a["updated_at"],
+          "replace overwrites in place: same id, new file facts and notes")
+
+    c = await store.save_strategy(pool, name="copy of weekly", notes="", content=raw2, trade_count=5,
+                                  replace=False, **common)
+    check(c["same_file_as"] == ["allantis v2"], f"the same file under another name is flagged ({c['same_file_as']})")
+
+    lst = await store.list_strategies(pool)
+    check([s["name"] for s in lst] == ["copy of weekly", "allantis v2"] and all("file_gz" not in s for s in lst),
+          "list is newest-saved first and carries no file content")
+
+    meta, content = await store.load_strategy_file(pool, b["id"])
+    check(content == raw2 and hashlib.sha256(content).hexdigest() == meta["file_sha256"],
+          "load returns the original bytes exactly")
+
+    # Round trip: a stored file through the load path equals a direct parse.
+    await store.save_strategy(pool, name="v3 fixture", notes="", content=raw, trade_count=4, replace=False, **common)
+    v3 = next(s for s in await store.list_strategies(pool) if s["name"] == "v3 fixture")
+    _, stored = await store.load_strategy_file(pool, v3["id"])
+    j1, r1 = await market.join_market(pool, _parse_df(stored, "v3.events.json"))
+    j2, r2 = await market.join_market(pool, _parse_df(raw, "v3.events.json"))
+    p1, p2 = _payload(j1, "v3.events.json", r1), _payload(j2, "v3.events.json", r2)
+    check(p1["columns"] == p2["columns"] and p1["notes"] == p2["notes"],
+          "a saved strategy loads to the same trades and notes as uploading the file")
+
+    # Planted corruption: the stored bytes no longer match the stored hash.
+    async with pool.acquire() as conn:
+        await conn.execute(f"UPDATE {store.TABLE} SET file_gz = $1 WHERE id = $2", gzip.compress(b"[]"), c["id"])
+    try:
+        await store.load_strategy_file(pool, c["id"])
+        check(False, "a stored file that no longer matches its hash is refused")
+    except ValueError as exc:
+        check("corrupt" in str(exc), "a stored file that no longer matches its hash is refused")
+
+    for bad, why in (("   ", "blank"), ("x" * (store.NAME_MAX + 1), "too long")):
+        try:
+            await store.save_strategy(pool, name=bad, notes="", content=raw, trade_count=1, replace=False, **common)
+            check(False, f"a {why} name is refused")
+        except ValueError:
+            check(True, f"a {why} name is refused")
+
+    check(await store.delete_strategy(pool, a["id"]) is True, "delete removes the row")
+    check(await store.delete_strategy(pool, a["id"]) is False and await store.load_strategy_file(pool, a["id"]) is None,
+          "a deleted id deletes nothing twice and loads as missing")
+
+
 async def check_end_to_end(pool) -> None:
     """The route's own sequence: parse a REAL MesoSim fixture, join, build the
     payload. Three of its four trades fall outside the fabricated sessions and
@@ -477,7 +550,7 @@ def main() -> int:
     if FAILS:
         print(f"FAIL: {len(FAILS)} market SQL check(s) failed")
         return 1
-    print("PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, planted faults")
+    print("PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, saved strategies, planted faults")
     return 0
 
 

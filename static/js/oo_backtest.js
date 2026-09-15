@@ -13,7 +13,10 @@
  * Phase 2: uploads are joined to main.index_ohlc on the server (VIX levels at
  * the entry bar, gaps against the prior session, both ratio bases); the
  * sidebar shows read-only market freshness, the ratio-basis toggle and per-
- * metric coverage. Filters, stats and charts are still labelled stubs.
+ * metric coverage.
+ * Phase 2b: saved strategies -- save an upload (name + notes), pick one from
+ * the dropdown and Load it (the stored file is re-parsed and re-joined), or
+ * Delete it after a confirm. Filters, stats and charts are still stubs.
  * ==========================================================================*/
 
 const OB_BLUE = '#3498db';   // positive (theme --accent)
@@ -22,7 +25,7 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0 };
+const OB_DATA = { columns: null, n: 0, file: null };
 
 /* ── pure helpers (exercised in node by scripts/check_oo_backtest.py) ─────── */
 
@@ -67,6 +70,13 @@ function obDistinct(values) {
   return [...s].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
+/* "SPX Iron Condor 45DTE (1,284 trades, 2021-01-04 – 2026-03-13)" */
+function obSavedLabel(s) {
+  if (!s) return '';
+  const n = Number(s.trade_count || 0).toLocaleString('en-US');
+  return `${s.name} (${n} trade${s.trade_count === 1 ? '' : 's'}, ${s.date_min || '—'} – ${s.date_max || '—'})`;
+}
+
 function obFmt(v, fmt) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   switch (fmt) {
@@ -99,13 +109,28 @@ document.addEventListener('alpine:init', () => {
     marketDetail: false,
     coverageError: '',
 
+    // Saved strategies. The dropdown lists them; Load re-parses the stored
+    // file and re-joins market data (the same path as an upload).
+    savedList: [],
+    savedError: '',
+    selectedSavedId: '',
+    savedBusy: false,
+    // Set when the loaded log came from an upload whose File the page still
+    // holds -- only then can it be saved (the server re-parses the bytes).
+    hasUploadFile: false,
+    saveName: '',
+    saveNotes: '',
+    saveBusy: false,
+    saveError: '',
+    saveMsg: '',
+
     // Which ratio basis the sections read: entry-time bars (default) or the
     // entry date's daily closes. Temporary -- one basis is deleted, and this
     // toggle with it, once both have been looked at on a real log.
     ratioBasis: 'entry',
 
     async init() {
-      await Promise.all([this.loadRegistry(), this.loadMarketStatus()]);
+      await Promise.all([this.loadRegistry(), this.loadMarketStatus(), this.loadSavedList()]);
     },
 
     async loadRegistry() {
@@ -165,6 +190,13 @@ document.addEventListener('alpine:init', () => {
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
         this.setTrades(body);
+        OB_DATA.file = file;
+        this.hasUploadFile = true;
+        this.selectedSavedId = '';
+        this.saveName = body.suggested_name || '';
+        this.saveNotes = '';
+        this.saveError = '';
+        this.saveMsg = '';
       } catch (e) {
         console.error('oo-backtest upload', e);
         this.uploadError = e.message;
@@ -181,6 +213,108 @@ document.addEventListener('alpine:init', () => {
       const { columns, ...meta } = payload;
       this.meta = meta;
       this.loaded = true;
+    },
+
+    /* ── saved strategies ──────────────────────────────────────────────── */
+
+    savedLabel(s) { return obSavedLabel(s); },
+
+    async loadSavedList() {
+      this.savedError = '';
+      try {
+        const r = await fetch('/api/oo-backtest/strategies');
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        this.savedList = body.strategies || [];
+        if (this.selectedSavedId && !this.savedList.some(x => String(x.id) === String(this.selectedSavedId))) {
+          this.selectedSavedId = '';
+        }
+      } catch (e) {
+        console.error('oo-backtest saved list', e);
+        this.savedError = `Saved strategies unavailable: ${e.message}`;
+      }
+    },
+
+    selectedSaved() { return this.savedList.find(x => String(x.id) === String(this.selectedSavedId)) || null; },
+
+    async loadSelected() {
+      const s = this.selectedSaved();
+      if (!s) return;
+      this.savedBusy = true;
+      this.savedError = '';
+      this.uploadError = '';
+      try {
+        const r = await fetch(`/api/oo-backtest/strategies/${s.id}/load`);
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        this.setTrades(body);
+        // A loaded saved strategy is already saved; there is no File to send.
+        OB_DATA.file = null;
+        this.hasUploadFile = false;
+        this.saveMsg = '';
+        this.saveError = '';
+      } catch (e) {
+        console.error('oo-backtest load saved', e);
+        this.savedError = `Could not load "${s.name}": ${e.message}`;
+      } finally {
+        this.savedBusy = false;
+      }
+    },
+
+    async saveStrategy(replace = false) {
+      if (!OB_DATA.file) return;
+      this.saveBusy = true;
+      this.saveError = '';
+      this.saveMsg = '';
+      try {
+        const fd = new FormData();
+        fd.append('file', OB_DATA.file);
+        fd.append('name', this.saveName);
+        fd.append('notes', this.saveNotes);
+        fd.append('replace', replace ? 'true' : 'false');
+        const r = await fetch('/api/oo-backtest/strategies', { method: 'POST', body: fd });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && !replace) {
+          this.saveBusy = false;
+          if (confirm(`${body.detail} Replace it with this upload?`)) return this.saveStrategy(true);
+          this.saveError = 'Not saved — choose a different name.';
+          return;
+        }
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        const saved = body.strategy;
+        await this.loadSavedList();
+        this.selectedSavedId = String(saved.id);
+        this.meta = { ...this.meta, saved };
+        this.saveMsg = `Saved as ${obSavedLabel(saved)}` +
+          (saved.same_file_as && saved.same_file_as.length ? ` — the same file is also saved as: ${saved.same_file_as.join(', ')}` : '');
+      } catch (e) {
+        console.error('oo-backtest save', e);
+        this.saveError = `Save failed: ${e.message}`;
+      } finally {
+        this.saveBusy = false;
+      }
+    },
+
+    async deleteSaved() {
+      const s = this.selectedSaved();
+      if (!s) return;
+      if (!confirm(`Delete saved strategy "${obSavedLabel(s)}"? This cannot be undone.`)) return;
+      this.savedError = '';
+      try {
+        const r = await fetch(`/api/oo-backtest/strategies/${s.id}`, { method: 'DELETE' });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        // The trades on screen stay; they are just no longer a saved record.
+        if (this.meta && this.meta.saved && this.meta.saved.id === s.id) {
+          const { saved, ...rest } = this.meta;
+          this.meta = rest;
+        }
+        this.selectedSavedId = '';
+        await this.loadSavedList();
+      } catch (e) {
+        console.error('oo-backtest delete', e);
+        this.savedError = `Delete failed: ${e.message}`;
+      }
     },
 
     /* ── registry-driven views ─────────────────────────────────────────── */
@@ -283,8 +417,22 @@ document.addEventListener('alpine:init', () => {
 
     loadedLabel() {
       if (!this.meta) return '';
-      return `${this.meta.suggested_name} (${this.meta.n.toLocaleString()} trades, ` +
+      const name = (this.meta.saved && this.meta.saved.name) || this.meta.suggested_name;
+      return `${name} (${this.meta.n.toLocaleString()} trades, ` +
              `${this.meta.date_min} – ${this.meta.date_max})`;
+    },
+
+    savedNotes() {
+      const out = [];
+      const sv = this.meta && this.meta.saved;
+      if (sv && !this.hasUploadFile) {
+        out.push({ warn: false, text: `Saved strategy, saved ${String(sv.updated_at || '').slice(0, 10)}` });
+      }
+      const ch = this.meta && this.meta.saved_count_changed;
+      if (ch) {
+        out.push({ warn: true, text: `Trade count was ${ch.when_saved} when saved and is ${ch.now} now — the parser has changed since` });
+      }
+      return out;
     },
 
     /* ── market data: what the join did on this log ───────────────────── */
