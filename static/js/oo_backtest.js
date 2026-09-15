@@ -34,9 +34,9 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {} };
+const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {}, rank: null };
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
-const OB_CHARTS = { cum: null, dd: null, deploy: null, sec: {} };
+const OB_CHARTS = { cum: null, dd: null, deploy: null, rank: null, rankAxis: null, sec: {} };
 const OB_DEFAULT_CAPITAL = 10000;
 
 /* ── pure helpers (exercised in node by scripts/check_oo_backtest.py) ─────── */
@@ -248,6 +248,96 @@ function obExtraStats(cols, idx, stats, capital, peak) {
     if (out.avg_annual_pnl !== null && peak > 0) out.avg_annual_return_pct = out.avg_annual_pnl / (peak * cap) * 100;
   }
   return out;
+}
+
+
+/* ── surface metrics ranking (P6b) ─────────────────────────────────────── */
+
+/* Family colours and form labels come from the server with the catalog
+ * (surface.FAMILY_GROUPS / FORM_LABELS): the page names no metric family. */
+const OB_BH_Q = 0.05;       // BH false-discovery level a bar must clear to be outlined
+
+function obSurfGroupOf(family, groups, other) {
+  return (groups || []).find(g => g.families.includes(family)) || other || { label: 'Other', color: '#8a8a8a' };
+}
+
+/* The bars to draw, in order. rows: /surface/rank rows. opts:
+ *   method       'spearman' | 'pearson' -- the value drawn, sorted on and
+ *                whose BH p decides the outline
+ *   form         'all' or one catalog form
+ *   hidden       Set of hidden families
+ *   groups/other the catalog's family_groups / other_group, for bar colour
+ * Sorted by |value| descending, ties by column name. A metric with no value
+ * for the method (too few trades, or constant) is not a bar; it is counted.
+ * alpha is obBarAlpha against the largest n IN VIEW. */
+function obRankView(rows, opts) {
+  const m = opts.method;
+  const inView = rows.filter(r => (opts.form === 'all' || r.form === opts.form) && !opts.hidden.has(r.family));
+  const bars = inView.filter(r => r[m] !== null && r[m] !== undefined);
+  bars.sort((a, b) => Math.abs(b[m]) - Math.abs(a[m]) || (a.column < b.column ? -1 : a.column > b.column ? 1 : 0));
+  const maxN = bars.reduce((x, r) => Math.max(x, r.n), 0);
+  return {
+    bars: bars.map(r => ({ ...r, value: r[m], pBh: r[`${m}_p_bh`],
+                           survives: r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q,
+                           alpha: obBarAlpha(r.n, maxN), group: obSurfGroupOf(r.family, opts.groups, opts.other) })),
+    inView: inView.length,
+    undefinedInView: inView.length - bars.length,
+    survivorsInView: bars.filter(r => r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q).length,
+    survivorsAll: rows.filter(r => r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q).length,
+    computedAll: rows.filter(r => r[m] !== null && r[m] !== undefined).length,
+  };
+}
+
+/* What "common coverage only" would cost, over the given trades. minDates:
+ * the coverage start of every metric in view. commonStart is the LATEST of
+ * them (every metric in view has data from there), earliestStart the earliest.
+ * dropped counts trades entered in [earliestStart, commonStart): trades some
+ * metric in view currently uses and that common coverage would remove. Trades
+ * before earliestStart have no metric value either way and are not a cost. */
+function obCommonCoverage(dates, idx, minDates) {
+  const starts = minDates.filter(Boolean).sort();
+  const out = { commonStart: null, earliestStart: null, dropped: 0, beforeEarliest: 0, kept: 0 };
+  if (!starts.length) return out;
+  out.earliestStart = starts[0];
+  out.commonStart = starts[starts.length - 1];
+  for (const i of idx) {
+    const d = dates[i];
+    if (!d) continue;
+    if (d < out.earliestStart) out.beforeEarliest++;
+    else if (d < out.commonStart) out.dropped++;
+    else out.kept++;
+  }
+  return out;
+}
+
+/* The request body's trades: [entry date, entry time, P/L] for each row in
+ * idx, optionally only those entered on/after `from`. */
+function obRankTrades(cols, idx, from) {
+  const out = [];
+  const t = cols.time_opened || [];
+  for (const i of idx) {
+    const d = cols.date_opened[i];
+    if (from && (!d || d < from)) continue;
+    out.push([d, t[i] ?? null, cols.pnl[i]]);
+  }
+  return out;
+}
+
+/* Wrap a long catalog description for a canvas tooltip. */
+function obWrap(text, width) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    if (line && (line + ' ' + w).length > width) { lines.push(line); line = w; } else line = line ? line + ' ' + w : w;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function obP(p) {
+  if (p === null || p === undefined) return '—';
+  return p < 0.001 ? p.toExponential(1) : p.toFixed(3);
 }
 
 /* P/L by bin for one metric section, as calculations.py calculate_bin_stats
@@ -472,6 +562,17 @@ document.addEventListener('alpine:init', () => {
     capitalInput: String(OB_DEFAULT_CAPITAL),
     capitalMsg: '',
     autoSteps: {},     // registry key -> step of that metric's auto bins for this log
+
+    // Surface metrics ranking. Rank rows live in OB_DATA.rank; `result` is the
+    // summary of the last computation, `sig` what it was computed on.
+    surf: { catalog: null, catalogBusy: false, catalogError: '', catalogInfo: null,
+            groups: [], other: null, formLabels: {},
+            method: 'spearman', form: 'all', hidden: {}, common: false,
+            busy: false, error: '', result: null },
+    // Bumped on every recompute. The filtered rows live outside the proxy
+    // (OB_DATA.idx), so anything derived from them reads this to re-render
+    // when they change -- without it the coverage headline stayed blank.
+    idxTick: 0,
     extra: null,       // obExtraStats
     deploy: null,      // {peak, peakDay, offSession, unclosed, days, hasSessions}
 
@@ -565,7 +666,11 @@ document.addEventListener('alpine:init', () => {
       this.capitalMsg = '';
       this.meta = meta;
       this.computeAutoBins();
+      // A new log invalidates any ranking of the previous one.
+      OB_DATA.rank = null;
+      this.surf.result = null;
       this.loaded = true;
+      this.loadSurfaceCatalog();
       this.initFilters();
       this.$nextTick(() => this.recompute());
     },
@@ -824,12 +929,245 @@ document.addEventListener('alpine:init', () => {
       if (!OB_DATA.columns) return;
       const idx = obApplyFilters(OB_DATA.columns, OB_DATA.n, this.activeSpecs());
       OB_DATA.idx = idx;
+      this.idxTick++;
       this.filteredCount = idx.length;
       this.stats = obStats(OB_DATA.columns, idx);
       OB_DATA.conc = obConcurrency(OB_DATA.columns, idx, OB_DATA.sessions);
       this.renderPerformance(obEquity(OB_DATA.columns, idx));
       this.renderSections(idx);
       this.recomputeCapital();
+    },
+
+
+    /* ── surface metrics ranking (P6b) ─────────────────────────────────── */
+
+    surfaceForms() {
+      const labels = this.surf.formLabels || {};
+      const present = new Set((this.surf.catalog || []).map(m => m.form));
+      return [{ value: 'all', label: 'All forms' },
+              ...Object.keys(labels).filter(f => present.has(f)).map(f => ({ value: f, label: labels[f] })),
+              ...[...present].filter(f => !(f in labels)).sort().map(f => ({ value: f, label: f }))];
+    },
+    surfaceGroups() {
+      const fams = new Set((this.surf.catalog || []).map(m => m.family));
+      const defs = this.surf.groups || [];
+      const groups = defs.map(g => ({ ...g, families: g.families.filter(f => fams.has(f)) })).filter(g => g.families.length);
+      const other = [...fams].filter(f => !defs.some(g => g.families.includes(f))).sort();
+      if (other.length) groups.push({ ...(this.surf.other || { label: 'Other', color: '#8a8a8a' }), families: other });
+      return groups;
+    },
+    familyCount(f) { return (this.surf.catalog || []).filter(m => m.family === f && (this.surf.form === 'all' || m.form === this.surf.form)).length; },
+    familyHidden(f) { return !!this.surf.hidden[f]; },
+    toggleFamily(f) {
+      this.surf.hidden = { ...this.surf.hidden, [f]: !this.surf.hidden[f] };
+      this.renderRanking();
+    },
+    setSurfMethod(m) { this.surf.method = m; this.renderRanking(); },
+    setSurfForm(f) { this.surf.form = f; this.renderRanking(); },
+
+    async loadSurfaceCatalog() {
+      if (this.surf.catalog || this.surf.catalogBusy) return;
+      this.surf.catalogBusy = true;
+      this.surf.catalogError = '';
+      try {
+        const r = await fetch('/api/oo-backtest/surface/catalog');
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        this.surf.catalog = body.metrics;
+        this.surf.groups = body.family_groups || [];
+        this.surf.other = body.other_group || null;
+        this.surf.formLabels = body.form_labels || {};
+        this.surf.catalogInfo = { first: body.first_date, last: body.last_date, lookahead: body.lookahead_confirmed };
+      } catch (e) {
+        console.error('oo-backtest surface catalog', e);
+        this.surf.catalogError = `Surface metrics unavailable: ${e.message}`;
+      } finally {
+        this.surf.catalogBusy = false;
+      }
+    },
+
+    /* Metrics the view shows (form + families), from the catalog -- the set
+     * common coverage is computed over, available before any ranking. */
+    surfViewMetrics() {
+      return (this.surf.catalog || []).filter(m => (this.surf.form === 'all' || m.form === this.surf.form)
+                                                  && !this.surf.hidden[m.family]);
+    },
+
+    surfCoverage() {
+      void this.idxTick;
+      if (!OB_DATA.columns) return null;
+      return obCommonCoverage(OB_DATA.columns.date_opened, OB_DATA.idx, this.surfViewMetrics().map(m => m.min_date));
+    },
+
+    /* Identifies what a ranking was computed on: the filtered rows and the
+     * common-coverage start. A different one now means the chart is stale. */
+    surfSignature() {
+      void this.idxTick;
+      const idx = OB_DATA.idx || [];
+      let h = 0;
+      for (const i of idx) h = (h * 31 + i + 1) % 1000000007;
+      const cov = this.surf.common ? (this.surfCoverage() || {}).commonStart : '';
+      return `${idx.length}:${h}:${cov || ''}`;
+    },
+    surfStale() { return !!this.surf.result && this.surf.result.sig !== this.surfSignature(); },
+
+    async rankSurface() {
+      if (!OB_DATA.columns || this.surf.busy) return;
+      await this.loadSurfaceCatalog();
+      const cov = this.surfCoverage();
+      const from = this.surf.common && cov ? cov.commonStart : null;
+      const trades = obRankTrades(OB_DATA.columns, OB_DATA.idx, from);
+      const sig = this.surfSignature();
+      const beforeEarliest = cov ? obCommonCoverage(OB_DATA.columns.date_opened,
+        OB_DATA.idx.filter(i => !from || (OB_DATA.columns.date_opened[i] || '') >= from),
+        (this.surf.catalog || []).map(m => m.min_date)).beforeEarliest : 0;
+      this.surf.busy = true;
+      this.surf.error = '';
+      try {
+        const t0 = performance.now();
+        const r = await fetch('/api/oo-backtest/surface/rank', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trades }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        OB_DATA.rank = body.rows;
+        const ns = body.rows.map(x => x.n).filter(n => n > 0);
+        this.surf.result = {
+          sig, from, sent: trades.length, filtered: OB_DATA.idx.length, report: body.report,
+          beforeCoverage: beforeEarliest, nMin: ns.length ? Math.min(...ns) : 0, nMax: ns.length ? Math.max(...ns) : 0,
+          at: new Date().toTimeString().slice(0, 5), ms: Math.round(performance.now() - t0),
+          lookahead: body.lookahead_confirmed,
+        };
+        this.$nextTick(() => this.renderRanking());
+      } catch (e) {
+        console.error('oo-backtest surface rank', e);
+        this.surf.error = `Ranking failed: ${e.message}`;
+      } finally {
+        this.surf.busy = false;
+      }
+    },
+
+    /* The prominent line: how many of the trades actually count. */
+    surfHeadline() {
+      const res = this.surf.result;
+      if (!res) {
+        const cov = this.surfCoverage();
+        if (!cov || !cov.earliestStart) return '';
+        const n = OB_DATA.idx.length;
+        return `${cov.beforeEarliest.toLocaleString()} of ${n.toLocaleString()} filtered trades entered before the metrics in view start (${cov.earliestStart}) and will have no value`;
+      }
+      const rep = res.report;
+      const noBar = rep.no_bar;
+      const other = Math.max(0, noBar - res.beforeCoverage);
+      return `${rep.with_bar.toLocaleString()} of ${res.sent.toLocaleString()} trades have a metric bar` +
+        (noBar ? ` — ${noBar.toLocaleString()} don't: ${res.beforeCoverage.toLocaleString()} entered before coverage` +
+                 (other ? `, ${other.toLocaleString()} with no bar at the entry time (e.g. 09:30)` : '') : '');
+    },
+
+    surfSubline() {
+      const res = this.surf.result;
+      if (!res) return '';
+      const parts = [];
+      if (res.from) parts.push(`common coverage from ${res.from}: ${res.sent.toLocaleString()} of ${res.filtered.toLocaleString()} filtered trades sent`);
+      parts.push(`n per metric ${res.nMin.toLocaleString()}–${res.nMax.toLocaleString()}`);
+      parts.push(`${res.report.distinct_entries.toLocaleString()} distinct entries`);
+      parts.push(`computed ${res.at} in ${(res.ms / 1000).toFixed(1)}s`);
+      return parts.join(' · ');
+    },
+
+    surfCommonText() {
+      const cov = this.surfCoverage();
+      if (!cov || !cov.commonStart) return '';
+      const shown = this.surfViewMetrics().length;
+      if (cov.commonStart === cov.earliestStart) return `every metric in view starts ${cov.commonStart}; no cost`;
+      return `from ${cov.commonStart} (latest start of the ${shown} metrics in view): drops ${cov.dropped.toLocaleString()} ` +
+             `of ${(cov.dropped + cov.kept).toLocaleString()} covered trades`;
+    },
+
+    toggleCommon() {
+      this.surf.common = !this.surf.common;
+    },
+
+    surfView() {
+      if (!OB_DATA.rank) return null;
+      return obRankView(OB_DATA.rank, { method: this.surf.method, form: this.surf.form,
+                                        hidden: new Set(Object.keys(this.surf.hidden).filter(k => this.surf.hidden[k])),
+                                        groups: this.surf.groups, other: this.surf.other });
+    },
+
+    surfFooter() {
+      const v = this.surfView();
+      if (!v) return '';
+      const name = this.surf.method === 'spearman' ? 'Spearman' : 'Pearson';
+      return `${v.bars.length} bars · ${v.survivorsInView} in view survive Benjamini-Hochberg at q ${OB_BH_Q} (${name}; ` +
+             `${v.survivorsAll} of ${v.computedAll} computed) — outlined` +
+             (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
+             ' · opacity by n';
+    },
+
+    renderRanking() {
+      if (typeof Chart === 'undefined') return;
+      const v = this.surfView();
+      const el = document.getElementById('ob-rank-chart');
+      const axisEl = document.getElementById('ob-rank-axis');
+      const inner = document.getElementById('ob-rank-inner');
+      if (!v || !el || !axisEl || !inner) return;
+      const cat = new Map((this.surf.catalog || []).map(m => [m.column_name, m]));
+      const BAR_PX = 12, AXIS_PX = 52;
+      inner.style.width = Math.max(inner.parentElement.clientWidth, v.bars.length * BAR_PX + 16) + 'px';
+      const maxAbs = Math.max(0.05, ...v.bars.map(b => Math.abs(b.value))) * 1.1;
+      const lim = Math.ceil(maxAbs * 20) / 20;
+      const yScale = { min: -lim, max: lim, border: { display: false } };
+      const method = this.surf.method;
+      const tipLines = b => {
+        const m = cat.get(b.column) || {};
+        const pr = `Pearson r ${b.pearson === null ? '—' : b.pearson.toFixed(3)} (p ${obP(b.pearson_p)}, BH ${obP(b.pearson_p_bh)})`;
+        const sp = `Spearman ρ ${b.spearman === null ? '—' : b.spearman.toFixed(3)} (p ${obP(b.spearman_p)}, BH ${obP(b.spearman_p_bh)})`;
+        return [...obWrap(m.description, 60), ...(m.formula ? obWrap('= ' + m.formula, 60) : []),
+                `n ${b.n.toLocaleString()} · ${b.bars.toLocaleString()} distinct bars · from ${m.min_date || '—'}`,
+                method === 'spearman' ? sp + (b.survives ? '  ✓ BH' : '') : sp,
+                method === 'pearson' ? pr + (b.survives ? '  ✓ BH' : '') : pr,
+                `${b.family} · ${b.form}${b.tenor ? ' · ' + b.tenor : ''}${b.wing ? ' · ' + b.wing : ''}`];
+      };
+      const cfg = {
+        type: 'bar',
+        data: { labels: v.bars.map(b => b.column), datasets: [{
+          data: v.bars.map(b => b.value),
+          backgroundColor: v.bars.map(b => obRgba(b.group.color, b.alpha)),
+          borderColor: v.bars.map(b => (b.survives ? '#f2f2f2' : 'rgba(0,0,0,0)')),
+          borderWidth: v.bars.map(b => (b.survives ? 1.5 : 0)),
+          borderSkipped: false, barPercentage: 0.8, categoryPercentage: 1.0 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { top: 6, bottom: 6 } },
+          scales: {
+            x: { display: false },
+            y: { ...yScale, ticks: { display: false }, afterFit: sc => { sc.width = 0; },
+                 grid: { color: ctx => (ctx.tick && ctx.tick.value === 0 ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.05)') } },
+          },
+          plugins: { legend: { display: false },
+                     tooltip: { callbacks: { title: it => v.bars[it[0].dataIndex].column,
+                                             label: it => tipLines(v.bars[it.dataIndex]) } } },
+        },
+      };
+      // The y axis lives in its own narrow chart OUTSIDE the scroller, so it
+      // stays put while the bars scroll. Same scale, padding and no x axis,
+      // so the two plot areas share their top and bottom exactly.
+      const axisCfg = {
+        type: 'bar', data: { labels: [''], datasets: [{ data: [null] }] },
+        options: { responsive: true, maintainAspectRatio: false, animation: false,
+                   layout: { padding: { top: 6, bottom: 6 } },
+                   scales: { x: { display: false },
+                             y: { ...yScale, grid: { display: false },
+                                  afterFit: sc => { sc.width = AXIS_PX; },
+                                  ticks: { color: '#9a9a9a', font: { size: 10 }, callback: x => x.toFixed(2) } } },
+                   plugins: { legend: { display: false }, tooltip: { enabled: false } } },
+      };
+      for (const [key, node, c] of [['rank', el, cfg], ['rankAxis', axisEl, axisCfg]]) {
+        const ch = OB_CHARTS[key];
+        if (ch && ch.canvas !== node) { ch.destroy(); OB_CHARTS[key] = null; }
+        if (OB_CHARTS[key]) { OB_CHARTS[key].data = c.data; OB_CHARTS[key].options = c.options; OB_CHARTS[key].resize(); OB_CHARTS[key].update('none'); }
+        else OB_CHARTS[key] = new Chart(node.getContext('2d'), c);
+      }
     },
 
     /* ── capital per position ──────────────────────────────────────────── */

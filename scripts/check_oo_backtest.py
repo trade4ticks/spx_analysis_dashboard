@@ -981,6 +981,176 @@ def check_auto_bins() -> None:
           "the registry carries no fixed Premium edges for the page to fall back on")
 
 
+RANK_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+
+// Pure helpers.
+const rows = job.rows;
+const view = o => obRankView(rows, { method: o.method, form: o.form, hidden: new Set(o.hidden || []),
+                                     groups: job.groups, other: job.other });
+out.spear = view({ method: 'spearman', form: 'all' });
+out.pear = view({ method: 'pearson', form: 'all' });
+out.z = view({ method: 'spearman', form: 'z' });
+out.noIv = view({ method: 'spearman', form: 'all', hidden: ['iv'] });
+const dates = ['2019-06-03', '2020-01-02', '2020-06-01', '2021-04-05', '2021-04-06', '2022-01-03', null];
+out.cov = obCommonCoverage(dates, [0, 1, 2, 3, 4, 5, 6], ['2020-01-02', '2021-04-06', null, '2021-01-05']);
+out.covOne = obCommonCoverage(dates, [0, 1, 2], ['2020-01-02', '2020-01-02']);
+const cols = { date_opened: dates, time_opened: ['10:00:00', '15:30:00', null, '09:30:00', '12:00:00', '15:55:00', '10:00:00'],
+               pnl: [1, 2, 3, 4, 5, 6, 7] };
+out.tradesAll = obRankTrades(cols, [0, 1, 2, 3, 4, 5], null);
+out.tradesFrom = obRankTrades(cols, [0, 1, 2, 3, 4, 5, 6], '2021-04-06');
+
+// Component, with the server stubbed.
+const sent = [];
+global.fetch = async (url, init) => {
+  const j = b => ({ ok: true, status: 200, json: async () => b });
+  if (url.endsWith('/surface/catalog')) return j({ metrics: job.catalog, first_date: '2020-01-02', last_date: '2026-09-14',
+                                                    lookahead_confirmed: true, family_groups: job.groups, other_group: job.other,
+                                                    form_labels: job.formLabels });
+  if (url.endsWith('/surface/rank')) {
+    const body = JSON.parse(init.body);
+    sent.push(body.trades);
+    return j({ rows, report: { with_bar: 3, no_bar: body.trades.length - 3, distinct_entries: 3 }, lookahead_confirmed: true });
+  }
+  throw new Error('unexpected ' + url);
+};
+(async () => {
+  const c = factory();
+  c.$nextTick = f => f && f();
+  c.registry = job.registry;
+  c.setTrades(job.payload);
+  await new Promise(r => setTimeout(r, 0));
+  out.catalogLoaded = !!c.surf.catalog;
+  out.headBefore = c.surfHeadline();
+  await c.rankSurface();
+  out.sent1 = sent[0];
+  out.head1 = c.surfHeadline();
+  out.stale1 = c.surfStale();
+  c.filters.dateFrom = '2021-03-01'; c.recompute();
+  out.staleAfterFilter = c.surfStale();
+  await c.rankSurface();
+  out.sent2 = sent[1];
+  out.stale2 = c.surfStale();
+  out.commonText = c.surfCommonText();
+  c.resetAllFilters(); c.recompute();
+  c.toggleCommon();
+  out.staleAfterCommon = c.surfStale();
+  await c.rankSurface();
+  out.sent3 = sent[2];
+  out.sub3 = c.surfSubline();
+  c.setTrades(job.payload);
+  out.clearedOnNewLog = c.surf.result === null;
+  out.forms = c.surfaceForms().map(f => f.label);
+  out.groups = c.surfaceGroups().map(g => g.label + ':' + g.families.join('+'));
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+def check_surface_ranking_ui() -> None:
+    """P6b in node with the shipped JS: the bar view (sort, method, form,
+    hidden families, BH outline, opacity against the largest n in view), what
+    common coverage costs and sends, and the component's request, headline and
+    staleness against a stubbed server."""
+    print("surface ranking chart (shipped JS)")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("surface ranking UI (node not installed)")
+        return
+
+    def row(col, fam, form, n, sp, pe, sp_bh, pe_bh):
+        return {"column": col, "family": fam, "form": form, "tenor": "30d", "wing": "atm", "n": n, "bars": n,
+                "spearman": sp, "spearman_p": sp_bh, "spearman_p_bh": sp_bh,
+                "pearson": pe, "pearson_p": pe_bh, "pearson_p_bh": pe_bh}
+    rows = [
+        row("iv_a", "iv", "level", 1348, 0.10, -0.30, 0.20, 0.001),
+        row("z_iv_a", "iv", "z", 1203, -0.25, 0.05, 0.01, 0.60),
+        row("skew_a", "skew", "level", 400, 0.20, 0.20, 0.04, 0.04),
+        row("rv_a", "rv", "chg_d", 1300, -0.02, -0.02, 0.90, 0.90),
+        row("dead", "vov", "z", 2, None, None, None, None),
+        row("new_fam", "brand_new", "level", 1000, 0.15, 0.15, 0.30, 0.30),
+    ]
+    catalog = [{"column_name": r["column"], "family": r["family"], "form": r["form"], "min_date": d,
+                "description": "desc " + r["column"], "formula": "f", "units": "vol_decimal"}
+               for r, d in zip(rows, ["2020-01-02", "2021-04-05", "2020-01-02", "2021-01-05", "2021-04-05", "2020-01-02"])]
+    cols = {"date_opened": ["2018-01-02", "2019-05-06", "2020-03-02", "2021-02-01", "2021-06-01", "2022-06-01"],
+            "date_closed": ["2018-01-05", "2019-05-09", "2020-03-05", "2021-02-04", "2021-06-04", "2022-06-04"],
+            "time_opened": ["15:30:00"] * 6, "pnl": [10.0, -5.0, 20.0, 0.0, 7.0, -3.0], "days_in_trade": [3] * 6,
+            "day_of_week": [1, 0, 0, 0, 1, 2]}
+    payload = {"n": 6, "columns": cols, "date_min": "2018-01-02", "date_max": "2022-06-04", "notes": {},
+               "suggested_name": "t", "market": {"joined": True, "spx_sessions": []}}
+    reg = json.loads(json.dumps(REGISTRY))
+    from app.oo_backtest import surface
+    p = subprocess.run(["node", "-e", RANK_DRIVER, str(JS)],
+                       input=json.dumps({"rows": rows, "catalog": catalog, "payload": payload, "registry": reg,
+                                         "groups": surface.FAMILY_GROUPS, "other": surface.OTHER_GROUP,
+                                         "formLabels": surface.FORM_LABELS}),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"rank driver ran ({p.stderr.strip()[:400]})")
+        return
+    o = json.loads(p.stdout)
+    names = lambda v: [b["column"] for b in v["bars"]]   # noqa: E731
+    check(names(o["spear"]) == ["z_iv_a", "skew_a", "new_fam", "iv_a", "rv_a"],
+          f"Spearman: sorted by |rho| descending, sign kept ({names(o['spear'])})")
+    check(names(o["pear"]) == ["iv_a", "skew_a", "new_fam", "z_iv_a", "rv_a"] and o["pear"]["bars"][0]["value"] == -0.30,
+          f"Pearson re-sorts on |r| and draws r ({names(o['pear'])})")
+    check(names(o["z"]) == ["z_iv_a"] and o["z"]["undefinedInView"] == 1,
+          "form filter z: only z metrics; the z metric with no correlation is counted, not drawn")
+    sv = {b["column"]: b["survives"] for b in o["spear"]["bars"]}
+    pv = {b["column"]: b["survives"] for b in o["pear"]["bars"]}
+    check(sv == {"z_iv_a": True, "skew_a": True, "new_fam": False, "iv_a": False, "rv_a": False}
+          and pv["iv_a"] is True and pv["z_iv_a"] is False and o["spear"]["survivorsAll"] == 2,
+          "BH outline follows the sorting method's adjusted p at q 0.05")
+    a = {b["column"]: b["alpha"] for b in o["spear"]["bars"]}
+    a2 = {b["column"]: b["alpha"] for b in o["noIv"]["bars"]}
+    check(abs(a["skew_a"] - (0.12 + 0.88 * 400 / 1348)) < 1e-9 and a2["skew_a"] > a["skew_a"]
+          and "iv_a" not in a2 and o["noIv"]["survivorsAll"] == 2,
+          "opacity is n against the largest n IN VIEW; hiding iv re-packs and lifts the rest; BH count over all computed is unchanged")
+    other = next(b for b in o["spear"]["bars"] if b["column"] == "new_fam")
+    check(other["group"]["label"] == "Other", "a family with no assigned hue is drawn grey under Other")
+    cv = o["cov"]
+    check((cv["earliestStart"], cv["commonStart"], cv["beforeEarliest"], cv["dropped"], cv["kept"])
+          == ("2020-01-02", "2021-04-06", 1, 3, 2),
+          f"common coverage: from the latest start; drops trades in [earliest, common) — the earliest start day "
+          f"itself counts as dropped, the common start day is kept ({cv})")
+    check(o["covOne"]["dropped"] == 0 and o["covOne"]["commonStart"] == o["covOne"]["earliestStart"],
+          "one shared start: common coverage costs nothing")
+    check(o["tradesAll"][0] == ["2019-06-03", "10:00:00", 1] and o["tradesAll"][2] == ["2020-06-01", None, 3]
+          and [t[0] for t in o["tradesFrom"]] == ["2021-04-06", "2022-01-03"],
+          "request trades: [date, time, pnl], null time kept; common coverage sends only trades on/after its start")
+
+    check(o["catalogLoaded"] and "entered before the metrics in view start (2020-01-02)" in o["headBefore"]
+          and o["headBefore"].startswith("2 of 6"),
+          f"before ranking, the headline says how many filtered trades predate coverage ({o['headBefore']})")
+    check(len(o["sent1"]) == 6 and o["head1"].startswith("3 of 6 trades have a metric bar")
+          and "3 don't: 2 entered before coverage, 1 with no bar at the entry time" in o["head1"] and o["stale1"] is False,
+          f"after ranking: prominent 'with a bar' count and the no-bar split ({o['head1']})")
+    check(o["staleAfterFilter"] is True and len(o["sent2"]) == 2 and o["stale2"] is False,
+          "a filter change marks the ranking stale (no request); Recompute sends only the filtered trades")
+    check(o["staleAfterCommon"] is True and [t[0] for t in o["sent3"]] == ["2021-06-01", "2022-06-01"]
+          and "common coverage from 2021-04-05" in o["sub3"],
+          f"enabling common coverage marks it stale; the next request sends only trades from the common start ({o['sub3']})")
+    check(o["clearedOnNewLog"], "loading another log clears the previous ranking")
+    check(o["forms"] == ["All forms", "Level", "Daily chg", "Z-score"]
+          and o["groups"] == ["IV:iv", "Skew:skew", "Realized & VRP:rv", "Spot dynamics:vov", "Other:brand_new"],
+          f"form buttons and legend groups come from the catalog response; an unassigned family lands in Other "
+          f"({o['forms']}; {o['groups']})")
+    cat_rows = pd.read_csv(ROOT / "surface_metrics_catalog.csv")
+    ranked_fams = set(cat_rows.loc[~cat_rows["family"].isin(surface.EXCLUDED_FAMILIES), "family"])
+    assigned = {f for g in surface.FAMILY_GROUPS for f in g["families"]}
+    check(ranked_fams == assigned and len(surface.FAMILY_GROUPS) == 8,
+          f"every ranked family in the real catalog has one of the 8 hues, and no hue names a family that is not there "
+          f"(unassigned {sorted(ranked_fams - assigned)}, stale {sorted(assigned - ranked_fams)})")
+
+
 DEPLOY_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
@@ -1264,6 +1434,7 @@ def main() -> int:
     check_auto_bins()
     check_component_filters()
     check_deployment_and_extra_stats()
+    check_surface_ranking_ui()
     check_dropped_scope()
     check_parsers()
     check_real_mesosim()

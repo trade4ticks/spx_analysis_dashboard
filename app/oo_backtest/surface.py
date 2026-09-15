@@ -52,6 +52,26 @@ EXCLUDED_FAMILIES = frozenset({"meta", "spot", "forward"})
 BAR_RULE = "at_or_before_entry"
 LOOKAHEAD_CONFIRMED = True
 
+# How the ranking chart colours families: eight hues from the dataviz reference
+# palette (dark steps, validated as a set). There are ~14 families, more than
+# eight hues keep apart, so related families share a hue; the legend toggles
+# each family on its own and the hover names it. A family not listed here is
+# drawn grey under "Other" -- never given an invented hue. Kept here, not in
+# the page JS, so the page names no metric family (the same rule as the
+# metric registry).
+FAMILY_GROUPS = [
+    {"label": "IV", "color": "#3987e5", "families": ["iv"]},
+    {"label": "Skew", "color": "#d95926", "families": ["skew"]},
+    {"label": "Term structure", "color": "#199e70", "families": ["term_slope", "term_ratio"]},
+    {"label": "Convexity", "color": "#c98500", "families": ["convex"]},
+    {"label": "Risk reversal", "color": "#d55181", "families": ["rr"]},
+    {"label": "VIX index", "color": "#008300", "families": ["vix", "vix_basis"]},
+    {"label": "Realized & VRP", "color": "#e66767", "families": ["rv", "vrp", "vrp_ratio"]},
+    {"label": "Spot dynamics", "color": "#9085e9", "families": ["log_ret", "spot_vol", "vov"]},
+]
+OTHER_GROUP = {"label": "Other", "color": "#8a8a8a"}
+FORM_LABELS = {"level": "Level", "chg_d": "Daily chg", "chg_1w": "Weekly chg", "z": "Z-score"}
+
 CATALOG_FIELDS = ("column_name", "family", "tenor", "wing", "form", "base_column", "units",
                   "description", "formula")
 
@@ -165,7 +185,8 @@ async def get_catalog(pool) -> dict:
             "first_date": key[0].isoformat() if key[0] else None,
             "last_date": key[1].isoformat() if key[1] else None, "row_count": key[2],
             "built_at": _CACHE["built_at"], "build_s": _CACHE["build_s"],
-            "bar_rule": BAR_RULE, "lookahead_confirmed": LOOKAHEAD_CONFIRMED}
+            "bar_rule": BAR_RULE, "lookahead_confirmed": LOOKAHEAD_CONFIRMED,
+            "family_groups": FAMILY_GROUPS, "other_group": OTHER_GROUP, "form_labels": FORM_LABELS}
 
 
 # ── requests from the page ──────────────────────────────────────────────────

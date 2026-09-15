@@ -115,6 +115,21 @@
     /* A section and its pane: two cards on one row, the section two-thirds. */
     .ob-sec-row.with-pane { display:grid; gap:10px; grid-template-columns:minmax(0,2fr) minmax(0,1fr); margin-bottom:10px; }
     .ob-sec-row.with-pane > .ob-card { margin-bottom:0; }
+
+    /* Surface ranking */
+    .ob-rank-headline { font-size:14px; font-weight:700; color:var(--text); margin:0 0 8px; }
+    .ob-rank-headline.muted { font-size:12px; font-weight:600; color:var(--warning); }
+    .ob-rank-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+    .ob-rank-stale { font-size:11px; color:var(--warning); }
+    .ob-rank-legend { display:flex; flex-wrap:wrap; gap:4px 14px; margin-bottom:8px; font-size:11px; }
+    .ob-rank-group { display:inline-flex; align-items:center; gap:5px; }
+    .ob-rank-swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
+    .ob-rank-fam { color:var(--text); text-decoration:none; }
+    .ob-rank-fam.off { color:var(--dim); text-decoration:line-through; }
+    .ob-rank-wrap { display:flex; height:320px; }
+    .ob-rank-axis { flex:0 0 56px; position:relative; }
+    .ob-rank-scroll { flex:1; min-width:0; overflow-x:auto; overflow-y:hidden; }
+    .ob-rank-inner { height:100%; position:relative; }
     .ob-capital { display:flex; align-items:center; gap:8px; padding:8px 10px; }
     .ob-capital-field { display:flex; align-items:center; gap:4px; margin-left:auto; color:var(--dim); font-size:12px; }
     .ob-capital-field .ob-input { width:110px; margin-top:0; text-align:right; }
@@ -465,6 +480,71 @@
         </template>
         </div>
       </template>
+      <!-- Surface metrics ranking (P6b): correlation of every surface metric
+           with P/L, computed on the server for the CURRENT filtered trades when
+           Rank is pressed -- not on every filter change. -->
+      <div class="ob-card" x-show="loaded && filteredCount > 0">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Surface metrics vs P/L</span>
+          <span class="ob-card-sub" x-text="surfSubline()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="ob-rank-headline" :class="{ muted: !surf.result }" x-show="surfHeadline()" x-text="surfHeadline()"></div>
+
+          <div class="ob-rank-controls">
+            <button class="btn primary" @click="rankSurface()" :disabled="surf.busy || surf.catalogBusy"
+                    x-text="surf.busy ? 'Ranking…' : (surf.result ? 'Recompute' : 'Rank metrics')"></button>
+            <span class="ob-rank-stale" x-show="surfStale()">stale — filters or coverage changed since this ranking</span>
+            <div class="seg">
+              <div class="seg-btn" :class="{on: surf.method==='spearman'}" @click="setSurfMethod('spearman')">Spearman</div>
+              <div class="seg-btn" :class="{on: surf.method==='pearson'}" @click="setSurfMethod('pearson')">Pearson</div>
+            </div>
+            <div class="seg">
+              <template x-for="f in surfaceForms()" :key="f.value">
+                <div class="seg-btn" :class="{on: surf.form===f.value}" @click="setSurfForm(f.value)" x-text="f.label"></div>
+              </template>
+            </div>
+            <label class="ob-check" :title="'Send only trades from the latest coverage start among the metrics in view, so every bar is measured on the same period'">
+              <input type="checkbox" :checked="surf.common" @change="toggleCommon()">
+              <span>Common coverage only</span>
+              <span class="ob-dim" x-text="surfCommonText()"></span>
+            </label>
+          </div>
+
+          <div class="ob-err" x-show="surf.catalogError" x-text="surf.catalogError"></div>
+          <div class="ob-err" x-show="surf.error" x-text="surf.error"></div>
+
+          <div class="ob-rank-legend" x-show="surf.catalog">
+            <template x-for="g in surfaceGroups()" :key="g.label">
+              <span class="ob-rank-group">
+                <span class="ob-rank-swatch" :style="'background:' + g.color"></span>
+                <span class="ob-dim" x-text="g.label"></span>
+                <template x-for="f in g.families" :key="f">
+                  <a href="#" class="ob-rank-fam" :class="{ off: familyHidden(f) }" @click.prevent="toggleFamily(f)"
+                     :title="familyHidden(f) ? 'show ' + f : 'hide ' + f"
+                     x-text="f + ' ' + familyCount(f)"></a>
+                </template>
+              </span>
+            </template>
+          </div>
+
+          <div class="ob-placeholder" x-show="!surf.result && !surf.busy">
+            Press Rank metrics to correlate every surface metric with the filtered trades' P/L
+          </div>
+          <!-- Kept in the DOM (x-show) so the canvases exist before a render. -->
+          <div class="ob-rank-wrap" x-show="surf.result">
+            <div class="ob-rank-axis"><canvas id="ob-rank-axis"></canvas></div>
+            <div class="ob-rank-scroll">
+              <div id="ob-rank-inner" class="ob-rank-inner">
+                <canvas id="ob-rank-chart" role="img"
+                        aria-label="Surface metrics ranked by absolute correlation with P/L"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="ob-dim" style="margin-top:6px;" x-show="surf.result" x-text="surfFooter()"></div>
+        </div>
+      </div>
+
       <!-- Market-data checks: why any gap or VIX-family level is null. -->
       <div class="ob-card" x-show="loaded && hasMarketChecks()">
         <div class="ob-card-hdr"><span class="ob-card-title">Market-data checks</span>

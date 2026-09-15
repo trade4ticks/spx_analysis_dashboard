@@ -62,11 +62,8 @@ and reported under the chart.
 
 ### Surface metrics exploration (P6, in progress)
 
-Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart (with
-"common coverage only"). P6b must state PROMINENTLY in the chart header how many trades
-have a metric bar (on the OO log 754 of 2,097 have none — metrics start 2020, the log 2018 —
-so effective n is ~1,300, not 2,097), and "common coverage only" must show what it costs
-(trades dropped) before it is enabled; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —
+done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
 formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
 trades a coverage gap would drop); P6e docs.
 
@@ -102,6 +99,23 @@ The join (26 ms, fully cached, PK backward scan) needs no index or column reduct
 `POST /surface/rank`, `POST /surface/values` (values fetched for ALL loaded trades, so a row
 follows page filters without another call). `scripts/measure_surface_rank.py` is the
 read-only VPS timing script for the 458-column join.
+
+**Ranking chart (P6b)**, a card below the sections. Ranked on the server only when *Rank
+metrics* / *Recompute* is pressed, for the current filtered trades; a later filter or
+coverage change marks it **stale** (signature of the filtered rows + common start), no
+auto-request. The **headline states prominently how many trades have a metric bar**, split
+into "entered before coverage" and "no bar at the entry time" (on the OO log ~1,348 of
+2,097; before ranking it states how many predate the metrics in view). Bars: fixed 12 px,
+horizontal scroll, y axis in its own fixed chart beside the scroller; sorted by |value| of
+the chosen method (Spearman default / Pearson); form filter; legend toggles single families
+(hidden families re-pack; BH still counts them); opacity = `obBarAlpha(n, max n in view)`;
+BH survivors at q 0.05 of the sorting method are outlined. **Common coverage only** sends
+only trades from the latest `min_date` among metrics in view, and states its cost first:
+trades in [earliest start, common start) that some metric in view would lose. Family hues
+(`surface.FAMILY_GROUPS`, 8 groups for ~14 families; unassigned → grey "Other") and form
+labels come with the catalog response — the page JS names no family (the dropped-scope
+guard enforces it). Derived values that read `OB_DATA.idx` must read `idxTick`, or Alpine
+never re-renders them (the headline was blank until that was added).
 
 ### What `main.index_ohlc` actually looks like
 
