@@ -169,9 +169,10 @@ function obEquity(cols, idx) {
 }
 
 /* P/L by bin for one metric section, as calculations.py calculate_bin_stats
- * over pd.cut: per bin count, total, mean and win rate (pnl > 0), empty bins
- * omitted (groupby observed=True), bins in label order. Trades with no value
- * in `column` are in no bin.
+ * over pd.cut: per bin count, total, mean and win rate (pnl > 0), bins in
+ * label order. Empty bins: a range metric keeps them (see below), a
+ * categorical one has none to keep. Trades with no value in `column` are in
+ * no bin.
  *   range metric       bins from m.bins via obBinIndex
  *   categorical metric one bin per value: m.categories order first, then any
  *                      value the log has that the list lacks, labelled by the
@@ -201,10 +202,36 @@ function obSectionData(cols, idx, m, column) {
     b.count++; b.total += pnl[i]; if (pnl[i] > 0) b.wins++;
     xs.push(v); ys.push(pnl[i]); rowsIdx.push(i);
   }
+  // A range metric keeps EVERY bin, empty ones included, so the x axis stays
+  // to scale: dropping them put ">40" beside "18-20". Deliberately unlike
+  // calculate_bin_stats (observed=True). An empty bin is count 0 with null
+  // avg/total/win, which Chart.js draws as nothing.
+  if (m.type === 'range') {
+    m.bins.labels.forEach((label, key) => {
+      if (!acc.has('0:' + key)) acc.set('0:' + key, { extra: 0, key, label, count: 0, total: 0, wins: 0 });
+    });
+  }
   const rows = [...acc.values()].sort((a, b) =>
     a.extra - b.extra || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
-  ).map(b => ({ label: b.label, count: b.count, total: b.total, avg: b.total / b.count, win: b.wins / b.count * 100 }));
+  ).map(b => (b.count
+    ? { label: b.label, count: b.count, total: b.total, avg: b.total / b.count, win: b.wins / b.count * 100 }
+    : { label: b.label, count: 0, total: null, avg: null, win: null }));
   return { valued: xs.length, rows, xs, ys, rowsIdx };
+}
+
+/* Bar opacity from a bin's trade count relative to the largest bin: square
+ * root, so one dominant bin does not wash out the rest, floored at 0.25 so a
+ * 1-trade bar is faint rather than gone. */
+const OB_MIN_ALPHA = 0.25;
+function obBarAlpha(count, maxCount) {
+  if (!count || !maxCount) return 0;
+  return OB_MIN_ALPHA + (1 - OB_MIN_ALPHA) * Math.sqrt(count / maxCount);
+}
+
+/* '#3498db', 0.5 -> 'rgba(52,152,219,0.5)' */
+function obRgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${+a.toFixed(3)})`;
 }
 
 /* Ordinary least squares of y on x, as scipy.stats.linregress (the fit
@@ -803,7 +830,7 @@ document.addEventListener('alpine:init', () => {
       const col = this.metricColumn(m);
       if (!s || !s.valued) return col;
       const of = s.valued === this.filteredCount ? '' : ` of ${this.filteredCount.toLocaleString()}`;
-      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${s.bins} ${m.type === 'range' ? 'bins' : 'values'}`;
+      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${m.bins.labels.length} bins filled` : `${s.bins} values`}`;
     },
 
     fitText(m) {
@@ -826,7 +853,7 @@ document.addEventListener('alpine:init', () => {
         if (!this.hasColumn(m)) continue;
         const d = obSectionData(OB_DATA.columns, idx, m, this.metricColumn(m));
         const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
-        sections[m.key] = { valued: d.valued, bins: d.rows.length, fit };
+        sections[m.key] = { valued: d.valued, bins: d.rows.filter(r => r.count).length, fit };
         if (d.valued) this.drawSection(m, d, fit);
       }
       this.sections = sections;
@@ -834,7 +861,10 @@ document.addEventListener('alpine:init', () => {
 
     drawSection(m, d, fit) {
       if (typeof Chart === 'undefined') return;
-      const signColor = v => (v >= 0 ? OB_BLUE : OB_PINK);
+      // Sign picks the hue; the bin's trade count picks the opacity, so a
+      // thin bin recedes without losing its profit/loss colour.
+      const maxCount = Math.max(0, ...d.rows.map(r => r.count));
+      const signColor = (v, k) => obRgba(v >= 0 ? OB_BLUE : OB_PINK, obBarAlpha(d.rows[k].count, maxCount));
       const grid = { color: 'rgba(255,255,255,0.05)' };
       const tick = { color: '#9a9a9a', font: { size: 10 } };
       const labels = d.rows.map(r => r.label);
@@ -842,7 +872,7 @@ document.addEventListener('alpine:init', () => {
                            `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(r.total)}`, `Win ${r.win.toFixed(1)}%`];
       const bar = (values, yTick, color) => ({
         type: 'bar',
-        data: { labels, datasets: [{ data: values, backgroundColor: values.map(color),
+        data: { labels, datasets: [{ data: values, backgroundColor: values.map((v, k) => (v === null ? 'transparent' : color(v, k))),
                                      borderRadius: 4, borderSkipped: 'start', maxBarThickness: 36 }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,

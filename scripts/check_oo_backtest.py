@@ -577,7 +577,9 @@ const out = {};
 for (const [key, t] of Object.entries(job)) {
   const d = obSectionData(t.cols, t.idx, t.metric, t.column);
   out[key] = { rows: d.rows, valued: d.valued, fit: obOLS(d.xs, d.ys),
-               swapped: obOLS(d.ys, d.xs), raw: t.raw ? obOLS(t.raw.xs, t.raw.ys) : null };
+               swapped: obOLS(d.ys, d.xs), raw: t.raw ? obOLS(t.raw.xs, t.raw.ys) : null,
+               alpha: { max: obBarAlpha(400, 400), one_of_400: obBarAlpha(1, 400),
+                        quarter: obBarAlpha(100, 400), zero: obBarAlpha(0, 400) } };
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -609,6 +611,9 @@ def check_section_parity() -> None:
         e = m["bins"]["edges"]
         span = (e[-1] - e[0]) or 1.0
         pool = list(e) + [round(rng.uniform(e[0] - 0.2 * span, e[-1] + 0.2 * span), 2) for _ in range(n)]
+        # A hole of several bins in the middle, so the kept-empty-bin path runs.
+        k = len(e) // 2
+        pool = [v for v in pool if not (e[k - 2] <= v <= e[k + 2])]
         return [None if i % 23 == 0 else rng.choice(pool) for i in range(n)]
 
     pnl = [0.0 if i % 31 == 0 else round(rng.gauss(30, 500), 2) for i in range(n)]
@@ -644,6 +649,10 @@ def check_section_parity() -> None:
     job["deg"] = {"cols": {"v": [1.0], "pnl": [1.0]}, "idx": [0], "metric": sections[2], "column": "v",
                   "raw": {"xs": [3.0, 3.0, 3.0, 3.0], "ys": [1.0, -2.0, 5.0, 0.0]}}
     job["two"] = {"cols": {"v": [1.0, 2.0], "pnl": [10.0, -4.0]}, "idx": [0, 1], "metric": sections[2], "column": "v"}
+    # Sparse VIX: two far-apart readings must keep every bin between them.
+    vix_m = next(m for m in sections if m["key"] == "vix")
+    job["sparse"] = {"cols": {"v": [18.5, 45.0, 18.2], "pnl": [100.0, -50.0, 20.0]}, "idx": [0, 1, 2],
+                     "metric": vix_m, "column": "v"}
 
     p = subprocess.run(["node", "-e", SECTION_DRIVER, str(JS)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
@@ -657,15 +666,30 @@ def check_section_parity() -> None:
 
     for key, w in want.items():
         g = got[key]
-        same_rows = (len(g["rows"]) == len(w["rows"]) and all(
+        m = job[key]["metric"]
+        # Compared BY LABEL on the bins pandas reports. The page deliberately
+        # keeps empty range bins (calculate_bin_stats drops them), so the lists
+        # differ by design; what must agree is every filled bin's values, and
+        # every extra JS bin must be one pandas left out for having no trades.
+        filled = [r for r in g["rows"] if r["count"]]
+        same_rows = (len(filled) == len(w["rows"]) and all(
             a["label"] == b["label"] and a["count"] == b["count"]
             and all(close(a[k], b[k]) for k in ("total", "avg", "win"))
-            for a, b in zip(g["rows"], w["rows"])))
-        first = next((i for i, (a, b) in enumerate(zip(g["rows"], w["rows"])) if a != b), None)
+            for a, b in zip(filled, w["rows"])))
+        first = next((i for i, (a, b) in enumerate(zip(filled, w["rows"])) if a != b), None)
         check(same_rows and g["valued"] == w["valued"],
-              f"{key}: {len(w['rows'])} bins equal calculate_bin_stats ({w['valued']} valued)"
-              + ("" if same_rows else f" — js {g['rows'][first] if first is not None else len(g['rows'])} vs pandas "
+              f"{key}: {len(w['rows'])} filled bins equal calculate_bin_stats ({w['valued']} valued)"
+              + ("" if same_rows else f" — js {filled[first] if first is not None else len(filled)} vs pandas "
                  f"{w['rows'][first] if first is not None else len(w['rows'])}"))
+        empty = [r for r in g["rows"] if not r["count"]]
+        if m["type"] == "range":
+            pandas_labels = {r["label"] for r in w["rows"]}
+            check([r["label"] for r in g["rows"]] == m["bins"]["labels"]
+                  and all(r["avg"] is None and r["total"] is None and r["win"] is None
+                          and r["label"] not in pandas_labels for r in empty),
+                  f"{key}: every bin kept in label order; the {len(empty)} empty ones are null and are the bins pandas omits")
+        else:
+            check(not empty, f"{key}: categorical — no empty bins")
         c = w["corr"]
         if c is not None:
             f = g["fit"]
@@ -679,6 +703,16 @@ def check_section_parity() -> None:
     dow = got["day_of_week:all"]["rows"]
     check([r["label"] for r in dow] == ["Mon", "Tue", "Wed", "Thu", "Fri", "5"],
           f"day of week: bars in Mon-Fri order, an off-list value kept as its own bar ({[r['label'] for r in dow]})")
+    sp = got["sparse"]["rows"]
+    lab = vix_m["bins"]["labels"]
+    i18, i45 = lab.index("18"), lab.index("45")
+    check(len(sp) == len(lab) and sp[i18]["count"] == 2 and sp[i45]["count"] == 1
+          and sum(r["count"] for r in sp) == 3 and i45 - i18 > 1,
+          f"sparse VIX: 18.x and 45 stay {i45 - i18} bins apart, not adjacent ({len(sp)} bins)")
+    alpha = got["sparse"]["alpha"]
+    check(alpha["max"] == 1 and alpha["one_of_400"] > 0.25 and abs(alpha["quarter"] - 0.625) < 1e-9
+          and alpha["zero"] == 0,
+          f"bar opacity: sqrt of count/max, floored at 0.25, empty bin 0 ({alpha})")
     check(got["two"]["fit"] is None and got["deg"]["raw"] is None,
           "no OLS line from fewer than 3 points, or when every x is identical")
 

@@ -18,9 +18,11 @@ sections. Remaining: P5 (docs).
 
 **Metric sections (P4).** One card per registry entry with `section: true`: avg and total
 P/L by bin, plus P/L vs metric with an OLS line (categorical: no scatter; `winRate` adds a
-separate win-rate chart — never a second y-axis). Bins follow `calculate_bin_stats`:
-empty bins are omitted (`observed=True`), so a sparse range axis skips labels, as the old
-app did. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
+separate win-rate chart — never a second y-axis). Per-bin values follow
+`calculate_bin_stats`, but **range metrics keep empty bins** (deliberately unlike its
+`observed=True`) so the axis stays to scale — dropping them put ">40" beside "18–20"; empty
+bins draw nothing. Avg/total bar **opacity scales with √(count / largest bin)**, floored at
+0.25; hue stays profit/loss. Both are cosmetic and meant to be easy to revert. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
 dropped. Three section states, worded differently: **skipped** (the log has no values in
 the column), **no data** (the current filter leaves none), **ready**. `check_oo_backtest`
 holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a
