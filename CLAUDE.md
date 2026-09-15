@@ -21,14 +21,26 @@ P/L by bin, plus P/L vs metric with an OLS line (categorical: no scatter; `winRa
 separate win-rate chart — never a second y-axis). Per-bin values follow
 `calculate_bin_stats`, but **range metrics keep empty bins** (deliberately unlike its
 `observed=True`) so the axis stays to scale — dropping them put ">40" beside "18–20"; empty
-bins draw nothing. Avg/total bar **opacity scales with √(count / largest bin)**, floored at
-0.25; hue stays profit/loss. Both are cosmetic and meant to be easy to revert. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
+bins draw nothing. **Every bar chart's opacity** (avg, total, win rate, Day of Week) is
+`OB_ALPHA_FLOOR + (1 − floor) × (count / largest bin) ^ OB_ALPHA_GAMMA` — 0.12 and 1.0,
+named constants for tuning by eye; relative to the chart's largest bin, no absolute
+thresholds. Hue stays profit/loss. Both are cosmetic and meant to be easy to revert.
+
+**Binning `fixed` | `auto`** (registry field). Premium is `auto`: the page builds its edges
+from the WHOLE loaded log (a filter never moves them) — p1..p99 snapped out to whichever of
+$10/$25/$50/$100/$250 gives a bin count nearest 24 (tie → smaller step), outliers in `<lo` /
+`≥hi` end buckets (≥ because bins are left-closed). The section header names the step
+("$25 bins (auto)"): two logs with different steps are not bar-for-bar comparable. Auto
+metrics are excluded from the fixed pd.cut parity; `check_auto_bins` tests them against a
+numpy reference instead. Everything else stays `fixed`. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
 dropped. Three section states, worded differently: **skipped** (the log has no values in
 the column), **no data** (the current filter leaves none), **ready**. `check_oo_backtest`
 holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a
 filtered subset.
 
-**Summary stats, capital, Deployment.** 15 stats, three rows of five. The added five
+**Summary stats, capital, Deployment.** 15 stats, three rows of five: # Trades · Win % ·
+Total P/L · Avg P/L · Avg P/L % / Avg Win · Avg Loss · Max Win · Max Loss · Profit Factor /
+Avg Annual P/L · Avg Annual Return % · Max DD · Calmar · Avg Days. The added five
 (`obExtraStats`): years = (last exit − first entry) / 365.25 over the filtered trades;
 Avg Annual P/L = total / years; Calmar = that / |max DD $|; Profit Factor = gross wins /
 |gross losses|; Avg Annual Return % = avg annual P/L / (peak concurrency × capital); Avg
@@ -37,7 +49,8 @@ it recomputes only those figures and the Deployment chart, no re-filter, no re-p
 is stored as `capital_per_position` on `oo_backtest_strategies` (NULL = default; column
 added by `ADD COLUMN IF NOT EXISTS`); on a loaded saved strategy a committed change is
 written with `PUT /strategies/{id}/capital`, which leaves `updated_at` (the list order)
-alone. **Deployment** (a registry `pane` in the Day of Week row) counts open positions per
+alone. **Deployment** (a registry `pane`: its own card, on the Day of Week row beside that
+section's card, not inside it) counts open positions per
 **SPX session** from the rollup (`market.session_days`, sent as `market.spx_sessions`),
 entry and exit day both inclusive. Every session in the span is a point, so a stretch with
 nothing open is a run of zeros. One stepped line; the right axis is the left × capital,

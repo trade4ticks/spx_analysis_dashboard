@@ -74,7 +74,6 @@ def check(ok: bool, msg: str) -> None:
 HELPERS = {
     "gap": calc.create_gap_bins,
     "vix_gap": calc.create_vix_gap_bins,
-    "premium": calc.create_premium_bins,
     "vix": calc.create_vix_bins,
     "vix3m": calc.create_vix_bins,
     "vix9d": calc.create_vix_bins,
@@ -134,9 +133,11 @@ def check_binning() -> None:
         return
     # The registry goes through JSON exactly as the endpoint sends it.
     reg = json.loads(json.dumps(REGISTRY, allow_nan=False))
-    ranges = [m for m in reg if m["type"] == "range"]
+    # Fixed bins only: an auto-binned metric's edges depend on the log and have
+    # no pandas helper; check_auto_bins covers those.
+    ranges = [m for m in reg if m["type"] == "range" and m["binning"] == "fixed"]
     check(set(HELPERS) == {m["key"] for m in ranges},
-          f"every range metric has a pandas helper mapped ({len(ranges)})")
+          f"every fixed-bin range metric has a pandas helper mapped ({len(ranges)})")
 
     job, expect = {}, {}
     for m in ranges:
@@ -230,7 +231,7 @@ def check_registry() -> None:
     except ValueError as exc:
         check(False, f"serialises without NaN/inf: {exc}")
     need = {"key", "label", "column", "type", "min", "max", "step", "bins", "hasScatter", "minDate",
-            "series", "basis"}
+            "series", "basis", "binning", "auto", "pane"}
     for m in REGISTRY:
         miss = need - set(m)
         check(not miss, f"{m['key']}: has {sorted(need)}" + (f" — missing {sorted(miss)}" if miss else ""))
@@ -579,7 +580,8 @@ for (const [key, t] of Object.entries(job)) {
   out[key] = { rows: d.rows, valued: d.valued, fit: obOLS(d.xs, d.ys),
                swapped: obOLS(d.ys, d.xs), raw: t.raw ? obOLS(t.raw.xs, t.raw.ys) : null,
                alpha: { max: obBarAlpha(400, 400), one_of_400: obBarAlpha(1, 400),
-                        quarter: obBarAlpha(100, 400), zero: obBarAlpha(0, 400) } };
+                        quarter: obBarAlpha(100, 400), zero: obBarAlpha(0, 400),
+                        p531: obBarAlpha(531, 531), p249: obBarAlpha(249, 531), p6: obBarAlpha(6, 531), p1: obBarAlpha(1, 531) } };
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -598,7 +600,7 @@ def check_section_parity() -> None:
         NOT_RUN.append("JS metric-section parity (node not installed)")
         return
     reg = json.loads(json.dumps(REGISTRY, allow_nan=False))
-    sections = [m for m in reg if m["section"]]
+    sections = [m for m in reg if m["section"] and m.get("binning") != "auto"]
     rng = random.Random(19)
     n = 900
 
@@ -710,12 +712,128 @@ def check_section_parity() -> None:
           and sum(r["count"] for r in sp) == 3 and i45 - i18 > 1,
           f"sparse VIX: 18.x and 45 stay {i45 - i18} bins apart, not adjacent ({len(sp)} bins)")
     alpha = got["sparse"]["alpha"]
-    check(alpha["max"] == 1 and alpha["one_of_400"] > 0.25 and abs(alpha["quarter"] - 0.625) < 1e-9
-          and alpha["zero"] == 0,
-          f"bar opacity: sqrt of count/max, floored at 0.25, empty bin 0 ({alpha})")
+    check(abs(alpha["max"] - 1) < 1e-12 and abs(alpha["quarter"] - (0.12 + 0.88 * 0.25)) < 1e-12
+          and abs(alpha["one_of_400"] - (0.12 + 0.88 / 400)) < 1e-12 and alpha["zero"] == 0
+          and abs(alpha["p531"] - 1) < 1e-12 and abs(alpha["p249"] - 0.5327) < 1e-3
+          and abs(alpha["p6"] - 0.1299) < 1e-3 and abs(alpha["p1"] - 0.1217) < 1e-3,
+          f"bar opacity: 0.12 + 0.88 x (count/max)^1 — Premium's 531/249/6/1 of 531 -> "
+          f"{alpha['p531']:.2f}/{alpha['p249']:.2f}/{alpha['p6']:.2f}/{alpha['p1']:.2f}; empty 0")
     check(got["two"]["fit"] is None and got["deg"]["raw"] is None,
           "no OLS line from fewer than 3 points, or when every x is identical")
 
+
+
+AUTO_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+for (const [key, t] of Object.entries(job)) {
+  const bins = obAutoBins(t.values, t.auto, 'usd');
+  if (!bins) { out[key] = null; continue; }
+  const idx = t.values.map((_, i) => i);
+  const d = obSectionData({ v: t.values, pnl: t.pnl }, idx, { type: 'range', bins, categories: null }, 'v');
+  out[key] = { bins, codes: t.values.map(v => obBinIndex(v, bins)), rows: d.rows };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def auto_bins_reference(values: list, auto: dict) -> dict | None:
+    """The auto-binning rule, written independently in numpy: percentiles by
+    np.percentile's default (linear), each step's span snapped outward, the
+    step whose bin count is nearest targetBins (ties to the smaller step)."""
+    import numpy as np
+    v = np.array([x for x in values if x is not None], dtype=float)
+    if not len(v):
+        return None
+    p_lo, p_hi = np.percentile(v, auto["pLo"]), np.percentile(v, auto["pHi"])
+    best = None
+    for step in auto["steps"]:
+        lo = math.floor(p_lo / step) * step
+        hi = math.ceil(p_hi / step) * step
+        if hi <= lo:
+            hi = lo + step
+        n = round((hi - lo) / step)
+        if best is None or abs(n - auto["targetBins"]) < abs(best[3] - auto["targetBins"]):
+            best = (step, lo, hi, n)
+    step, lo, hi, n = best
+    return {"step": step, "edges": [lo + k * step for k in range(n + 1)], "n": n}
+
+
+def check_auto_bins() -> None:
+    """Premium (binning 'auto'): edges built from the log. No fixed pandas
+    helper exists to compare against, so the rule is checked against an
+    independent numpy implementation, the bin assignment against pd.cut over
+    those edges, and the per-bin figures against calculate_bin_stats."""
+    print("auto bins (Premium): shipped JS vs a numpy reference")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("auto-bin parity (node not installed)")
+        return
+    reg = json.loads(json.dumps(REGISTRY, allow_nan=False))
+    autos = [m for m in reg if m.get("binning") == "auto"]
+    check([m["key"] for m in autos] == ["premium"] and all(m["binning"] == "fixed" for m in reg
+                                                          if m["type"] == "range" and m["key"] != "premium"),
+          f"Premium is the only auto-binned metric; every other range metric is fixed ({[m['key'] for m in autos]})")
+    auto = autos[0]["auto"]
+    check(auto == {"steps": [10, 25, 50, 100, 250], "targetBins": 24, "pLo": 1, "pHi": 99},
+          f"premium auto spec: ~24 bins over p1..p99, steps $10/$25/$50/$100/$250 ({auto})")
+
+    rng = random.Random(29)
+    cases = {
+        # a ~$5.00 premium strategy (dollars per contract), with a few outliers either side
+        "five_dollar": [round(rng.gauss(510, 55), 0) for _ in range(780)] + [40, 60, 1500, 2100, 2600, 90, 3000],
+        "wide_credit_debit": [round(rng.uniform(-3000, 6000), 0) for _ in range(500)],
+        "narrow": [round(rng.uniform(480, 500), 0) for _ in range(300)],
+        "constant": [500.0] * 50,
+        "single": [737.0],
+        "negative_only": [round(rng.gauss(-640, 120), 0) for _ in range(400)],
+        "with_nulls": [None if i % 9 == 0 else round(rng.gauss(300, 80), 0) for i in range(400)],
+    }
+    job = {k: {"values": v, "auto": auto, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]} for k, v in cases.items()}
+    p = subprocess.run(["node", "-e", AUTO_DRIVER, str(JS)], input=json.dumps(job),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"auto-bin driver ran ({p.stderr.strip()[:300]})")
+        return
+    got = json.loads(p.stdout)
+
+    def close(a, b):
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-6)
+
+    for key, vals in cases.items():
+        g, ref = got[key], auto_bins_reference(vals, auto)
+        b = g["bins"]
+        same_edges = b["step"] == ref["step"] and len(b["edges"]) == len(ref["edges"]) and all(
+            close(x, y) for x, y in zip(b["edges"], ref["edges"]))
+        check(same_edges and len(b["labels"]) == ref["n"] + 2 and b["labels"][0].startswith("<")
+              and b["labels"][-1].startswith("≥") and b["closed"] == "left",
+              f"{key}: step ${b['step']}, {ref['n']} bins + 2 end buckets, edges equal the reference "
+              f"({b['labels'][0]} … {b['labels'][-1]})")
+        spec = {"bins": [-math.inf] + ref["edges"] + [math.inf], "labels": b["labels"], "right": False}
+        df = pd.DataFrame({"v": pd.Series([math.nan if x is None else x for x in vals], dtype=float), "pnl": job[key]["pnl"]})
+        df = calc.apply_bin_spec(df, "v", spec)
+        want_codes = [-1 if pd.isna(x) else b["labels"].index(x) for x in df["v_bin"]]
+        check(g["codes"] == want_codes, f"{key}: every value lands in the bin pd.cut puts it in")
+        bs = calc.calculate_bin_stats(df, "v_bin")
+        filled = [r for r in g["rows"] if r["count"]]
+        ok = len(filled) == len(bs) and all(
+            a["label"] == str(r["bin"]) and a["count"] == int(r["count"]) and close(a["total"], float(r["total_pnl"]))
+            and close(a["avg"], float(r["avg_pnl"])) and close(a["win"], float(r["win_rate"]))
+            for a, (_, r) in zip(filled, bs.iterrows()))
+        check(ok and len(g["rows"]) == len(b["labels"]),
+              f"{key}: filled bins equal calculate_bin_stats; empty bins kept ({len(filled)} of {len(g['rows'])} filled)")
+
+    f5 = got["five_dollar"]
+    check(20 <= len(f5["bins"]["labels"]) - 2 <= 28 and f5["rows"][0]["count"] > 0 and f5["rows"][-1]["count"] > 0,
+          f"~$5 premium: about 24 bins, and the outliers past p1/p99 sit in the end buckets "
+          f"(${f5['bins']['step']} step, {f5['rows'][0]['count']} low, {f5['rows'][-1]['count']} high)")
+    old = next(m for m in REGISTRY if m["key"] == "premium")
+    check(old["bins"]["edges"] is None and old["bins"]["labels"] is None,
+          "the registry carries no fixed Premium edges for the page to fall back on")
 
 
 DEPLOY_DRIVER = r"""
@@ -894,6 +1012,10 @@ out.sectionsAll = { states: states(), vix: c.sections.vix, sub: c.sectionSub(R('
 c.filters.dateFrom = '2021-02-01'; c.filters.dateTo = '2021-02-01'; c.onFilterChange();
 out.sectionsOne = { count: c.filteredCount, states: states() };
 c.resetAllFilters();
+const premBins = () => JSON.stringify(c.binsFor(R('premium')));
+out.autoBefore = premBins(); out.autoSub = c.sectionSub(R('premium'));
+c.setHi(R('premium'), 1000); out.autoAfter = premBins(); out.autoCount = c.filteredCount;
+c.resetAllFilters();
 const cap = () => ({ count: c.filteredCount, pnlPct: c.stat('avg_pnl_pct'), retPct: c.stat('avg_annual_return_pct'),
                      pf: c.stat('profit_factor'), calmar: c.stat('calmar'), extra: c.extra, deploy: c.deploy });
 out.cap10k = cap();
@@ -961,6 +1083,11 @@ def check_component_filters() -> None:
     b = o["basis"]
     check(b["before"]["max"] < 1.2 and b["after"]["max"] == 1.3 and b["specs"] == [],
           f"switching ratio basis rebuilds that filter from the new column and drops the old narrowing ({b['after']})")
+    ab = json.loads(o["autoBefore"])
+    check(ab["step"] == 100 and ab["edges"][0] == -500 and ab["edges"][-1] == 1600 and o["autoBefore"] == o["autoAfter"]
+          and o["autoCount"] < 6 and "$100 bins (auto)" in o["autoSub"],
+          f"Premium auto bins come from the whole log, do not move when a filter narrows it, and the header names the step "
+          f"({ab['step']}, {ab['edges'][0]}..{ab['edges'][-1]}; {o['autoSub']})")
     k10, kb, k5, kbad = o["cap10k"], o["capBlank"], o["cap5k"], o["capBad"]
     k100 = o["cap100"]
     check(k10["pnlPct"] == "0.04%" and k100["pnlPct"] == "4.17%" and k5["pnlPct"] == "8.33%" and k5["count"] == k10["count"] == 6,
@@ -989,6 +1116,7 @@ def main() -> int:
     check_binning()
     check_stats_parity()
     check_section_parity()
+    check_auto_bins()
     check_component_filters()
     check_deployment_and_extra_stats()
     check_dropped_scope()

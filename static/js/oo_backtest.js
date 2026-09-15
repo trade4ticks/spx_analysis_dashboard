@@ -34,7 +34,7 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null };
+const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {} };
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
 const OB_CHARTS = { cum: null, dd: null, deploy: null, sec: {} };
 const OB_DEFAULT_CAPITAL = 10000;
@@ -301,13 +301,53 @@ function obSectionData(cols, idx, m, column) {
   return { valued: xs.length, rows, xs, ys, rowsIdx };
 }
 
-/* Bar opacity from a bin's trade count relative to the largest bin: square
- * root, so one dominant bin does not wash out the rest, floored at 0.25 so a
- * 1-trade bar is faint rather than gone. */
-const OB_MIN_ALPHA = 0.25;
+/* Bar opacity from a bin's trade count relative to the largest bin in that
+ * chart: floor + (1 - floor) * (count / max) ^ gamma. Relative only -- a chart
+ * whose bins are all small still spreads across the full range. Tuning knobs:
+ * gamma 1 is linear; above 1 pushes thin bins dimmer, below 1 lifts them (0.5
+ * was the square root, which left n=1 of 531 clearly visible). */
+const OB_ALPHA_FLOOR = 0.12;
+const OB_ALPHA_GAMMA = 1.0;
 function obBarAlpha(count, maxCount) {
   if (!count || !maxCount) return 0;
-  return OB_MIN_ALPHA + (1 - OB_MIN_ALPHA) * Math.sqrt(count / maxCount);
+  return OB_ALPHA_FLOOR + (1 - OB_ALPHA_FLOOR) * Math.pow(count / maxCount, OB_ALPHA_GAMMA);
+}
+
+/* Percentile by linear interpolation between order statistics -- numpy's
+ * default, so the gate can compare against np.percentile. `sorted` ascending. */
+function obPercentile(sorted, p) {
+  if (!sorted.length) return null;
+  const h = (sorted.length - 1) * p / 100, lo = Math.floor(h), hi = Math.min(lo + 1, sorted.length - 1);
+  return sorted[lo] + (h - lo) * (sorted[hi] - sorted[lo]);
+}
+
+/* Data-driven bins for a registry metric with binning 'auto'. The inner edges
+ * run lo, lo+step, ..., hi where lo/hi are the pLo/pHi percentiles snapped
+ * OUT to the step; each candidate step gives (hi - lo) / step bins and the one
+ * nearest targetBins wins (a tie goes to the smaller step). Values below lo
+ * and at/above hi land in the two end buckets, "<lo" and "≥hi" (left-closed,
+ * so a value exactly at hi is in the top bucket -- hence ≥, not >).
+ * Returns a bins object obBinIndex/obSectionData take, plus `step`, or null
+ * when the column has no values. */
+function obAutoBins(values, auto, fmt) {
+  const v = (values || []).filter(x => !obNull(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const pLo = obPercentile(v, auto.pLo), pHi = obPercentile(v, auto.pHi);
+  let best = null;
+  for (const step of auto.steps) {
+    const lo = Math.floor(pLo / step) * step;
+    let hi = Math.ceil(pHi / step) * step;
+    if (hi <= lo) hi = lo + step;
+    const n = Math.round((hi - lo) / step);
+    if (!best || Math.abs(n - auto.targetBins) < Math.abs(best.n - auto.targetBins)) best = { step, lo, hi, n };
+  }
+  const f = x => (fmt === 'usd' ? obMoney(x) : obFmt(x, fmt));
+  const edges = [];
+  for (let k = 0; k <= best.n; k++) edges.push(best.lo + k * best.step);
+  const labels = [`<${f(best.lo)}`];
+  for (let k = 0; k < best.n; k++) labels.push(`${f(edges[k])} to ${f(edges[k + 1])}`);
+  labels.push(`≥${f(best.hi)}`);
+  return { edges, labels, closed: 'left', labelEdge: 'both', step: best.step, auto: true };
 }
 
 /* '#3498db', 0.5 -> 'rgba(52,152,219,0.5)' */
@@ -431,6 +471,7 @@ document.addEventListener('alpine:init', () => {
     // written back (PUT .../capital) so a reload keeps it.
     capitalInput: String(OB_DEFAULT_CAPITAL),
     capitalMsg: '',
+    autoSteps: {},     // registry key -> step of that metric's auto bins for this log
     extra: null,       // obExtraStats
     deploy: null,      // {peak, peakDay, offSession, unclosed, days, hasSessions}
 
@@ -523,6 +564,7 @@ document.addEventListener('alpine:init', () => {
       }
       this.capitalMsg = '';
       this.meta = meta;
+      this.computeAutoBins();
       this.loaded = true;
       this.initFilters();
       this.$nextTick(() => this.recompute());
@@ -743,6 +785,7 @@ document.addEventListener('alpine:init', () => {
     setRatioBasis(basis) {
       if (this.ratioBasis === basis) return;
       this.ratioBasis = basis;
+      this.computeAutoBins();   // an auto-binned metric with a basis bins its new column
       // A basis switch changes the COLUMN a ratio filter reads, so its bounds
       // come from the new column and any narrowing on the old one is dropped.
       for (const m of this.registry.filter(x => x.basis && x.filter)) {
@@ -1030,7 +1073,29 @@ document.addEventListener('alpine:init', () => {
         : `Data starts ${m.minDate} — filtering on this drops ${k.toLocaleString()} earlier trade${s}`;
     },
 
-    binCount(m) { return m.bins ? m.bins.labels.length : null; },
+    /* The bins a range metric uses now: the registry's fixed spec, or for
+     * binning 'auto' the edges built from THIS log (all of it, not the
+     * filtered rows -- a filter must not move the edges under the bars). */
+    binsFor(m) { return m.binning === 'auto' ? (OB_DATA.autoBins[m.key] || null) : m.bins; },
+
+    computeAutoBins() {
+      OB_DATA.autoBins = {};
+      const steps = {};
+      for (const m of this.registry.filter(x => x.binning === 'auto')) {
+        const b = obAutoBins((OB_DATA.columns || {})[this.metricColumn(m)], m.auto, m.format);
+        if (b) { OB_DATA.autoBins[m.key] = b; steps[m.key] = b.step; }
+      }
+      this.autoSteps = steps;
+    },
+
+    binCount(m) { const b = this.binsFor(m); return b ? b.labels.length : null; },
+
+    binsTitle(m) {
+      const b = this.binsFor(m);
+      if (!b) return m.type === 'range' ? '' : 'categorical';
+      return `${b.labels.length} bins, ${b.closed}-closed` + (b.labelEdge === 'left' ? ', labelled by left edge' : '')
+        + (m.binning === 'auto' ? `, auto from this log's p${m.auto.pLo}–p${m.auto.pHi}` : '');
+    },
 
     /* ── metric sections ───────────────────────────────────────────────── */
 
@@ -1052,7 +1117,11 @@ document.addEventListener('alpine:init', () => {
       const col = this.metricColumn(m);
       if (!s || !s.valued) return col;
       const of = s.valued === this.filteredCount ? '' : ` of ${this.filteredCount.toLocaleString()}`;
-      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${m.bins.labels.length} bins filled` : `${s.bins} values`}`;
+      // An auto-binned metric names its step: two logs with different steps
+      // are not bar-for-bar comparable, and this is where that shows.
+      const auto = m.binning === 'auto' && this.autoSteps[m.key] !== undefined
+        ? ` · ${obFmt(this.autoSteps[m.key], m.format)} bins (auto)` : '';
+      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}`;
     },
 
     fitText(m) {
@@ -1073,7 +1142,10 @@ document.addEventListener('alpine:init', () => {
       const sections = {};
       for (const m of this.sectionMetrics()) {
         if (!this.hasColumn(m)) continue;
-        const d = obSectionData(OB_DATA.columns, idx, m, this.metricColumn(m));
+        const bins = m.type === 'range' ? this.binsFor(m) : null;
+        if (m.type === 'range' && !bins) continue;
+        const mm = bins === m.bins ? m : { ...m, bins };
+        const d = obSectionData(OB_DATA.columns, idx, mm, this.metricColumn(m));
         const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
         sections[m.key] = { valued: d.valued, bins: d.rows.filter(r => r.count).length, fit };
         if (d.valued) this.drawSection(m, d, fit);
@@ -1110,7 +1182,8 @@ document.addEventListener('alpine:init', () => {
       this.upsertChart(this.canvasId(m, 'avg'), bar(d.rows.map(r => r.avg), v => obMoney(v), signColor));
       this.upsertChart(this.canvasId(m, 'total'), bar(d.rows.map(r => r.total), v => obMoney(v), signColor));
       if (m.winRate) {
-        const cfg = bar(d.rows.map(r => r.win), v => v + '%', () => OB_BLUE);
+        const cfg = bar(d.rows.map(r => r.win), v => v + '%',
+                        (v, k) => obRgba(OB_BLUE, obBarAlpha(d.rows[k].count, maxCount)));
         Object.assign(cfg.options.scales.y, { min: 0, max: 100 });
         this.upsertChart(this.canvasId(m, 'win'), cfg);
       }

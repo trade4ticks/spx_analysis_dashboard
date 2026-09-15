@@ -16,6 +16,15 @@ Fields
               them with the loaded data's own extent; these apply only when a
               column has no values to take an extent from.
   step        slider step
+  binning     "fixed" | "auto" for a range metric (None for categorical).
+              fixed: `bins` below, identical for every log, parity-checked
+              against pd.cut. auto: the page builds edges from the loaded
+              log per `auto` {"steps", "targetBins", "pLo", "pHi"} -- ~targetBins
+              bins over the pLo..pHi percentiles, snapped to the step nearest
+              that count, outliers in two end buckets. `bins` then carries
+              only the closed side and label style; its edges/labels are None.
+              Log-dependent edges mean two logs' bars may not line up, so the
+              section header names the step.
   bins        {"edges", "labels", "closed", "labelEdge"} for a range metric,
               from the same *_bin_spec() the pandas path uses. `edges` are the
               INNER edges; both outer edges are +/-inf, which JSON cannot
@@ -65,15 +74,23 @@ def _bins(spec: dict, label_edge: str = "both") -> dict:
             "closed": "right" if spec["right"] else "left", "labelEdge": label_edge}
 
 
-def _range(key, label, column, lo, hi, step, spec, fmt, series, basis=None, label_edge="both"):
+def _auto_bins(steps: list, target_bins: int = 24, p_lo: float = 1, p_hi: float = 99) -> dict:
+    return {"steps": steps, "targetBins": target_bins, "pLo": p_lo, "pHi": p_hi}
+
+
+def _range(key, label, column, lo, hi, step, spec, fmt, series, basis=None, label_edge="both", auto=None):
+    bins = ({"edges": None, "labels": None, "closed": "left", "labelEdge": label_edge} if auto
+            else _bins(spec, label_edge))
     return {"key": key, "label": label, "column": column, "type": "range",
-            "min": lo, "max": hi, "step": step, "bins": _bins(spec, label_edge), "categories": None,
+            "binning": "auto" if auto else "fixed", "auto": auto,
+            "min": lo, "max": hi, "step": step, "bins": bins, "categories": None,
             "hasScatter": True, "section": True, "filter": True, "winRate": False,
             "format": fmt, "minDate": None, "series": series, "basis": basis, "pane": None}
 
 
 def _categorical(key, label, column, categories, *, section, filter, win_rate=False, pane=None):
     return {"key": key, "label": label, "column": column, "type": "categorical",
+            "binning": None, "auto": None,
             "min": None, "max": None, "step": None, "bins": None, "categories": categories,
             "hasScatter": False, "section": section, "filter": filter, "winRate": win_rate,
             "format": "int" if key != "exit_reason" else "text", "minDate": None,
@@ -94,7 +111,11 @@ def build_registry() -> list[dict]:
         _range("gap", "SPX Overnight Gap", "gap", -3.0, 3.0, 0.1, calc.gap_bin_spec(), "pct", ["spx"]),
         _range("vix_gap", "VIX Overnight Gap", "vix_overnight_gap", -15.0, 15.0, 0.5,
                calc.vix_gap_bin_spec(), "pct", ["vix"]),
-        _range("premium", "Premium", "premium", -2000, 2000, 50, calc.premium_bin_spec(), "usd", []),
+        # Auto: the fixed -$2,000..$2,000 / $250 bins left 10 of 14 empty on a
+        # strategy taking ~$5 premium. calc.premium_bin_spec() stays for the
+        # source-app comparison but no longer drives the page.
+        _range("premium", "Premium", "premium", -2000, 2000, 50, None, "usd", [],
+               auto=_auto_bins([10, 25, 50, 100, 250])),
         _range("vix", "VIX Level", "vix_level", 9, 80, 1, calc.vix_bin_spec(), "num", ["vix"]),
         _range("vix3m", "VIX3M Level", "vix3m_level", 9, 80, 1, calc.vix_bin_spec(), "num", ["vix3m"]),
         _range("vix9d", "VIX9D Level", "vix9d_level", 9, 80, 1, calc.vix_bin_spec(), "num", ["vix9d"]),
