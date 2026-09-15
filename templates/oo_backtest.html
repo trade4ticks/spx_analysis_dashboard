@@ -89,9 +89,7 @@
     .ob-table { border-collapse:collapse; font-size:11px; width:100%; }
     .ob-table th, .ob-table td { padding:3px 8px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; }
     .ob-table th { color:var(--dim); font-weight:600; }
-    .ob-table tr.best td { color:var(--accent); font-weight:700; }
-    .ob-table tr.low td { color:var(--warning); }
-    .ob-grid-2 { display:grid; gap:12px; grid-template-columns:repeat(2, minmax(0,1fr)); }
+
   </style>
 
   <!-- NOT deferred: must register the alpine:init listener before the deferred
@@ -225,102 +223,12 @@
         </div>
       </div>
 
-      <!-- Market-data checks: every cross-check the join ran, in full, so a
-           disagreement is diagnosed from the distribution, not five samples. -->
+      <!-- Market-data checks: why any gap or VIX-family level is null. -->
       <div class="ob-card" x-show="loaded && hasMarketChecks()">
         <div class="ob-card-hdr"><span class="ob-card-title">Market-data checks</span>
           <span class="ob-card-sub">diagnostics — not filtered</span></div>
         <div class="ob-card-body">
           <template x-for="e in diagErrors()" :key="e"><div class="ob-err" x-text="e"></div></template>
-
-          <template x-if="mk().gap_crosscheck">
-            <div>
-              <div class="ob-sub-title">Gap vs Option Omega's Gap column — all alignments and units</div>
-              <div class="ob-table-wrap"><table class="ob-table">
-                <thead><tr><th>prior close</th><th>unit</th><th>tol</th><th>compared</th><th>agree</th><th>rate</th></tr></thead>
-                <tbody>
-                  <template x-for="v in mk().gap_crosscheck.variants" :key="v.alignment + v.unit">
-                    <tr :class="{ best: v.alignment === mk().gap_crosscheck.best_alignment && v.unit === mk().gap_crosscheck.best_unit }">
-                      <td x-text="label(v.alignment)"></td><td x-text="v.unit"></td><td x-text="'±' + v.tolerance"></td>
-                      <td x-text="v.compared"></td><td x-text="v.agree"></td><td x-text="pct(v.rate)"></td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table></div>
-
-              <div class="ob-grid-2">
-                <div>
-                  <div class="ob-sub-title" x-text="'By year (' + label(mk().gap_crosscheck.best_alignment) + ', ' + mk().gap_crosscheck.best_unit + ')'"></div>
-                  <div class="ob-table-wrap"><table class="ob-table">
-                    <thead><tr><th>year</th><th>compared</th><th>agree</th><th>disagree</th><th>rate</th></tr></thead>
-                    <tbody>
-                      <template x-for="y in mk().gap_crosscheck.by_year" :key="y.year">
-                        <tr :class="{ low: y.rate < 0.9 }"><td x-text="y.year"></td><td x-text="y.compared"></td>
-                          <td x-text="y.agree"></td><td x-text="y.disagree"></td><td x-text="pct(y.rate)"></td></tr>
-                      </template>
-                    </tbody>
-                  </table></div>
-                </div>
-                <div>
-                  <div class="ob-sub-title" x-text="'By |Option Omega gap| (' + mk().gap_crosscheck.best_unit + ')'"></div>
-                  <div class="ob-table-wrap"><table class="ob-table">
-                    <thead><tr><th>magnitude</th><th>compared</th><th>agree</th><th>rate</th></tr></thead>
-                    <tbody>
-                      <template x-for="b in mk().gap_crosscheck.by_magnitude" :key="b.bucket">
-                        <tr :class="{ low: b.rate < 0.9 }"><td x-text="b.bucket"></td><td x-text="b.compared"></td>
-                          <td x-text="b.agree"></td><td x-text="pct(b.rate)"></td></tr>
-                      </template>
-                    </tbody>
-                  </table></div>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <template x-if="mk().gap_decomposition">
-            <div>
-              <div class="ob-sub-title" x-text="'Disagreeing days — which bar the vendor gap is consistent with (nearest within ±' + mk().gap_decomposition.tolerance_points + ' pts)'"></div>
-              <div class="ob-table-wrap"><table class="ob-table">
-                <thead><tr><th>year</th><th>implied open (our prior close + vendor gap)</th><th>implied prior close (our open − vendor gap)</th></tr></thead>
-                <tbody>
-                  <template x-for="(y, i) in mk().gap_decomposition.implied_open" :key="y.year">
-                    <tr><td x-text="y.year"></td><td x-text="matchLine(y.matches)"></td>
-                      <td x-text="matchLine((mk().gap_decomposition.implied_prev_close[i] || {}).matches)"></td></tr>
-                  </template>
-                </tbody>
-              </table></div>
-            </div>
-          </template>
-
-          <template x-if="mk().label_test">
-            <div>
-              <div class="ob-sub-title">Bar labeling — Option Omega's SPX price at entry vs the bar that should contain it</div>
-              <div class="ob-table-wrap"><table class="ob-table">
-                <thead><tr><th>year</th><th>trades</th><th>on 5-min boundary</th><th>inside start-labeled bar</th><th>inside +5 min bar</th><th>inside −5 min bar</th><th>no bar</th></tr></thead>
-                <tbody>
-                  <template x-for="y in mk().label_test.by_year" :key="y.year">
-                    <tr :class="{ low: y.start_rate < 0.9 }"><td x-text="y.year"></td><td x-text="y.trades"></td><td x-text="y.on_boundary"></td>
-                      <td x-text="pct(y.start_rate)"></td><td x-text="pct(y.shift_plus5_rate)"></td>
-                      <td x-text="pct(y.shift_minus5_rate)"></td><td x-text="y.no_bar"></td></tr>
-                  </template>
-                </tbody>
-              </table></div>
-            </div>
-          </template>
-
-          <template x-if="mk().gap_crosscheck && mk().gap_crosscheck.worst.length">
-            <div>
-              <div class="ob-sub-title">Largest disagreements</div>
-              <div class="ob-table-wrap"><table class="ob-table">
-                <thead><tr><th>date</th><th>Option Omega</th><th>computed</th><th>difference</th></tr></thead>
-                <tbody>
-                  <template x-for="w in mk().gap_crosscheck.worst" :key="w.date">
-                    <tr><td x-text="w.date"></td><td x-text="w.vendor"></td><td x-text="w.computed"></td><td x-text="w.diff"></td></tr>
-                  </template>
-                </tbody>
-              </table></div>
-            </div>
-          </template>
 
           <template x-if="mk().null_reasons">
             <div>

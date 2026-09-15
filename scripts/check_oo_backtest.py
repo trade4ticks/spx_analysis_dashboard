@@ -334,7 +334,11 @@ def check_parsers() -> None:
         c = p["columns"]
         check(c["date_opened"][0] == "2023-12-29" and c["year"][0] == 2023 and c["day_of_week"][0] == 4,
               f"OO CSV ({name}): derived year/day_of_week from the open date")
-        check(c["gap"][0] is None and c["gap"][1] == -0.62, f"OO CSV ({name}): blank Gap is null, not 0")
+        # Option Omega's Gap is a different definition from open-minus-prior-
+        # close; without market data the page must show no SPX gap at all,
+        # not the vendor's number under that heading.
+        check("gap" not in c and "csv_gap" not in c,
+              f"OO CSV ({name}): the vendor Gap column reaches the payload under no name")
         check(p["source"] == "oo_csv" and p["suggested_name"] == "IC 45", f"OO CSV ({name}): source + name")
 
     for key, pnl_key in (("StrategyName:", "pos_realized_pnl"), ("BacktestName:", "pos_pnl")):

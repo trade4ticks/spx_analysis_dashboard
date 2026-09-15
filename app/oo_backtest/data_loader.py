@@ -45,6 +45,8 @@ trade count was right; what it got wrong, and what changed:
                     since which ones matter later is not known yet.
   * MissingData     flagged where it lands on a position's entry or exit bar,
                     rather than trusting that fill silently.
+
+parse_csv() no longer copies the CSV's Gap into `gap` (a different definition).
 """
 
 import io
@@ -144,9 +146,10 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Use CSV gap as default 'gap' column (will be overwritten if market data is joined)
-    if "csv_gap" in df.columns:
-        df["gap"] = df["csv_gap"]
+    # Removed: the source copied the CSV's Gap into `gap` as a default. Option
+    # Omega's Gap is a different definition from open-minus-prior-close, so
+    # if the market join failed the page would show it under the SPX gap
+    # heading. `gap` now comes only from market.py.
 
     return df
 

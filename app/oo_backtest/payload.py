@@ -30,7 +30,6 @@ TRADE_COLUMNS = [
     "gap", "vix_overnight_gap",
     # Both ratio bases until one is chosen (registry `basis`).
     "vix3m_vix_ratio_entry", "vix3m_vix_ratio_close", "vix_vix9d_ratio_entry", "vix_vix9d_ratio_close",
-    "csv_gap",
     # CSV-only extras (null for Mesosim)
     "spx_open_price", "spx_close_price", "contracts", "pnl_pct",
     "max_profit", "max_loss", "strategy",

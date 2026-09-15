@@ -67,9 +67,6 @@ function obDistinct(values) {
   return [...s].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-function obPct(r) { return r === null || r === undefined ? '—' : (r * 100).toFixed(1) + '%'; }
-function obLabel(k) { return String(k || '').replace(/_/g, ' ').replace('plus5', '+5 min').replace('minus5', '−5 min'); }
-
 function obFmt(v, fmt) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   switch (fmt) {
@@ -335,33 +332,13 @@ document.addEventListener('alpine:init', () => {
                      text: `${name.toUpperCase()} gap computed for ${v.computed.toLocaleString()} of ${total.toLocaleString()} trades${why}` });
         }
       }
-      if (mk.gap_crosscheck_error) {
-        out.push({ warn: true, text: `Gap cross-check failed (market data still joined): ${mk.gap_crosscheck_error}` });
-      }
-      const g = mk.gap_crosscheck;
-      if (g) {
-        // The winning alignment is ALWAYS named. The first version printed it
-        // only when it was not "previous row", so a 63% previous-row match
-        // read as if the alignment question had not been asked.
-        const aligned = g.best_alignment === 'previous_row';
-        out.push({
-          warn: !aligned || g.rate < 0.95,
-          text: `Gap vs Option Omega: best is ${obLabel(g.best_alignment)}, ${g.best_unit} ±${g.tolerance} — ` +
-                `${g.agree.toLocaleString()} of ${g.compared.toLocaleString()} agree (${obPct(g.rate)})` +
-                (aligned ? '' : ' — NOT the previous session: off by one?') +
-                (g.skipped_uncomputable ? `; ${g.skipped_uncomputable} not computable` : '') +
-                '. Detail in "Market-data checks".',
-        });
-      }
       return out;
     },
 
     /* ── market-data checks card (main column) ────────────────────────── */
 
     mk() { return (this.meta && this.meta.market) || {}; },
-    hasMarketChecks() { const m = this.mk(); return !!(m.gap_crosscheck || m.label_test || m.null_reasons); },
-    pct(r) { return obPct(r); },
-    label(k) { return obLabel(k); },
+    hasMarketChecks() { return !!this.mk().null_reasons; },
     nullTrades() {
       const out = [];
       for (const [name, r] of Object.entries(this.mk().null_reasons || {})) {
@@ -369,7 +346,6 @@ document.addEventListener('alpine:init', () => {
       }
       return out;
     },
-    matchLine(m) { return Object.entries(m || {}).map(([k, n]) => `${k}: ${n}`).join(' · '); },
     diagErrors() { return Object.entries(this.mk().diagnostic_errors || {}).map(([k, v]) => `${k}: ${v}`); },
 
     /* ── market freshness (read-only) ─────────────────────────────────── */
