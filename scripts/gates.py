@@ -39,6 +39,28 @@ would start a second cluster beside the live database. So:
                 `git pull`, via --vps. Nothing else is selected there, so a
                 deploy check cannot fail on tooling that is absent by design.
 
+VPS SETUP, once. The flow is: pull as root, gate as an unprivileged user
+(initdb-style tools refuse root, and a gate has no business running as root).
+
+    sudo useradd --system --create-home --shell /bin/bash gates
+    # The repo is owned by root, so git refuses to read it as `gates`
+    # ("detected dubious ownership") and check_template_render cannot export
+    # the ORIG_HEAD templates. Trust this one path for that user only:
+    sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
+    # The repo and .venv must be readable by `gates`. So must .env, for
+    # check_routes_smoke: app/db.py calls load_dotenv(), and python-dotenv
+    # opens a .env that EXISTS without checking it is readable -- a 600 root
+    # file raises PermissionError and the app does not import. Grant the
+    # group read (this does give `gates` the DB credentials, which the smoke
+    # test's real-database checks need anyway):
+    sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
+
+Then, on every deploy:
+
+    cd /spx_analysis_dashboard && git pull
+    sudo systemctl restart spx-dashboard.service       # never spx-live
+    sudo -u gates .venv/bin/python scripts/gates.py --vps --deploy
+
 A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
 (no Postgres binaries, running as root). That is reported as SKIP, never PASS.
 Under --deploy it is a FAIL: a deploy check that did not exercise the SQL has

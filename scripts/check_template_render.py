@@ -109,9 +109,27 @@ def _pages(directory: Path) -> list[str]:
                   if not p.name.startswith(PARTIAL_PREFIX))
 
 
+def _git_bytes(*args: str) -> bytes:
+    """Run git; on failure, exit with GIT'S OWN error, not a traceback.
+
+    git's stderr names the cause and usually the fix. The first version used
+    check=True with captured output, so a failure became CalledProcessError
+    "returned non-zero exit status 128" and the message was discarded -- on
+    the VPS that hid "detected dubious ownership in repository ... git config
+    --global --add safe.directory ...". Printed to STDOUT and last, so the gate
+    runner's table shows git's final line (usually the fix) as the detail.
+    """
+    p = subprocess.run(("git", *args), cwd=ROOT, capture_output=True)
+    if p.returncode:
+        err = p.stderr.decode("utf-8", "replace").strip() or "(git printed nothing on stderr)"
+        print(f"ERROR: `git {' '.join(args)}` failed (exit {p.returncode}) in {ROOT}:")
+        print(err)
+        raise SystemExit(1)
+    return p.stdout
+
+
 def _git(*args: str) -> str:
-    return subprocess.run(("git", *args), cwd=ROOT, check=True,
-                          capture_output=True, text=True).stdout
+    return _git_bytes(*args).decode("utf-8", "replace")
 
 
 def _export_templates(ref: str, dest: Path) -> None:
@@ -125,10 +143,8 @@ def _export_templates(ref: str, dest: Path) -> None:
     if not names:
         raise SystemExit(f"ERROR: ref {ref!r} has no templates/*.html")
     for name in names:
-        blob = subprocess.run(("git", "show", f"{ref}:{name}"), cwd=ROOT,
-                              check=True, capture_output=True)
         out = dest / Path(name).name
-        out.write_bytes(blob.stdout)
+        out.write_bytes(_git_bytes("show", f"{ref}:{name}"))
 
 
 def _render_all(directory: Path) -> dict[str, str | Exception]:
