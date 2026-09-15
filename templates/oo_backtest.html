@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+{% import "_macros.html" as m %}<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -7,6 +7,8 @@
   <link rel="stylesheet" href={{ asset('css/theme.css') }}>
 
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- Chart.js: the same build the other pages load. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
   <style>
     /* ── OO/Mesosim Backtest — page-scoped styles ─────────────────────────
@@ -60,6 +62,35 @@
       font-size:12px; padding:5px 8px; border-radius:4px; font-family:inherit; resize:vertical; color-scheme:dark;
     }
     .ob-save { margin-top:10px; padding-top:8px; border-top:1px solid var(--border); }
+
+    .ob-card.ob-active { border-color:var(--accent); }
+    .ob-reset { color:var(--accent); text-decoration:none; cursor:pointer; }
+    .ob-date-row { display:flex; align-items:center; gap:6px; }
+    .ob-date { margin-top:0; }
+    .ob-range-vals { display:flex; justify-content:space-between; font-size:11px; font-weight:700; color:var(--text); }
+
+    /* Dual-handle slider: two native ranges stacked on one track. The inputs
+       ignore the pointer; only their thumbs take it, so either can be grabbed. */
+    .ob-dual { position:relative; height:22px; margin:2px 0 2px; }
+    .ob-dual::before { content:""; position:absolute; left:0; right:0; top:10px; height:3px;
+                       border-radius:2px; background:var(--border); }
+    .ob-dual input[type=range] { position:absolute; left:0; top:0; width:100%; height:22px; margin:0;
+                                 background:none; pointer-events:none; -webkit-appearance:none; appearance:none;
+                                 accent-color:var(--accent); color-scheme:dark; }
+    .ob-dual input[type=range]::-webkit-slider-runnable-track { background:transparent; height:22px; }
+    .ob-dual input[type=range]::-moz-range-track { background:transparent; }
+    .ob-dual input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; pointer-events:auto; width:14px; height:14px;
+                                                       margin-top:4px; border-radius:50%; background:var(--accent);
+                                                       border:2px solid var(--surface); cursor:pointer; }
+    .ob-dual input[type=range]::-moz-range-thumb { pointer-events:auto; width:12px; height:12px; border-radius:50%;
+                                                   background:var(--accent); border:2px solid var(--surface); cursor:pointer; }
+
+    .ob-checks { display:flex; flex-wrap:wrap; gap:4px 12px; }
+    .ob-check { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--text); cursor:pointer; }
+    .ob-check input { accent-color:var(--accent); }
+
+    .ob-status { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin:0 2px 8px; }
+    .ob-stats { display:grid; gap:8px; grid-template-columns:repeat(5, minmax(0,1fr)); }
     .ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
 
     .ob-loaded {
@@ -217,32 +248,81 @@
         <div class="ob-card-body">
           <!-- The main dashboard's toggle, as-is (templates/index.html "Mode toggle"). -->
           <div class="seg">
-            <div class="seg-btn" :class="{on: ratioBasis==='entry'}" @click="ratioBasis = 'entry'">Entry time</div>
-            <div class="seg-btn" :class="{on: ratioBasis==='close'}" @click="ratioBasis = 'close'">Daily close</div>
+            <div class="seg-btn" :class="{on: ratioBasis==='entry'}" @click="setRatioBasis('entry')">Entry time</div>
+            <div class="seg-btn" :class="{on: ratioBasis==='close'}" @click="setRatioBasis('close')">Daily close</div>
           </div>
           <div class="ob-dim" style="margin-top:6px;"
                x-text="ratioBasis === 'entry' ? 'VIX-family bars at each trade\'s entry time' : 'Entry date\'s daily closes (the old app\'s basis — lookahead)'"></div>
         </div>
       </div>
 
-      <div class="ob-card">
+      <!-- One date range control (on the entry date), bounded by the log. -->
+      <div class="ob-card" :class="{ 'ob-active': dateActive() }">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Date range</span><span class="ob-phase">P3</span>
+          <span class="ob-card-title">Date range</span>
+          <a href="#" class="ob-card-sub ob-reset" x-show="dateActive()" @click.prevent="resetDate()">reset</a>
         </div>
-        <div class="ob-card-body ob-dim"
-             x-text="loaded ? (meta.date_min + ' → ' + meta.date_max) : 'Load a trade log'"></div>
+        <div class="ob-card-body">
+          <div class="ob-dim" x-show="!loaded">Load a trade log</div>
+          <div class="ob-date-row" x-show="loaded">
+            <input class="ob-input ob-date" type="date" :min="dateBounds.min" :max="filters.dateTo || dateBounds.max"
+                   x-model="filters.dateFrom" @change="onFilterChange()" aria-label="Entry date from">
+            <span class="ob-dim">–</span>
+            <input class="ob-input ob-date" type="date" :min="filters.dateFrom || dateBounds.min" :max="dateBounds.max"
+                   x-model="filters.dateTo" @change="onFilterChange()" aria-label="Entry date to">
+          </div>
+          <div class="ob-dim" x-show="loaded" x-text="'entry dates ' + dateBounds.min + ' – ' + dateBounds.max"></div>
+        </div>
       </div>
 
       <!-- One card per registry entry with filter: true. -->
       <template x-for="m in filterMetrics()" :key="m.key">
-        <div class="ob-card">
+        <div class="ob-card" :class="{ 'ob-active': loaded && isActive(m) }">
           <div class="ob-card-hdr">
-            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P3</span>
-            <span class="ob-card-sub" x-text="m.type === 'range' ? 'range · step ' + m.step : 'checkboxes'"></span>
+            <span class="ob-card-title" x-text="m.label"></span>
+            <a href="#" class="ob-card-sub ob-reset" x-show="loaded && isActive(m)" @click.prevent="resetFilter(m)">reset</a>
           </div>
-          <div class="ob-card-body ob-dim">
-            <div x-text="loaded ? columnSummary(m) : 'Load a trade log'"></div>
-            <div class="ob-parse-note warn" x-show="coverageNote(m)" x-text="coverageNote(m)"></div>
+          <div class="ob-card-body">
+            <div class="ob-dim" x-show="!loaded">Load a trade log</div>
+
+            <template x-if="loaded && m.type === 'range' && rangeOf(m)">
+              <div>
+                <div class="ob-range-vals">
+                  <span x-text="fmtVal(m, rangeOf(m).lo)"></span>
+                  <span x-text="fmtVal(m, rangeOf(m).hi)"></span>
+                </div>
+                <!-- Dual-handle slider: two range inputs sharing one track. -->
+                <div class="ob-dual">
+                  <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max" :step="rangeOf(m).step"
+                         :value="rangeOf(m).lo" @input="setLo(m, $event.target.value)" :aria-label="m.label + ' minimum'">
+                  <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max" :step="rangeOf(m).step"
+                         :value="rangeOf(m).hi" @input="setHi(m, $event.target.value)" :aria-label="m.label + ' maximum'">
+                </div>
+                <div class="ob-dim" x-text="rangeSummary(m)"></div>
+              </div>
+            </template>
+            <div class="ob-dim" x-show="loaded && m.type === 'range' && !rangeOf(m)"
+                 x-text="'no values in this log (' + metricColumn(m) + ')'"></div>
+
+            <template x-if="loaded && m.type === 'categorical' && catOf(m)">
+              <div>
+                <div class="ob-checks">
+                  <template x-for="o in catOf(m).options" :key="String(o.value)">
+                    <label class="ob-check">
+                      <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)">
+                      <span x-text="o.label"></span>
+                      <span class="ob-dim" x-text="o.count"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="ob-row" style="margin-top:4px;">
+                  <a href="#" class="ob-dim" @click.prevent="setAllCats(m, true)">all</a>
+                  <a href="#" class="ob-dim" @click.prevent="setAllCats(m, false)">none</a>
+                </div>
+              </div>
+            </template>
+
+            <div class="ob-parse-note" :class="{ warn: isActive(m) }" x-show="loaded && coverageNote(m)" x-text="coverageNote(m)"></div>
           </div>
         </div>
       </template>
@@ -257,6 +337,72 @@
         </div>
       </div>
 
+      <!-- Filter status: how much of the log the page is showing. -->
+      <div class="ob-status" x-show="loaded">
+        <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + (meta ? meta.n.toLocaleString() : 0) + ' trades'"></span>
+        <span class="ob-dim" x-show="activeCount()" x-text="' · ' + activeCount() + ' filter' + (activeCount() === 1 ? '' : 's') + ' active'"></span>
+        <a href="#" class="ob-reset" x-show="activeCount()" @click.prevent="resetAllFilters()">reset all filters</a>
+      </div>
+
+      <div class="ob-card" x-show="loaded && filteredCount === 0">
+        <div class="ob-empty">No trades match the current filters.</div>
+      </div>
+
+      <div class="ob-card" x-show="loaded && filteredCount > 0">
+        <div class="ob-card-hdr"><span class="ob-card-title">Summary</span></div>
+        <div class="ob-card-body ob-stats">
+          {{ m.stat_box('# Trades', "stat('num_trades')") | indent(10) | safe }}
+          {{ m.stat_box('Win %', "stat('win_pct')") | indent(10) | safe }}
+          {{ m.stat_box('Avg P/L', "stat('avg_pnl')", "statNum('avg_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Total P/L', "stat('total_pnl')", "statNum('total_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Days', "stat('avg_days_in_trade')") | indent(10) | safe }}
+          {{ m.stat_box('Max DD', "stat('max_drawdown')", "statNum('max_drawdown')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Win', "stat('avg_win_pnl')", "statNum('avg_win_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Loss', "stat('avg_loss_pnl')", "statNum('avg_loss_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Max Win', "stat('max_winner')", "statNum('max_winner')") | indent(10) | safe }}
+          {{ m.stat_box('Max Loss', "stat('max_loser')", "statNum('max_loser')") | indent(10) | safe }}
+        </div>
+      </div>
+
+      <!-- Kept in the DOM (x-show, not x-if) so the canvases exist before the
+           first render and Chart.js can size them. -->
+      <div class="ob-card" x-show="loaded && filteredCount > 0">
+        <div class="ob-card-hdr"><span class="ob-card-title">Performance over time</span>
+          <span class="ob-card-sub">by close date</span></div>
+        <div class="ob-card-body ob-sec-grid two">
+          <div class="chart-box">
+            <div class="chart-title">Cumulative P/L
+              <span class="ob-dim" x-text="stats ? moneyText(stats.total_pnl) : ''"></span></div>
+            <div class="chart-canvas"><canvas id="ob-cum-chart" role="img" aria-label="Cumulative P/L over time"></canvas></div>
+          </div>
+          <div class="chart-box">
+            <div class="chart-title">Drawdown
+              <span class="ob-dim" x-text="maxDDLine()"></span></div>
+            <div class="chart-canvas"><canvas id="ob-dd-chart" role="img" aria-label="Drawdown over time, maximum drawdown marked"></canvas></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- One card per registry entry with section: true, in registry order. -->
+      <template x-for="m in sectionMetrics()" :key="m.key">
+        <div class="ob-card">
+          <div class="ob-card-hdr">
+            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P4</span>
+            <span class="ob-card-sub"
+                  x-text="metricColumn(m) + (m.bins ? ' · ' + binCount(m) + ' bins, ' + m.bins.closed + '-closed' + (m.bins.labelEdge === 'left' ? ', labelled by left edge' : '') : ' · categorical')"></span>
+          </div>
+          <div class="ob-card-body">
+            <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'">
+              Skipped — this log has no values in <span x-text="' ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></span>
+            </div>
+            <div class="ob-sec-grid" :class="{ two: !m.hasScatter }" x-show="sectionState(m) !== 'skipped'">
+              <div class="ob-placeholder">Avg P/L by bin</div>
+              <div class="ob-placeholder">Total P/L by bin</div>
+              <div class="ob-placeholder" x-show="m.hasScatter">P/L vs metric (OLS)</div>
+            </div>
+          </div>
+        </div>
+      </template>
       <!-- Market-data checks: why any gap or VIX-family level is null. -->
       <div class="ob-card" x-show="loaded && hasMarketChecks()">
         <div class="ob-card-hdr"><span class="ob-card-title">Market-data checks</span>
@@ -281,44 +427,6 @@
           </template>
         </div>
       </div>
-
-      <div class="ob-card">
-        <div class="ob-card-hdr"><span class="ob-card-title">Summary</span><span class="ob-phase">P3</span></div>
-        <div class="ob-card-body">
-          <div class="ob-placeholder">
-            # Trades · Win % · Avg P/L · Total P/L · Avg Days · Max DD · Avg Win · Avg Loss · Max Win · Max Loss
-          </div>
-        </div>
-      </div>
-
-      <div class="ob-card">
-        <div class="ob-card-hdr"><span class="ob-card-title">Performance over time</span><span class="ob-phase">P3</span></div>
-        <div class="ob-card-body ob-sec-grid two">
-          <div class="ob-placeholder">Cumulative P/L</div>
-          <div class="ob-placeholder">Drawdown (max-DD point marked)</div>
-        </div>
-      </div>
-
-      <!-- One card per registry entry with section: true, in registry order. -->
-      <template x-for="m in sectionMetrics()" :key="m.key">
-        <div class="ob-card">
-          <div class="ob-card-hdr">
-            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P4</span>
-            <span class="ob-card-sub"
-                  x-text="metricColumn(m) + (m.bins ? ' · ' + binCount(m) + ' bins, ' + m.bins.closed + '-closed' + (m.bins.labelEdge === 'left' ? ', labelled by left edge' : '') : ' · categorical')"></span>
-          </div>
-          <div class="ob-card-body">
-            <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'">
-              Skipped — this log has no values in <span x-text="' ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></span>
-            </div>
-            <div class="ob-sec-grid" :class="{ two: !m.hasScatter }" x-show="sectionState(m) !== 'skipped'">
-              <div class="ob-placeholder">Avg P/L by bin</div>
-              <div class="ob-placeholder">Total P/L by bin</div>
-              <div class="ob-placeholder" x-show="m.hasScatter">P/L vs metric (OLS)</div>
-            </div>
-          </div>
-        </div>
-      </template>
     </main>
   </div>
 </body>

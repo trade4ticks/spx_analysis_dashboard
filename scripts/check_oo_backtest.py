@@ -465,10 +465,203 @@ def check_real_mesosim() -> None:
           "v2.13: full BacktestName kept (the source cut it to 'allantis'); TemplateName as strategy")
 
 
+STATS_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+for (const [key, t] of Object.entries(job)) {
+  const specs = (t.specs || []).map(s => s.kind === 'set' ? { ...s, allowed: new Set(s.allowed) } : s);
+  const idx = t.idx || obApplyFilters(t.cols, t.n, specs);
+  out[key] = { idx, stats: obStats(t.cols, idx), equity: obEquity(t.cols, idx) };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def run_stats_js(job: dict) -> dict:
+    p = subprocess.run(["node", "-e", STATS_DRIVER, str(JS)], input=json.dumps(job),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip())
+    return json.loads(p.stdout)
+
+
+def check_stats_parity() -> None:
+    """The page's summary stats, equity curve and filters vs the Python they
+    replace (utils/stats.py calculate_stats, calculations.py
+    calculate_drawdown and filter_dataframe's inclusive bounds)."""
+    print("summary stats, equity and filters: shipped JS vs stats.py / calculations.py")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("JS stats/equity/filter parity (node not installed)")
+        return
+    from app.oo_backtest import stats as pystats
+
+    rng = random.Random(3)
+    n = 400
+    base = pd.Timestamp("2021-01-04")
+    opened = sorted(base + pd.Timedelta(days=rng.randint(0, 900)) for _ in range(n))
+    df = pd.DataFrame({
+        "date_opened": opened,
+        # Unique close dates here: stats.py sorts with pandas' default (not
+        # stable) sort, so ties are compared separately below.
+        "date_closed": [base + pd.Timedelta(days=1000 + i * 2 + rng.randint(0, 1)) for i in rng.sample(range(n), n)],
+        "pnl": [0.0 if i % 37 == 0 else round(rng.gauss(40, 600), 2) for i in range(n)],
+        "days_in_trade": [None if i == 5 else rng.randint(0, 60) for i in range(n)],
+        "vix_level": [None if i % 11 == 0 else round(rng.uniform(10, 40), 2) for i in range(n)],
+        "exit_reason": [rng.choice(["Profit Target", "Stop Loss", "Expired"]) for _ in range(n)],
+    })
+    df["day_of_week"] = df["date_opened"].dt.dayofweek
+    cols = {c: [None if pd.isna(v) else (v.strftime("%Y-%m-%d") if isinstance(v, pd.Timestamp) else v)
+                for v in df[c]] for c in df.columns}
+
+    # Filters: VIX 12-35 inclusive, Mon-Thu, dates within 2021-03..2023-03, not Expired.
+    specs = [{"kind": "range", "column": "vix_level", "lo": 12.0, "hi": 35.0},
+             {"kind": "set", "column": "day_of_week", "allowed": [0, 1, 2, 3]},
+             {"kind": "date", "column": "date_opened", "from": "2021-03-01", "to": "2023-03-31"},
+             {"kind": "set", "column": "exit_reason", "allowed": ["Profit Target", "Stop Loss"]}]
+    want_mask = ((df["vix_level"] >= 12) & (df["vix_level"] <= 35) & df["day_of_week"].isin([0, 1, 2, 3])
+                 & (df["date_opened"] >= "2021-03-01") & (df["date_opened"] <= "2023-03-31")
+                 & df["exit_reason"].isin(["Profit Target", "Stop Loss"]))
+    ties = df.copy()
+    ties["date_closed"] = [base + pd.Timedelta(days=1000 + (i // 3)) for i in range(n)]   # three per day
+    ties_cols = dict(cols, date_closed=[d.strftime("%Y-%m-%d") for d in ties["date_closed"]])
+
+    got = run_stats_js({"all": {"cols": cols, "n": n, "idx": list(range(n))},
+                        "filtered": {"cols": cols, "n": n, "specs": specs},
+                        "none": {"cols": cols, "n": n, "specs": [{"kind": "range", "column": "vix_level", "lo": 99, "hi": 100}]},
+                        "ties": {"cols": ties_cols, "n": n, "idx": list(range(n))}})
+
+    def close(a, b):
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-6)
+
+    for key, sub in (("all", df), ("filtered", df[want_mask])):
+        want = pystats.calculate_stats(sub.copy())
+        js = got[key]["stats"]
+        bad = [k for k in js if not close(float(js[k]), float(want[k]))]
+        check(not bad, f"{key}: all ten stats equal stats.py over {len(sub)} trades" +
+              (f" — differ: {[(k, js[k], want[k]) for k in bad]}" if bad else ""))
+    check(got["filtered"]["idx"] == [i for i in range(n) if want_mask.iloc[i]],
+          f"filters select exactly the pandas rows (null VIX excluded, bounds inclusive) ({len(got['filtered']['idx'])})")
+    check(got["none"]["idx"] == [] and got["none"]["stats"]["num_trades"] == 0 and got["none"]["equity"]["maxDD"] is None,
+          "a filter matching nothing gives zero trades, zero stats, no drawdown point")
+
+    dd = calc.calculate_drawdown(df.copy())
+    js_pts = got["all"]["equity"]["points"]
+    check(len(js_pts) == len(dd) and all(close(p["cumulative"], c) and close(p["drawdown"], d)
+                                         for p, c, d in zip(js_pts, dd["cumulative_pnl"], dd["drawdown"])),
+          "cumulative P/L and drawdown equal calculate_drawdown point for point")
+    mdd = got["all"]["equity"]["maxDD"]
+    check(mdd is not None and close(mdd["drawdown"], dd["drawdown"].min())
+          and mdd["date"] == dd.loc[dd["drawdown"].idxmin(), "date_closed"].strftime("%Y-%m-%d"),
+          f"max-DD point is the deepest drawdown, and its date ({mdd and mdd['date']})")
+
+    # Ties: three trades per close date. Against a STABLE pandas sort the JS
+    # must agree exactly; that it keeps payload order is the point.
+    t = ties.sort_values("date_closed", kind="mergesort")
+    cum = t["pnl"].cumsum()
+    stable_dd = float((cum - cum.cummax()).min())
+    check(close(got["ties"]["stats"]["max_drawdown"], stable_dd),
+          f"same-day closes: max drawdown equals a stable-order pandas sort ({got['ties']['stats']['max_drawdown']:.2f})")
+
+
+COMPONENT_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const c = factory();
+c.$nextTick = f => f && f();
+c.registry = job.registry;
+c.setTrades(job.payload);
+const R = k => c.registry.find(m => m.key === k);
+const out = {};
+const copy = v => JSON.parse(JSON.stringify(v));   // snapshots, not live references
+const snap = () => ({ count: c.filteredCount, specs: c.activeSpecs().map(s => s.kind + ':' + s.column), active: c.activeCount() });
+out.initial = copy({ ...snap(), vix: c.rangeOf(R('vix')), premium: c.rangeOf(R('premium')), dow: c.catOf(R('day_of_week')),
+                exit: c.catOf(R('exit_reason')), dates: c.dateBounds, total: c.stats.total_pnl });
+c.setHi(R('vix'), c.rangeOf(R('vix')).max); out.vixFull = snap();
+c.setHi(R('vix'), 25); out.vixNarrow = copy({ ...snap(), vix: c.rangeOf(R('vix')) });
+c.setLo(R('vix'), 99); out.loClamped = copy(c.rangeOf(R('vix')));
+c.resetFilter(R('vix'));
+c.toggleCat(R('day_of_week'), 0); out.noMonday = snap();
+c.setAllCats(R('exit_reason'), false); out.noExit = snap();
+c.resetAllFilters(); out.reset = snap();
+c.filters.dateFrom = '2021-03-01'; c.onFilterChange(); out.date = snap();
+c.resetAllFilters();
+c.setHi(R('vix3m_vix'), c.rangeOf(R('vix3m_vix')).min); const before = copy(c.rangeOf(R('vix3m_vix')));
+c.setRatioBasis('close'); out.basis = { before, after: c.rangeOf(R('vix3m_vix')), specs: c.activeSpecs().map(s => s.column) };
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def check_component_filters() -> None:
+    """The page component's filter state, driven in node with the shipped JS:
+    bounds from the data, what counts as an ACTIVE filter, clamping, reset, the
+    ratio-basis switch, and that the shown count follows."""
+    print("filter component (shipped JS, stubbed Alpine)")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("filter component behaviour (node not installed)")
+        return
+    cols = {
+        "date_opened": ["2021-01-04", "2021-02-01", "2021-03-01", "2021-04-05", "2021-05-03", "2021-06-07"],
+        "date_closed": ["2021-01-20", "2021-02-15", "2021-03-19", "2021-04-20", "2021-05-20", "2021-06-21"],
+        "pnl": [100.0, -50.0, 200.0, 0.0, -300.0, 75.0],
+        "days_in_trade": [16, 14, 18, 15, 17, 14],
+        "day_of_week": [0, 0, 0, 0, 0, 1],
+        "exit_reason": ["Profit Target", "Stop Loss", "Profit Target", "Expired", "Stop Loss", None],
+        "premium": [1250.0, 900.0, 1600.0, -500.0, 1250.0, 900.0],
+        "vix_level": [17.2, None, 22.9, 31.5, 19.0, 25.0],
+        "vix3m_vix_ratio_entry": [1.10, None, 1.02, 0.95, 1.08, 1.11],
+        "vix3m_vix_ratio_close": [1.20, 1.05, 0.99, 0.90, 1.15, 1.30],
+    }
+    payload = {"n": 6, "columns": cols, "date_min": "2021-01-04", "date_max": "2021-06-21", "notes": {},
+               "suggested_name": "t", "market": {"joined": True}}
+    reg = json.loads(json.dumps(REGISTRY))
+    p = subprocess.run(["node", "-e", COMPONENT_DRIVER, str(JS)], input=json.dumps({"registry": reg, "payload": payload}),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"component driver ran ({p.stderr.strip()[:300]})")
+        return
+    o = json.loads(p.stdout)
+    i = o["initial"]
+    check(i["count"] == 6 and i["specs"] == [] and i["active"] == 0 and i["total"] == 25.0,
+          f"on load: every trade shown, no filter active ({i['count']}, {i['specs']})")
+    check((i["vix"]["min"], i["vix"]["max"], i["vix"]["n"]) == (17, 32, 5) and (i["premium"]["min"], i["premium"]["max"]) == (-500, 1600),
+          f"range bounds come from the data, snapped outward to the step (vix {i['vix']['min']}..{i['vix']['max']}, premium {i['premium']['min']}..{i['premium']['max']})")
+    check([x["label"] for x in i["dow"]["options"]] == ["Mon", "Tue", "Wed", "Thu", "Fri"] and len(i["dow"]["selected"]) == 5
+          and [x["label"] for x in i["exit"]["options"]] == ["Expired", "Profit Target", "Stop Loss", "(none)"],
+          f"day-of-week offers Mon-Fri; exit reasons come from the log, a null reason included; all on "
+          f"({[x['label'] for x in i['dow']['options']]}, {[x['label'] for x in i['exit']['options']]})")
+    check(i["dates"] == {"min": "2021-01-04", "max": "2021-06-07"}, f"date bounds from the entry dates ({i['dates']})")
+    check(o["vixFull"]["specs"] == [] and o["vixFull"]["count"] == 6,
+          "a slider moved back to its extent is not a filter (null VIX still shown)")
+    check(o["vixNarrow"]["specs"] == ["range:vix_level"] and o["vixNarrow"]["count"] == 4,
+          f"narrowing VIX to 17-25 keeps 17.2, 22.9, 19.0 and 25.0 (inclusive) and drops the null and 31.5 ({o['vixNarrow']['count']})")
+    check(o["loClamped"]["lo"] == o["loClamped"]["hi"] == 25,
+          f"a lower handle dragged past the upper one stops at it (lo {o['loClamped']['lo']}, hi {o['loClamped']['hi']})")
+    check(o["noMonday"]["count"] == 1 and o["noMonday"]["specs"] == ["set:day_of_week"], "unticking Monday leaves the Tuesday trade")
+    check(o["noExit"]["count"] == 0, "no exit reasons ticked -> zero trades (the empty state)")
+    check(o["reset"]["count"] == 6 and o["reset"]["active"] == 0, "reset all filters restores every trade")
+    check(o["date"]["count"] == 4 and o["date"]["specs"] == ["date:date_opened"], "a from-date of 2021-03-01 keeps the last four")
+    b = o["basis"]
+    check(b["before"]["max"] < 1.2 and b["after"]["max"] == 1.3 and b["specs"] == [],
+          f"switching ratio basis rebuilds that filter from the new column and drops the old narrowing ({b['after']})")
+
+
 def main() -> int:
     check_registry()
     check_against_source()
     check_binning()
+    check_stats_parity()
+    check_component_filters()
     check_dropped_scope()
     check_parsers()
     check_real_mesosim()

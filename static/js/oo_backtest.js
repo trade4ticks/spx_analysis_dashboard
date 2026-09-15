@@ -16,7 +16,11 @@
  * metric coverage.
  * Phase 2b: saved strategies -- save an upload (name + notes), pick one from
  * the dropdown and Load it (the stored file is re-parsed and re-joined), or
- * Delete it after a confirm. Filters, stats and charts are still stubs.
+ * Delete it after a confirm.
+ * Phase 3: filters (one date range, a dual slider per range metric bounded by
+ * the loaded data, checkboxes per categorical metric), the ten summary stats
+ * and the cumulative P/L + drawdown charts, all recomputed in the browser.
+ * The metric sections are still stubs.
  * ==========================================================================*/
 
 const OB_BLUE = '#3498db';   // positive (theme --accent)
@@ -25,7 +29,9 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0, file: null };
+const OB_DATA = { columns: null, n: 0, file: null, idx: [] };
+/* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
+const OB_CHARTS = { cum: null, dd: null };
 
 /* ── pure helpers (exercised in node by scripts/check_oo_backtest.py) ─────── */
 
@@ -70,11 +76,119 @@ function obDistinct(values) {
   return [...s].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
+const obNull = v => v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v));
+
+/* Row indices passing every ACTIVE filter. A filter is only passed in when it
+ * narrows something -- an untouched range lets null values through, a
+ * narrowed one drops them (a trade with no VIX9D cannot be "VIX9D 12-20").
+ *   {kind:'date',  column, from, to}   ISO strings, inclusive
+ *   {kind:'range', column, lo, hi}     inclusive, as filter_dataframe had it
+ *   {kind:'set',   column, allowed}    a Set of permitted values */
+function obApplyFilters(cols, n, specs) {
+  const idx = [];
+  outer:
+  for (let i = 0; i < n; i++) {
+    for (const f of specs) {
+      const col = cols[f.column];
+      const v = col ? col[i] : null;
+      if (f.kind === 'range') {
+        if (obNull(v) || v < f.lo || v > f.hi) continue outer;
+      } else if (f.kind === 'set') {
+        if (!f.allowed.has(v)) continue outer;
+      } else if (f.kind === 'date') {
+        if (obNull(v) || (f.from && v < f.from) || (f.to && v > f.to)) continue outer;
+      }
+    }
+    idx.push(i);
+  }
+  return idx;
+}
+
+/* Order for anything cumulative: by close date, ties kept in payload order
+ * (open date, then file order). A STABLE sort -- pandas' default sort in the
+ * source app's stats is not, so its max drawdown could differ across runs
+ * when several trades close the same day. */
+function obByClose(cols, idx) {
+  const dc = cols.date_closed;
+  return idx.slice().sort((a, b) => (dc[a] < dc[b] ? -1 : dc[a] > dc[b] ? 1 : a - b));
+}
+
+/* The summary figures, as utils/stats.py calculate_stats defines them --
+ * including its quirk that a zero-P/L trade counts as a LOSS for Avg Loss
+ * (losses are pnl <= 0) but not as a win. */
+function obStats(cols, idx) {
+  const n = idx.length;
+  const empty = { num_trades: 0, win_pct: 0, avg_pnl: 0, total_pnl: 0, avg_days_in_trade: 0,
+                  max_drawdown: 0, avg_win_pnl: 0, avg_loss_pnl: 0, max_winner: 0, max_loser: 0 };
+  if (!n) return empty;
+  const pnl = cols.pnl, dit = cols.days_in_trade || [];
+  let total = 0, wins = 0, winSum = 0, losses = 0, lossSum = 0, maxW = -Infinity, maxL = Infinity;
+  let ditSum = 0, ditN = 0;
+  for (const i of idx) {
+    const p = pnl[i];
+    total += p;
+    if (p > 0) { wins++; winSum += p; } else { losses++; lossSum += p; }
+    if (p > maxW) maxW = p;
+    if (p < maxL) maxL = p;
+    if (!obNull(dit[i])) { ditSum += dit[i]; ditN++; }
+  }
+  const eq = obEquity(cols, idx);
+  return {
+    num_trades: n,
+    win_pct: wins / n * 100,
+    avg_pnl: total / n,
+    total_pnl: total,
+    avg_days_in_trade: ditN ? ditSum / ditN : 0,
+    max_drawdown: eq.maxDD ? eq.maxDD.drawdown : 0,
+    avg_win_pnl: wins ? winSum / wins : 0,
+    avg_loss_pnl: losses ? lossSum / losses : 0,
+    max_winner: maxW,
+    max_loser: maxL,
+  };
+}
+
+/* Cumulative P/L, running peak and drawdown per trade in close order, as
+ * calculations.py calculate_drawdown. maxDD is the deepest point (first
+ * occurrence), or null when the curve never falls below its peak. */
+function obEquity(cols, idx) {
+  const order = obByClose(cols, idx);
+  const pnl = cols.pnl, dc = cols.date_closed;
+  const points = [];
+  let cum = 0, peak = -Infinity, maxDD = null;
+  for (const i of order) {
+    cum += pnl[i];
+    if (cum > peak) peak = cum;
+    const dd = cum - peak;
+    const pt = { row: i, date: dc[i], pnl: pnl[i], cumulative: cum, peak, drawdown: dd };
+    points.push(pt);
+    if (dd < 0 && (maxDD === null || dd < maxDD.drawdown)) maxDD = pt;
+  }
+  return { points, maxDD };
+}
+
+/* Days since the epoch for an ISO date, for a linear x axis (no date adapter). */
+function obDay(iso) { return Date.parse(iso + 'T00:00:00Z') / 86400000; }
+function obIsoDay(d) { return new Date(Math.round(d) * 86400000).toISOString().slice(0, 10); }
+
+function obMoney(v, digits = 0) {
+  if (obNull(v)) return '—';
+  const a = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  return (v < 0 ? '-$' : '$') + a;
+}
+
 /* "SPX Iron Condor 45DTE (1,284 trades, 2021-01-04 – 2026-03-13)" */
 function obSavedLabel(s) {
   if (!s) return '';
   const n = Number(s.trade_count || 0).toLocaleString('en-US');
   return `${s.name} (${n} trade${s.trade_count === 1 ? '' : 's'}, ${s.date_min || '—'} – ${s.date_max || '—'})`;
+}
+
+/* Snap a data extent outward to the slider's step, so the untouched slider
+ * spans every value (a floor/ceil at 0.1 on 0.37 must not cut off 0.37). */
+function obStepDecimals(step) { return (String(step).split('.')[1] || '').length; }
+function obSnap(v, step, how) {
+  const dec = obStepDecimals(step);
+  return +((Math[how](v / step + (how === 'floor' ? 1e-9 : -1e-9))) * step).toFixed(dec);
 }
 
 function obFmt(v, fmt) {
@@ -123,6 +237,14 @@ document.addEventListener('alpine:init', () => {
     saveBusy: false,
     saveError: '',
     saveMsg: '',
+
+    // Filters. `ranges` and `cats` are keyed by registry key and built from
+    // the loaded data by initFilters(); nothing here is a static default.
+    filters: { dateFrom: '', dateTo: '', ranges: {}, cats: {} },
+    dateBounds: { min: '', max: '' },
+    filteredCount: 0,
+    stats: null,
+    _rafPending: false,
 
     // Which ratio basis the sections read: entry-time bars (default) or the
     // entry date's daily closes. Temporary -- one basis is deleted, and this
@@ -213,6 +335,8 @@ document.addEventListener('alpine:init', () => {
       const { columns, ...meta } = payload;
       this.meta = meta;
       this.loaded = true;
+      this.initFilters();
+      this.$nextTick(() => this.recompute());
     },
 
     /* ── saved strategies ──────────────────────────────────────────────── */
@@ -317,6 +441,248 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* ── filters ───────────────────────────────────────────────────────── */
+
+    /* Bounds and options from THE LOADED LOG, never static defaults: every
+     * range slider opens spanning the data's own extent (snapped outward to
+     * its step), every checkbox on. */
+    initFilters() {
+      const cols = OB_DATA.columns || {};
+      const opened = (cols.date_opened || []).filter(Boolean);
+      const dmin = opened.length ? opened.reduce((a, b) => (a < b ? a : b)) : '';
+      const dmax = opened.length ? opened.reduce((a, b) => (a > b ? a : b)) : '';
+      this.dateBounds = { min: dmin, max: dmax };
+      const ranges = {}, cats = {};
+      for (const m of this.registry.filter(x => x.filter)) {
+        if (m.type === 'range') {
+          const r = this.rangeStateFor(m);
+          if (r) ranges[m.key] = r;
+        } else {
+          const vals = cols[m.column] || [];
+          const counts = new Map();
+          for (const v of vals) counts.set(v, (counts.get(v) || 0) + 1);
+          let options;
+          if (m.categories) {
+            options = m.categories.map(c => ({ value: c.value, label: c.label, count: counts.get(c.value) || 0 }));
+          } else {
+            options = obDistinct(vals).map(v => ({ value: v, label: String(v), count: counts.get(v) }));
+            if (counts.has(null)) options.push({ value: null, label: '(none)', count: counts.get(null) });
+          }
+          cats[m.key] = { options, selected: options.map(o => o.value) };
+        }
+      }
+      this.filters = { dateFrom: dmin, dateTo: dmax, ranges, cats };
+    },
+
+    rangeStateFor(m) {
+      const ext = obExtent((OB_DATA.columns || {})[this.metricColumn(m)]);
+      if (!ext) return null;
+      const min = obSnap(ext.min, m.step, 'floor'), max = obSnap(ext.max, m.step, 'ceil');
+      return { min, max, lo: min, hi: max, step: m.step, n: ext.n };
+    },
+
+    rangeOf(m) { return this.filters.ranges[m.key] || null; },
+    catOf(m) { return this.filters.cats[m.key] || null; },
+
+    dateActive() {
+      return !!(this.dateBounds.min && ((this.filters.dateFrom && this.filters.dateFrom > this.dateBounds.min)
+        || (this.filters.dateTo && this.filters.dateTo < this.dateBounds.max)));
+    },
+
+    isActive(m) {
+      const r = this.rangeOf(m), c = this.catOf(m);
+      if (m.type === 'range') return !!r && (r.lo > r.min || r.hi < r.max);
+      return !!c && c.selected.length < c.options.length;
+    },
+
+    activeCount() {
+      return (this.dateActive() ? 1 : 0) + this.registry.filter(m => m.filter && this.isActive(m)).length;
+    },
+
+    setLo(m, raw) {
+      const r = this.rangeOf(m);
+      if (!r) return;
+      r.lo = Math.min(+raw, r.hi);
+      this.onFilterChange();
+    },
+
+    setHi(m, raw) {
+      const r = this.rangeOf(m);
+      if (!r) return;
+      r.hi = Math.max(+raw, r.lo);
+      this.onFilterChange();
+    },
+
+    toggleCat(m, value) {
+      const c = this.catOf(m);
+      if (!c) return;
+      const i = c.selected.findIndex(v => v === value);
+      if (i >= 0) c.selected.splice(i, 1); else c.selected.push(value);
+      this.onFilterChange();
+    },
+
+    setAllCats(m, on) {
+      const c = this.catOf(m);
+      if (!c) return;
+      c.selected = on ? c.options.map(o => o.value) : [];
+      this.onFilterChange();
+    },
+
+    resetFilter(m) {
+      if (m.type === 'range') {
+        const r = this.rangeOf(m);
+        if (r) { r.lo = r.min; r.hi = r.max; }
+      } else {
+        this.setAllCats(m, true);
+        return;
+      }
+      this.onFilterChange();
+    },
+
+    resetDate() {
+      this.filters.dateFrom = this.dateBounds.min;
+      this.filters.dateTo = this.dateBounds.max;
+      this.onFilterChange();
+    },
+
+    resetAllFilters() {
+      this.initFilters();
+      this.onFilterChange();
+    },
+
+    setRatioBasis(basis) {
+      if (this.ratioBasis === basis) return;
+      this.ratioBasis = basis;
+      // A basis switch changes the COLUMN a ratio filter reads, so its bounds
+      // come from the new column and any narrowing on the old one is dropped.
+      for (const m of this.registry.filter(x => x.basis && x.filter)) {
+        const r = this.rangeStateFor(m);
+        if (r) this.filters.ranges[m.key] = r; else delete this.filters.ranges[m.key];
+      }
+      this.onFilterChange();
+    },
+
+    activeSpecs() {
+      const specs = [];
+      if (this.dateActive()) {
+        specs.push({ kind: 'date', column: 'date_opened', from: this.filters.dateFrom, to: this.filters.dateTo });
+      }
+      for (const m of this.registry.filter(x => x.filter)) {
+        if (!this.isActive(m)) continue;
+        if (m.type === 'range') {
+          const r = this.rangeOf(m);
+          specs.push({ kind: 'range', column: this.metricColumn(m), lo: r.lo, hi: r.hi });
+        } else {
+          specs.push({ kind: 'set', column: m.column, allowed: new Set(this.catOf(m).selected) });
+        }
+      }
+      return specs;
+    },
+
+    /* Slider input fires continuously; recompute at most once per frame. */
+    onFilterChange() {
+      if (this._rafPending) return;
+      this._rafPending = true;
+      const run = () => { this._rafPending = false; this.recompute(); };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run); else run();
+    },
+
+    recompute() {
+      if (!OB_DATA.columns) return;
+      const idx = obApplyFilters(OB_DATA.columns, OB_DATA.n, this.activeSpecs());
+      OB_DATA.idx = idx;
+      this.filteredCount = idx.length;
+      this.stats = obStats(OB_DATA.columns, idx);
+      this.renderPerformance(obEquity(OB_DATA.columns, idx));
+    },
+
+    fmtVal(m, v) { return obFmt(v, m.format); },
+    moneyText(v) { return obMoney(v); },
+
+    rangeSummary(m) {
+      const r = this.rangeOf(m);
+      return r ? `${r.n.toLocaleString()} trades with a value · data ${obFmt(r.min, m.format)} … ${obFmt(r.max, m.format)}` : '';
+    },
+
+    /* ── summary stats ─────────────────────────────────────────────────── */
+
+    stat(key) {
+      const st = this.stats;
+      if (!st) return '—';
+      switch (key) {
+        case 'num_trades': return st.num_trades.toLocaleString();
+        case 'win_pct': return st.win_pct.toFixed(1) + '%';
+        case 'avg_days_in_trade': return st.avg_days_in_trade.toFixed(1);
+        default: return obMoney(st[key], ['avg_pnl', 'avg_win_pnl', 'avg_loss_pnl'].includes(key) ? 2 : 0);
+      }
+    },
+
+    statNum(key) { return this.stats ? this.stats[key] : 0; },
+
+    /* ── performance charts ────────────────────────────────────────────── */
+
+    maxDDLine() {
+      const st = this.stats;
+      if (!st || !st.num_trades) return '';
+      const eq = obEquity(OB_DATA.columns, OB_DATA.idx);
+      return eq.maxDD ? `max ${obMoney(eq.maxDD.drawdown)} on ${eq.maxDD.date}` : 'no drawdown';
+    },
+
+    renderPerformance(eq) {
+      if (typeof Chart === 'undefined') return;
+      const cumEl = document.getElementById('ob-cum-chart');
+      const ddEl = document.getElementById('ob-dd-chart');
+      if (!cumEl || !ddEl) return;
+      const pts = eq.points;
+      const cum = pts.map(p => ({ x: obDay(p.date), y: p.cumulative, p }));
+      const dd = pts.map(p => ({ x: obDay(p.date), y: p.drawdown, p }));
+      const mark = eq.maxDD ? [{ x: obDay(eq.maxDD.date), y: eq.maxDD.drawdown, p: eq.maxDD }] : [];
+
+      const axis = (money) => ({
+        type: 'linear',
+        grid: { color: 'rgba(255,255,255,0.05)' },
+        border: { display: false },
+        ticks: { color: '#9a9a9a', font: { size: 10 }, maxTicksLimit: money ? 6 : 7,
+                 callback: money ? (v => obMoney(v)) : (v => obIsoDay(v).slice(0, 7)) },
+      });
+      // The x axis spans exactly the plotted dates; Chart.js would otherwise
+      // round a linear scale out to "nice" values months beyond the data.
+      const xr = cum.length ? { min: cum[0].x, max: cum[cum.length - 1].x } : {};
+      const base = (tooltipLabel) => ({
+        responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+        interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        scales: { x: { ...axis(false), ...xr }, y: axis(true) },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { title: it => it[0].raw.p.date, label: tooltipLabel } },
+        },
+      });
+
+      const cumData = { datasets: [{
+        data: cum, borderColor: OB_BLUE, backgroundColor: 'rgba(52,152,219,0.10)', fill: 'origin',
+        borderWidth: 2, pointRadius: 0, pointHitRadius: 6, tension: 0 }] };
+      const ddData = { datasets: [
+        { data: dd, borderColor: OB_PINK, backgroundColor: 'rgba(232,67,147,0.16)', fill: 'origin',
+          borderWidth: 2, pointRadius: 0, pointHitRadius: 6, tension: 0 },
+        // The deepest point: a marker with a surface-coloured ring so it reads
+        // over the line, and hover-only like the rest.
+        { data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6, pointBackgroundColor: OB_PINK,
+          pointBorderColor: '#2d2d2d', pointBorderWidth: 2, showLine: false },
+      ] };
+
+      if (OB_CHARTS.cum) { OB_CHARTS.cum.data = cumData; Object.assign(OB_CHARTS.cum.options.scales.x, xr); OB_CHARTS.cum.update('none'); }
+      else {
+        OB_CHARTS.cum = new Chart(cumEl.getContext('2d'), { type: 'line', data: cumData,
+          options: base(c => `Cumulative ${obMoney(c.raw.p.cumulative)} · trade ${obMoney(c.raw.p.pnl)}`) });
+      }
+      if (OB_CHARTS.dd) { OB_CHARTS.dd.data = ddData; Object.assign(OB_CHARTS.dd.options.scales.x, xr); OB_CHARTS.dd.update('none'); }
+      else {
+        OB_CHARTS.dd = new Chart(ddEl.getContext('2d'), { type: 'line', data: ddData,
+          options: base(c => (c.datasetIndex === 1 ? 'Max drawdown ' : 'Drawdown ') +
+                             `${obMoney(c.raw.p.drawdown)} · peak ${obMoney(c.raw.p.peak)}`) });
+      }
+    },
+
     /* ── registry-driven views ─────────────────────────────────────────── */
 
     filterMetrics() { return this.registry.filter(m => m.filter); },
@@ -343,28 +709,13 @@ document.addEventListener('alpine:init', () => {
     coverageNote(m) {
       const k = this.tradesBeforeCoverage(m);
       if (!k) return '';
-      return `Data starts ${m.minDate} — filtering on this drops ${k.toLocaleString()} earlier trade${k === 1 ? '' : 's'}`;
+      const s = k === 1 ? '' : 's';
+      return this.isActive(m)
+        ? `Data starts ${m.minDate} — this filter is dropping ${k.toLocaleString()} earlier trade${s}`
+        : `Data starts ${m.minDate} — filtering on this drops ${k.toLocaleString()} earlier trade${s}`;
     },
 
     binCount(m) { return m.bins ? m.bins.labels.length : null; },
-
-    /* What a sidebar card shows about its column before the controls exist:
-     * the loaded extent (range) or the distinct values (categorical). */
-    columnSummary(m) {
-      if (!this.loaded) return '';
-      if (!this.hasColumn(m)) return 'no values in this log';
-      const vals = OB_DATA.columns[this.metricColumn(m)];
-      if (m.type === 'range') {
-        const x = obExtent(vals);
-        return `${obFmt(x.min, m.format)} … ${obFmt(x.max, m.format)}  (${x.n} trades)`;
-      }
-      const d = obDistinct(vals);
-      if (m.categories) {
-        const byVal = Object.fromEntries(m.categories.map(c => [c.value, c.label]));
-        return d.map(v => byVal[v] ?? String(v)).join(', ');
-      }
-      return d.join(', ');
-    },
 
     /* A range section is skipped when its column is absent or all-null. */
     sectionState(m) {
