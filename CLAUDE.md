@@ -28,6 +28,24 @@ the column), **no data** (the current filter leaves none), **ready**. `check_oo_
 holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a
 filtered subset.
 
+**Summary stats, capital, Deployment.** 15 stats, three rows of five. The added five
+(`obExtraStats`): years = (last exit − first entry) / 365.25 over the filtered trades;
+Avg Annual P/L = total / years; Calmar = that / |max DD $|; Profit Factor = gross wins /
+|gross losses|; Avg Annual Return % = avg annual P/L / (peak concurrency × capital); Avg
+P/L % = avg P/L / capital. **Capital per position** is a display input (default $10,000):
+it recomputes only those figures and the Deployment chart, no re-filter, no re-parse. It
+is stored as `capital_per_position` on `oo_backtest_strategies` (NULL = default; column
+added by `ADD COLUMN IF NOT EXISTS`); on a loaded saved strategy a committed change is
+written with `PUT /strategies/{id}/capital`, which leaves `updated_at` (the list order)
+alone. **Deployment** (a registry `pane` in the Day of Week row) counts open positions per
+**SPX session** from the rollup (`market.session_days`, sent as `market.spx_sessions`),
+entry and exit day both inclusive. Every session in the span is a point, so a stretch with
+nothing open is a run of zeros. One stepped line; the right axis is the left × capital,
+pinned to the same range, not a second trace. Still-open MesoSim positions are excluded by
+the parser and so contribute nothing (gate-checked against the v3.1 fixture). Trades
+opening or closing off an SPX session (e.g. 2026-04-08) are counted from the next session
+and reported under the chart.
+
 ### What `main.index_ohlc` actually looks like
 
 5-minute bars, SPX/VIX/VIX3M/VIX9D full OHLC, 2017-01-01 → present.

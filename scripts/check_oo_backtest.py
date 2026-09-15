@@ -717,6 +717,148 @@ def check_section_parity() -> None:
           "no OLS line from fewer than 3 points, or when every x is identical")
 
 
+
+DEPLOY_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+for (const [key, t] of Object.entries(job)) {
+  const idx = t.idx || [...Array(t.cols.pnl.length).keys()];
+  const conc = obConcurrency(t.cols, idx, t.sessions);
+  const stats = obStats(t.cols, idx);
+  out[key] = { conc, stats, extra: obExtraStats(t.cols, idx, stats, t.capital, conc.peak) };
+}
+process.stdout.write(JSON.stringify(out, (k, v) => (v === Infinity ? 'Infinity' : v)));
+"""
+
+
+def _weekdays(lo: str, hi: str, drop=()) -> list[str]:
+    days = pd.bdate_range(lo, hi)
+    return [d.strftime("%Y-%m-%d") for d in days if d.strftime("%Y-%m-%d") not in set(drop)]
+
+
+def check_deployment_and_extra_stats() -> None:
+    """Concurrent positions and the five added figures: shipped JS against a
+    brute-force count and a direct pandas computation written here, not ported
+    from the JS. Includes a six-month stretch with nothing open (must be a run
+    of zeros, not a gap), a filtered subset, and the real MesoSim fixture's
+    still-open positions (must contribute nothing)."""
+    print("deployment + added stats: shipped JS vs brute force / pandas")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("deployment/extra-stats parity (node not installed)")
+        return
+    from app.oo_backtest import stats as pystats
+    from app.oo_backtest.market import session_days
+
+    rng = random.Random(23)
+    holidays = ["2021-07-05", "2021-11-25", "2022-01-17"]
+    sessions = _weekdays("2021-01-04", "2022-12-30", holidays)
+    # Trades avoid 2021-09-01 .. 2022-02-28 entirely: six months flat at zero.
+    usable = [d for d in sessions if not ("2021-08-20" <= d <= "2022-02-28")]
+    trades = []
+    for _ in range(160):
+        a = rng.randrange(len(usable) - 30)
+        b = min(a + rng.randint(0, 25), len(usable) - 1)
+        if usable[a] <= "2021-08-20" < usable[b]:
+            b = a
+        trades.append((usable[a], usable[b], 0.0 if rng.random() < 0.05 else round(rng.gauss(50, 400), 2)))
+    trades.append(("2021-07-05", "2021-07-07", 10.0))   # opens on a holiday: counted from the next session
+    trades.sort()
+    cols = {"date_opened": [t[0] for t in trades], "date_closed": [t[1] for t in trades],
+            "pnl": [t[2] for t in trades], "days_in_trade": [1] * len(trades)}
+    subset = [i for i in range(len(trades)) if rng.random() < 0.5]
+
+    def brute(idx):
+        lo = min(cols["date_opened"][i] for i in idx)
+        hi = max(cols["date_closed"][i] for i in idx)
+        days = [d for d in sessions if lo <= d <= hi]
+        return days, [sum(1 for i in idx if cols["date_opened"][i] <= d <= cols["date_closed"][i]) for d in days]
+
+    def extra(idx, capital, peak):
+        df = pd.DataFrame({k: [cols[k][i] for i in idx] for k in cols})
+        df["date_opened"] = pd.to_datetime(df["date_opened"])
+        df["date_closed"] = pd.to_datetime(df["date_closed"])
+        st = pystats.calculate_stats(df.copy())
+        years = (df["date_closed"].max() - df["date_opened"].min()).days / 365.25
+        ann = st["total_pnl"] / years
+        gw, gl = df.loc[df["pnl"] > 0, "pnl"].sum(), df.loc[df["pnl"] < 0, "pnl"].sum()
+        return {"avg_annual_pnl": ann, "calmar": ann / abs(st["max_drawdown"]),
+                "profit_factor": gw / abs(gl), "avg_pnl_pct": st["avg_pnl"] / capital * 100,
+                "avg_annual_return_pct": ann / (peak * capital) * 100}
+
+    # Real MesoSim 3.1 fixture: 4 closed trades through 2023-12-12, and two
+    # positions (222, 223) still open from 2026-03. Sessions run to 2026-12-31.
+    mp = _parse((FIXTURES / "v3_1_allantis_v2_mon.json").read_bytes(), "v3.events.json")
+    mc = {k: mp["columns"][k] for k in ("date_opened", "date_closed", "pnl", "days_in_trade")}
+    m_sessions = _weekdays("2021-01-04", "2026-12-31")
+    planted = {k: list(v) for k, v in mc.items()}
+    for d in ("2026-03-16", "2026-03-23"):   # what "running to the end" would look like
+        planted["date_opened"].append(d); planted["date_closed"].append("2026-12-31")
+        planted["pnl"].append(0.0); planted["days_in_trade"].append(None)
+
+    job = {"all": {"cols": cols, "sessions": sessions, "capital": 10000},
+           "subset": {"cols": cols, "sessions": sessions, "capital": 2500, "idx": subset},
+           "nocap": {"cols": cols, "sessions": sessions, "capital": None},
+           "nolosses": {"cols": {"date_opened": ["2021-01-04", "2021-02-01"], "date_closed": ["2021-01-05", "2021-02-02"],
+                                 "pnl": [5.0, 7.0], "days_in_trade": [1, 1]}, "sessions": sessions, "capital": 1000},
+           "nosessions": {"cols": cols, "sessions": [], "capital": 10000},
+           "meso": {"cols": mc, "sessions": m_sessions, "capital": 10000},
+           "meso_planted": {"cols": planted, "sessions": m_sessions, "capital": 10000}}
+    p = subprocess.run(["node", "-e", DEPLOY_DRIVER, str(JS)], input=json.dumps(job),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"deployment driver ran ({p.stderr.strip()[:300]})")
+        return
+    got = json.loads(p.stdout)
+
+    def close(a, b):
+        return a is not None and b is not None and math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+
+    for key, idx in (("all", list(range(len(trades)))), ("subset", subset)):
+        days, counts = brute(idx)
+        c = got[key]["conc"]
+        check(c["days"] == days and c["counts"] == counts,
+              f"{key}: concurrency equals a brute-force count on every one of {len(days)} sessions")
+        check(c["peak"] == max(counts) and c["peakDay"] == days[counts.index(max(counts))],
+              f"{key}: peak {c['peak']} on {c['peakDay']} (the first day it is reached)")
+        want = extra(idx, job[key]["capital"], max(counts))
+        bad = {k: (got[key]["extra"][k], v) for k, v in want.items() if not close(got[key]["extra"][k], v)}
+        check(not bad, f"{key}: Avg Annual P/L, Calmar, Profit Factor, Avg Annual Return %, Avg P/L % equal pandas"
+              + (f" — differ {bad}" if bad else ""))
+
+    c = got["all"]["conc"]
+    gap = [n for d, n in zip(c["days"], c["counts"]) if "2021-09-01" <= d <= "2022-02-28"]
+    check(len(gap) > 120 and not any(gap),
+          f"six months with nothing open: {len(gap)} consecutive sessions at zero, not a collapsed gap")
+    check("2021-07-05" not in c["days"] and c["offSession"] == 1,
+          f"a trade opening on a non-session day is counted from the next session and reported ({c['offSession']})")
+    check(got["nocap"]["extra"]["avg_pnl_pct"] is None and got["nocap"]["extra"]["avg_annual_return_pct"] is None
+          and got["nocap"]["extra"]["calmar"] is not None,
+          "no capital: the two % figures are null; capital-free figures still computed")
+    check(got["nolosses"]["extra"]["profit_factor"] == "Infinity", "profit factor with wins and no losses is Infinity")
+    check(got["nosessions"]["conc"]["days"] == [] and got["nosessions"]["conc"]["peak"] == 0,
+          "no session list (market not joined): an empty series, no invented calendar")
+
+    m, pl = got["meso"]["conc"], got["meso_planted"]["conc"]
+    check(mp["notes"]["open_positions"] == 2 and mp["n"] == 4 and m["days"][-1] == "2023-12-12"
+          and all(d <= "2023-12-12" for d in m["days"]) and m["unclosed"] == 0,
+          f"MesoSim: the 2 still-open positions are not trades, so the series ends at the last exit ({m['days'][-1]})")
+    check(pl["days"][-1] == "2026-12-31" and pl["counts"][pl["days"].index("2026-03-23")] == 2,
+          "planted: had they been kept with an open-ended exit they WOULD run to the end — the check can tell")
+
+    # session_days: SPX sessions only, clipped to first entry .. last exit.
+    daily = pd.DataFrame({"trade_date": pd.to_datetime(["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"]).date,
+                          "spx_session": [True, True, False, True, True]})
+    tdf = pd.DataFrame({"date_opened": pd.to_datetime(["2026-04-07"]), "date_closed": pd.to_datetime(["2026-04-09"])})
+    sd = session_days(daily, tdf)
+    check(sd == ["2026-04-07", "2026-04-09"],
+          f"session_days: SPX sessions within the log's span; 2026-04-08 (no SPX bars) is not one ({sd})")
+
+
 COMPONENT_DRIVER = r"""
 const fs = require('fs');
 let factory;
@@ -751,6 +893,16 @@ out.sectionsAll = { states: states(), vix: c.sections.vix, sub: c.sectionSub(R('
 // Only the 2021-02-01 trade, whose VIX is null: the log HAS VIX, this filter does not.
 c.filters.dateFrom = '2021-02-01'; c.filters.dateTo = '2021-02-01'; c.onFilterChange();
 out.sectionsOne = { count: c.filteredCount, states: states() };
+c.resetAllFilters();
+const cap = () => ({ count: c.filteredCount, pnlPct: c.stat('avg_pnl_pct'), retPct: c.stat('avg_annual_return_pct'),
+                     pf: c.stat('profit_factor'), calmar: c.stat('calmar'), extra: c.extra, deploy: c.deploy });
+out.cap10k = cap();
+c.capitalInput = ''; c.recomputeCapital(); out.capBlank = cap();
+c.capitalInput = '100'; c.recomputeCapital(); out.cap100 = cap();
+c.capitalInput = '50'; c.recomputeCapital(); out.cap5k = cap();
+c.capitalInput = '-3'; c.recomputeCapital(); out.capBad = cap();
+c.setTrades({ ...job.payload, saved: { id: 7, name: 's', capital_per_position: 2500 } }); out.capSaved = c.capitalInput;
+c.setTrades({ ...job.payload, saved: { id: 8, name: 't', capital_per_position: null } }); out.capSavedNull = c.capitalInput;
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -809,6 +961,16 @@ def check_component_filters() -> None:
     b = o["basis"]
     check(b["before"]["max"] < 1.2 and b["after"]["max"] == 1.3 and b["specs"] == [],
           f"switching ratio basis rebuilds that filter from the new column and drops the old narrowing ({b['after']})")
+    k10, kb, k5, kbad = o["cap10k"], o["capBlank"], o["cap5k"], o["capBad"]
+    k100 = o["cap100"]
+    check(k10["pnlPct"] == "0.04%" and k100["pnlPct"] == "4.17%" and k5["pnlPct"] == "8.33%" and k5["count"] == k10["count"] == 6,
+          f"capital changes Avg P/L % (avg $4.17: of $10k, $100, $50) without touching the trades ({k10['pnlPct']}, {k100['pnlPct']}, {k5['pnlPct']})")
+    check(kb["pnlPct"] == "" and kb["retPct"] == "" and kbad["pnlPct"] == "" and kb["pf"] == k10["pf"] and kb["calmar"] == k10["calmar"],
+          f"blank or non-positive capital: both % figures blank, the others unchanged ({kb['pnlPct']!r}, {kbad['pnlPct']!r})")
+    check(o["capSaved"] == "2500" and o["capSavedNull"] == "10000",
+          f"a loaded saved strategy brings its capital; none stored means the $10,000 default ({o['capSaved']}, {o['capSavedNull']})")
+    check(k10["deploy"]["hasSessions"] is False and k10["deploy"]["peak"] == 0,
+          "no spx_sessions in the payload: deployment has no series and says so (hasSessions false)")
     sa, so = o["sectionsAll"], o["sectionsOne"]
     want_all = {"day_of_week": "ready", "year": "skipped", "gap": "skipped", "vix_gap": "skipped", "premium": "ready",
                 "vix": "ready", "vix3m": "skipped", "vix9d": "skipped", "vix3m_vix": "ready", "vix_vix9d": "skipped"}
@@ -828,6 +990,7 @@ def main() -> int:
     check_stats_parity()
     check_section_parity()
     check_component_filters()
+    check_deployment_and_extra_stats()
     check_dropped_scope()
     check_parsers()
     check_real_mesosim()

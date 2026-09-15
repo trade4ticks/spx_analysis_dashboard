@@ -577,6 +577,39 @@ async def check_saved_strategies(pool) -> None:
         except ValueError:
             check(True, f"a {why} name is refused")
 
+    # Capital per position: saved with the file, read back, changed alone.
+    cap = await store.save_strategy(pool, name="with capital", notes="", content=raw, trade_count=4, replace=False,
+                                    capital_per_position="12500", **common)
+    check(cap["capital_per_position"] == 12500.0, f"capital per position is stored on save ({cap['capital_per_position']})")
+    no_cap = await store.save_strategy(pool, name="no capital", notes="", content=raw, trade_count=4, replace=False,
+                                       capital_per_position="", **common)
+    check(no_cap["capital_per_position"] is None, "a blank capital is stored as NULL (the page default)")
+    moved = await store.set_capital(pool, cap["id"], 7500)
+    meta_c, _ = await store.load_strategy_file(pool, cap["id"])
+    check(moved["capital_per_position"] == 7500.0 and meta_c["capital_per_position"] == 7500.0
+          and moved["updated_at"] == cap["updated_at"],
+          "set_capital changes only the capital; a load returns it; updated_at (the list order) is untouched")
+    for bad in (0, -5, "abc"):
+        try:
+            await store.set_capital(pool, cap["id"], bad)
+            check(False, f"capital {bad!r} is refused")
+        except ValueError:
+            check(True, f"capital {bad!r} is refused")
+    check(await store.set_capital(pool, 999999, 100) is None, "set_capital on a missing id returns None (404)")
+
+    # Migration: a table created before the column existed gains it on first use.
+    async with pool.acquire() as conn:
+        await conn.execute(f"DROP TABLE {store.TABLE}")
+        await conn.execute(store.CREATE_SQL.replace("    capital_per_position DOUBLE PRECISION,\n", ""))
+        before = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                     "AND column_name = 'capital_per_position'", store.TABLE)
+    await store.list_strategies(pool)
+    async with pool.acquire() as conn:
+        after = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                    "AND column_name = 'capital_per_position'", store.TABLE)
+    check(before == 0 and after == 1, f"an existing table without the column gains it (before {before}, after {after})")
+    a = await store.save_strategy(pool, name="allantis v2", notes="", content=raw, trade_count=4, replace=False, **common)
+
     check(await store.delete_strategy(pool, a["id"]) is True, "delete removes the row")
     check(await store.delete_strategy(pool, a["id"]) is False and await store.load_strategy_file(pool, a["id"]) is None,
           "a deleted id deletes nothing twice and loads as missing")
@@ -608,6 +641,15 @@ async def check_end_to_end(pool) -> None:
           "trades outside the table's sessions are counted (3) and get null levels, not a neighbour's")
     check(c["vix_level"][i106] == bar_open("vix", EARLY, time(12, 30)) and c["vix_bar_time"][i106] == "12:30:00",
           "position 106 (2023-07-03 12:30, parsed from real MesoSim events) lands on the early-close 12:30 bar")
+    # The Deployment axis: the rollup's own SPX sessions inside the log's span,
+    # read through the real SQL -- the VIX-only 07-11 and artifact holiday 07-07
+    # must not be days.
+    daily, _ = await market.get_daily(pool)
+    spx_days = sorted(d.isoformat() for d in daily.loc[daily["spx_session"].astype(bool), "trade_date"])
+    span = [d for d in spx_days if min(c["date_opened"]) <= d <= max(c["date_closed"])]
+    check(rep["spx_sessions"] == span and "2023-07-11" not in rep["spx_sessions"]
+          and "2023-07-07" not in rep["spx_sessions"] and not rep["diagnostic_errors"],
+          f"the payload's spx_sessions are the rollup's SPX sessions in the log's span ({rep['spx_sessions']})")
 
 
 def main() -> int:

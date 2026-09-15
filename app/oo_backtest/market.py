@@ -450,6 +450,22 @@ def coverage(daily: pd.DataFrame) -> dict:
     return out
 
 
+def session_days(daily: pd.DataFrame, df: pd.DataFrame, series: str = "spx") -> list[str]:
+    """ISO dates `series` had a session on, from the log's first entry to its
+    last exit: the x axis of the Deployment chart. Every session in the span,
+    not only days with an entry or exit, so a stretch with nothing open shows
+    as a run of zeros. SPX sessions, per the page's spec -- a day like
+    2026-04-08 (VIX session, no SPX bars) is not in the list."""
+    if daily.empty or df.empty:
+        return []
+    lo = pd.to_datetime(df["date_opened"]).min()
+    hi = pd.to_datetime(df["date_closed"] if "date_closed" in df.columns else df["date_opened"]).max()
+    if pd.isna(lo) or pd.isna(hi):
+        return []
+    days = pd.to_datetime(daily.loc[daily[f"{series}_session"].astype(bool), "trade_date"])
+    return [d.date().isoformat() for d in days[(days >= lo.normalize()) & (days <= hi.normalize())]]
+
+
 STALE_AFTER_DAYS = 5
 
 
@@ -666,6 +682,11 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     except Exception as exc:  # noqa: BLE001
         log.exception("oo-backtest null reasons failed")
         reasons, diag_errors["null_reasons"] = None, f"{type(exc).__name__}: {exc}"
+    try:
+        spx_sessions = session_days(daily, out)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("oo-backtest session days failed")
+        spx_sessions, diag_errors["spx_sessions"] = [], f"{type(exc).__name__}: {exc}"
 
     report = {
         "joined": True,
@@ -676,6 +697,7 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "null_reasons": reasons,
         "coverage": coverage(daily),
         "diagnostic_errors": diag_errors,
+        "spx_sessions": spx_sessions,
         # How many trades got a gap at all. All-null here is what the zero-
         # filled weekends produced for a Monday-only log, silently.
         "gaps": {name: {"computed": int(out[col].notna().sum()), "null": int(out[col].isna().sum())}

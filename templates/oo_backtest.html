@@ -112,6 +112,10 @@
 
     .ob-sec-grid { display:grid; gap:10px; grid-template-columns:repeat(3, minmax(0,1fr)); }
     .ob-sec-grid.two { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    .ob-capital { display:flex; align-items:center; gap:8px; padding:8px 10px; }
+    .ob-capital-field { display:flex; align-items:center; gap:4px; margin-left:auto; color:var(--dim); font-size:12px; }
+    .ob-capital-field .ob-input { width:110px; margin-top:0; text-align:right; }
+    .ob-capital-msg { padding:0 10px 6px; }
     .ob-probe { font-size:10px; color:var(--muted); margin-top:6px; line-height:1.5; word-break:break-word; }
     .ob-probe b { color:var(--text); font-weight:600; }
 
@@ -251,6 +255,19 @@
         </div>
       </div>
 
+      <!-- Capital per position: a display input, above the filters. It changes
+           no trade and makes no request (except to keep the value on a saved
+           strategy); it feeds Avg Annual Return %, Avg P/L % and the
+           Deployment chart's dollar axis. -->
+      <div class="ob-card">
+        <div class="ob-card-body ob-capital">
+          <label class="ob-lbl" for="ob-capital">Capital per position</label>
+          <span class="ob-capital-field">$<input id="ob-capital" class="ob-input" type="number" min="0" step="500"
+                 inputmode="decimal" x-model="capitalInput" @input="recomputeCapital()" @change="commitCapital()"></span>
+        </div>
+        <div class="ob-dim ob-capital-msg" x-show="capitalMsg" x-text="capitalMsg"></div>
+      </div>
+
       <!-- One date range control (on the entry date), bounded by the log. -->
       <div class="ob-card" :class="{ 'ob-active': dateActive() }">
         <div class="ob-card-hdr">
@@ -356,6 +373,11 @@
           {{ m.stat_box('Avg Loss', "stat('avg_loss_pnl')", "statNum('avg_loss_pnl')") | indent(10) | safe }}
           {{ m.stat_box('Max Win', "stat('max_winner')", "statNum('max_winner')") | indent(10) | safe }}
           {{ m.stat_box('Max Loss', "stat('max_loser')", "statNum('max_loser')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Annual P/L', "stat('avg_annual_pnl')", "statNum('avg_annual_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Calmar', "stat('calmar')", "statNum('calmar')") | indent(10) | safe }}
+          {{ m.stat_box('Profit Factor', "stat('profit_factor')", "statNum('profit_factor')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Annual Return %', "stat('avg_annual_return_pct')", "statNum('avg_annual_return_pct')") | indent(10) | safe }}
+          {{ m.stat_box('Avg P/L %', "stat('avg_pnl_pct')", "statNum('avg_pnl_pct')") | indent(10) | safe }}
         </div>
       </div>
 
@@ -395,7 +417,7 @@
                  x-text="'Skipped — this log has no values in ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></div>
             <div class="ob-placeholder" x-show="sectionState(m) === 'nodata'"
                  x-text="'No data — none of the ' + filteredCount.toLocaleString() + ' filtered trades has a value in ' + metricColumn(m)"></div>
-            <div class="ob-sec-grid" :class="{ two: !m.hasScatter && !m.winRate }" x-show="sectionState(m) === 'ready'">
+            <div class="ob-sec-grid" :class="{ two: !m.hasScatter && !m.winRate && !m.pane }" x-show="sectionState(m) === 'ready'">
               <div class="chart-box">
                 <div class="chart-title" x-text="'Avg P/L by ' + binNoun(m)"></div>
                 <div class="chart-canvas"><canvas :id="canvasId(m, 'avg')" role="img" :aria-label="'Average P/L by ' + m.label"></canvas></div>
@@ -408,6 +430,17 @@
                 <div class="chart-title" x-text="'Win rate by ' + binNoun(m)"></div>
                 <div class="chart-canvas"><canvas :id="canvasId(m, 'win')" role="img" :aria-label="'Win rate by ' + m.label"></canvas></div>
               </div>
+              <!-- A registry `pane`: a non-metric chart sharing this row. x-if,
+                   so its fixed canvas id exists once, not in every section. -->
+              <template x-if="m.pane === 'deployment'">
+                <div class="chart-box">
+                  <div class="chart-title"><span>Deployment</span>
+                    <span class="ob-dim" x-text="deployTitle()"></span></div>
+                  <div class="chart-canvas"><canvas id="ob-deploy-chart" role="img"
+                       aria-label="Concurrent open positions per SPX session, with capital deployed"></canvas></div>
+                  <div class="ob-parse-note warn" x-show="deployNote()" x-text="deployNote()"></div>
+                </div>
+              </template>
               <div class="chart-box" x-show="m.hasScatter">
                 <div class="chart-title"><span x-text="'P/L vs ' + m.label"></span>
                   <span class="ob-dim" x-text="fitText(m)"></span></div>

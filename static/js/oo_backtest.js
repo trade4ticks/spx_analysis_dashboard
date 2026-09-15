@@ -23,6 +23,9 @@
  * Phase 4: the ten metric sections -- avg and total P/L by bin, and P/L vs the
  * metric with an OLS line (categorical metrics: no scatter; year adds win
  * rate) -- recomputed on every filter change from the filtered rows.
+ * Later: five more summary figures (Calmar, avg annual P/L, profit factor,
+ * avg annual return %, avg P/L %), a capital-per-position input, and the
+ * Deployment chart of concurrent positions per SPX session.
  * ==========================================================================*/
 
 const OB_BLUE = '#3498db';   // positive (theme --accent)
@@ -31,9 +34,10 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0, file: null, idx: [] };
+const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null };
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
-const OB_CHARTS = { cum: null, dd: null, sec: {} };
+const OB_CHARTS = { cum: null, dd: null, deploy: null, sec: {} };
+const OB_DEFAULT_CAPITAL = 10000;
 
 /* ── pure helpers (exercised in node by scripts/check_oo_backtest.py) ─────── */
 
@@ -166,6 +170,84 @@ function obEquity(cols, idx) {
     if (dd < 0 && (maxDD === null || dd < maxDD.drawdown)) maxDD = pt;
   }
   return { points, maxDD };
+}
+
+/* Concurrent open positions per SPX session, over the span of the given
+ * trades (first entry to last exit). A trade is open on every session from
+ * its entry date to its exit date, both inclusive -- day granularity, so a
+ * trade closed at 10:00 and one opened at 15:30 the same day count as two.
+ * `sessions` is the sorted ISO list from the server; days outside the span are
+ * dropped. A trade with no exit date is in no count (the parser excludes
+ * still-open positions; this is the backstop, and it is counted, not hidden).
+ * offSession counts trades whose entry or exit date is not in the list.
+ * Returns { days, counts, peak, peakDay, offSession, unclosed }. */
+function obConcurrency(cols, idx, sessions) {
+  const out = { days: [], counts: [], peak: 0, peakDay: null, offSession: 0, unclosed: 0 };
+  if (!sessions || !sessions.length || !idx.length) return out;
+  const dOpen = cols.date_opened, dClose = cols.date_closed;
+  let lo = null, hi = null;
+  for (const i of idx) {
+    if (!dClose[i]) continue;
+    if (lo === null || dOpen[i] < lo) lo = dOpen[i];
+    if (hi === null || dClose[i] > hi) hi = dClose[i];
+  }
+  if (lo === null) { out.unclosed = idx.length; return out; }
+  // first index with sessions[k] >= d  /  > d
+  const lower = d => { let a = 0, b = sessions.length; while (a < b) { const m = (a + b) >> 1; if (sessions[m] < d) a = m + 1; else b = m; } return a; };
+  const upper = d => { let a = 0, b = sessions.length; while (a < b) { const m = (a + b) >> 1; if (sessions[m] <= d) a = m + 1; else b = m; } return a; };
+  const k0 = lower(lo), k1 = upper(hi);          // span is sessions[k0 .. k1-1]
+  const diff = new Array(Math.max(0, k1 - k0) + 1).fill(0);
+  const known = new Set(sessions);
+  for (const i of idx) {
+    if (!dClose[i]) { out.unclosed++; continue; }
+    if (!known.has(dOpen[i]) || !known.has(dClose[i])) out.offSession++;
+    const a = lower(dOpen[i]) - k0, b = upper(dClose[i]) - k0;   // sessions [a, b)
+    if (b > a) { diff[a]++; diff[b]--; }
+  }
+  let run = 0;
+  for (let k = 0; k < k1 - k0; k++) {
+    run += diff[k];
+    out.days.push(sessions[k0 + k]);
+    out.counts.push(run);
+    if (run > out.peak) { out.peak = run; out.peakDay = sessions[k0 + k]; }
+  }
+  return out;
+}
+
+/* The five figures beyond stats.py's ten.
+ *   years            (last exit - first entry) / 365.25 over these trades
+ *   avg_annual_pnl   total P/L / years
+ *   calmar           avg annual P/L / |max drawdown $|   (null with no drawdown)
+ *   profit_factor    gross wins / |gross losses|         (Infinity with wins and
+ *                                                         no losses, null with neither)
+ *   avg_annual_return_pct  avg annual P/L / (peak concurrency x capital) x 100
+ *   avg_pnl_pct            avg P/L / capital x 100
+ * The two capital figures are null when capital is not a positive number.
+ * `stats` is obStats' result; `peak` is obConcurrency's. */
+function obExtraStats(cols, idx, stats, capital, peak) {
+  const out = { years: null, avg_annual_pnl: null, calmar: null, profit_factor: null,
+                avg_annual_return_pct: null, avg_pnl_pct: null };
+  if (!idx.length) return out;
+  let lo = null, hi = null, gw = 0, gl = 0;
+  for (const i of idx) {
+    const o = cols.date_opened[i], c = cols.date_closed[i], p = cols.pnl[i];
+    if (o && (lo === null || o < lo)) lo = o;
+    if (c && (hi === null || c > hi)) hi = c;
+    if (p > 0) gw += p; else if (p < 0) gl += p;
+  }
+  const years = lo && hi ? (obDay(hi) - obDay(lo)) / 365.25 : 0;
+  if (years > 0) {
+    out.years = years;
+    out.avg_annual_pnl = stats.total_pnl / years;
+    if (stats.max_drawdown < 0) out.calmar = out.avg_annual_pnl / Math.abs(stats.max_drawdown);
+  }
+  out.profit_factor = gl < 0 ? gw / Math.abs(gl) : (gw > 0 ? Infinity : null);
+  const cap = typeof capital === 'number' && capital > 0 ? capital : null;
+  if (cap) {
+    out.avg_pnl_pct = stats.avg_pnl / cap * 100;
+    if (out.avg_annual_pnl !== null && peak > 0) out.avg_annual_return_pct = out.avg_annual_pnl / (peak * cap) * 100;
+  }
+  return out;
 }
 
 /* P/L by bin for one metric section, as calculations.py calculate_bin_stats
@@ -343,6 +425,15 @@ document.addEventListener('alpine:init', () => {
     // toggle with it, once both have been looked at on a real log.
     ratioBasis: 'entry',
 
+    // Capital per position: a display input. It feeds Avg Annual Return %,
+    // Avg P/L % and the Deployment chart's dollar axis, recomputed here with no
+    // request -- except that on a SAVED strategy the committed value is
+    // written back (PUT .../capital) so a reload keeps it.
+    capitalInput: String(OB_DEFAULT_CAPITAL),
+    capitalMsg: '',
+    extra: null,       // obExtraStats
+    deploy: null,      // {peak, peakDay, offSession, unclosed, days, hasSessions}
+
     async init() {
       await Promise.all([this.loadRegistry(), this.loadMarketStatus(), this.loadSavedList()]);
     },
@@ -425,6 +516,12 @@ document.addEventListener('alpine:init', () => {
       this.presentColumns = Object.keys(payload.columns)
         .filter(c => payload.columns[c].some(v => v !== null && v !== undefined));
       const { columns, ...meta } = payload;
+      OB_DATA.sessions = (payload.market && payload.market.spx_sessions) || [];
+      if (payload.saved) {
+        const c = payload.saved.capital_per_position;
+        this.capitalInput = String(c === null || c === undefined ? OB_DEFAULT_CAPITAL : c);
+      }
+      this.capitalMsg = '';
       this.meta = meta;
       this.loaded = true;
       this.initFilters();
@@ -487,6 +584,7 @@ document.addEventListener('alpine:init', () => {
         fd.append('file', OB_DATA.file);
         fd.append('name', this.saveName);
         fd.append('notes', this.saveNotes);
+        fd.append('capital_per_position', this.capital() === null ? '' : String(this.capital()));
         fd.append('replace', replace ? 'true' : 'false');
         const r = await fetch('/api/oo-backtest/strategies', { method: 'POST', body: fd });
         const body = await r.json().catch(() => ({}));
@@ -685,8 +783,112 @@ document.addEventListener('alpine:init', () => {
       OB_DATA.idx = idx;
       this.filteredCount = idx.length;
       this.stats = obStats(OB_DATA.columns, idx);
+      OB_DATA.conc = obConcurrency(OB_DATA.columns, idx, OB_DATA.sessions);
       this.renderPerformance(obEquity(OB_DATA.columns, idx));
       this.renderSections(idx);
+      this.recomputeCapital();
+    },
+
+    /* ── capital per position ──────────────────────────────────────────── */
+
+    /* The entered amount, or null when blank / not a positive number. */
+    capital() {
+      const raw = String(this.capitalInput ?? '');
+      const v = Number(raw.replace(/[$,\s]/g, ''));
+      return raw.trim() !== '' && Number.isFinite(v) && v > 0 ? v : null;
+    },
+
+    /* Everything capital feeds, and nothing else: no re-filter, no re-bin. */
+    recomputeCapital() {
+      if (!OB_DATA.columns || !this.stats) return;
+      const conc = OB_DATA.conc;
+      this.extra = obExtraStats(OB_DATA.columns, OB_DATA.idx, this.stats, this.capital(), conc ? conc.peak : 0);
+      this.deploy = conc && { peak: conc.peak, peakDay: conc.peakDay, offSession: conc.offSession,
+                              unclosed: conc.unclosed, days: conc.days.length, hasSessions: OB_DATA.sessions.length > 0 };
+      this.renderDeployment();
+    },
+
+    /* On commit (change, not every keystroke): a saved strategy keeps it. */
+    async commitCapital() {
+      const sv = this.meta && this.meta.saved;
+      this.capitalMsg = '';
+      if (!sv) return;
+      const cap = this.capital();
+      if (cap === null && String(this.capitalInput ?? '').trim() !== '') {
+        this.capitalMsg = 'Not saved — enter a positive dollar amount';
+        return;
+      }
+      try {
+        const r = await fetch(`/api/oo-backtest/strategies/${sv.id}/capital`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ capital_per_position: cap }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        this.meta = { ...this.meta, saved: { ...sv, capital_per_position: body.strategy.capital_per_position } };
+        this.capitalMsg = `Saved with "${sv.name}"`;
+      } catch (e) {
+        console.error('oo-backtest capital', e);
+        this.capitalMsg = `Not saved: ${e.message}`;
+      }
+    },
+
+    deployTitle() {
+      const d = this.deploy;
+      if (!d || !d.peak) return '';
+      const cap = this.capital();
+      return `peak ${d.peak} on ${d.peakDay}` + (cap ? ` · ${obMoney(d.peak * cap)}` : '');
+    },
+
+    deployNote() {
+      const d = this.deploy;
+      if (!d) return '';
+      if (!d.hasSessions) return 'No session list — market data not joined';
+      const parts = [];
+      if (d.offSession) parts.push(`${d.offSession} trade${d.offSession === 1 ? '' : 's'} open or close on a day with no SPX session`);
+      if (d.unclosed) parts.push(`${d.unclosed} trade${d.unclosed === 1 ? '' : 's'} with no exit date, not counted`);
+      return parts.join(' · ');
+    },
+
+    renderDeployment() {
+      if (typeof Chart === 'undefined') return;
+      const el = document.getElementById('ob-deploy-chart');
+      const conc = OB_DATA.conc;
+      if (OB_CHARTS.deploy && OB_CHARTS.deploy.canvas !== el) { OB_CHARTS.deploy.destroy(); OB_CHARTS.deploy = null; }
+      if (!el || !conc) return;
+      const cap = this.capital();
+      const pts = conc.days.map((d, k) => ({ x: obDay(d), y: conc.counts[k], d }));
+      // ONE line. The dollar axis is the position axis times capital: both
+      // scales are pinned to the same range, so the right one only relabels.
+      // A whole-number step from 1-2-5 giving about five ticks, the top rounded
+      // up to it; the dollar axis ticks at the same step times capital, so the
+      // two sets of labels sit level.
+      const step = [1, 2, 5, 10, 20, 50, 100, 200, 500].find(s => conc.peak * 1.05 / s <= 5) || 1000;
+      const yMax = Math.max(step, Math.ceil(conc.peak * 1.05 / step) * step);
+      const tick = { color: '#9a9a9a', font: { size: 10 } };
+      const xr = pts.length ? { min: pts[0].x, max: pts[pts.length - 1].x } : {};
+      const cfg = {
+        type: 'line',
+        data: { datasets: [{ data: pts, stepped: true, borderColor: OB_BLUE, backgroundColor: 'rgba(52,152,219,0.10)',
+                             fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 6 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          scales: {
+            x: { type: 'linear', ...xr, grid: { color: 'rgba(255,255,255,0.05)' }, border: { display: false },
+                 ticks: { ...tick, maxTicksLimit: 6, callback: v => obIsoDay(v).slice(0, 7) } },
+            y: { min: 0, max: yMax, grid: { color: 'rgba(255,255,255,0.05)' }, border: { display: false },
+                 ticks: { ...tick, precision: 0, stepSize: step },
+                 title: { display: true, text: 'positions', color: '#9a9a9a', font: { size: 10 } } },
+            y2: { display: !!cap, position: 'right', min: 0, max: yMax * (cap || 1), grid: { display: false },
+                  border: { display: false }, ticks: { ...tick, stepSize: step * (cap || 1), callback: v => obMoney(v) } },
+          },
+          plugins: { legend: { display: false },
+                     tooltip: { callbacks: { title: it => it[0].raw.d,
+                                             label: it => `${it.raw.y} open` + (cap ? ` · ${obMoney(it.raw.y * cap)} deployed` : '') } } },
+        },
+      };
+      if (OB_CHARTS.deploy) { OB_CHARTS.deploy.data = cfg.data; OB_CHARTS.deploy.options = cfg.options; OB_CHARTS.deploy.update('none'); }
+      else OB_CHARTS.deploy = new Chart(el.getContext('2d'), cfg);
     },
 
     fmtVal(m, v) { return obFmt(v, m.format); },
@@ -706,11 +908,31 @@ document.addEventListener('alpine:init', () => {
         case 'num_trades': return st.num_trades.toLocaleString();
         case 'win_pct': return st.win_pct.toFixed(1) + '%';
         case 'avg_days_in_trade': return st.avg_days_in_trade.toFixed(1);
+        case 'avg_annual_pnl': return this.extraVal(key) === null ? '—' : obMoney(this.extraVal(key));
+        case 'calmar': return this.extraVal(key) === null ? '—' : this.extraVal(key).toFixed(2);
+        case 'profit_factor': {
+          const v = this.extraVal(key);
+          return v === null ? '—' : v === Infinity ? '∞' : v.toFixed(2);
+        }
+        // Blank, not "—", until a capital amount is entered.
+        case 'avg_annual_return_pct':
+        case 'avg_pnl_pct': {
+          const v = this.extraVal(key);
+          return v === null ? (this.capital() === null ? '' : '—') : v.toFixed(2) + '%';
+        }
         default: return obMoney(st[key], ['avg_pnl', 'avg_win_pnl', 'avg_loss_pnl'].includes(key) ? 2 : 0);
       }
     },
 
-    statNum(key) { return this.stats ? this.stats[key] : 0; },
+    statNum(key) {
+      if (this.stats && key in this.stats) return this.stats[key];
+      const v = this.extraVal(key);
+      // Profit factor reads blue at or above 1, pink below.
+      if (key === 'profit_factor') return v === null ? 0 : v - 1;
+      return v === null ? 0 : v;
+    },
+
+    extraVal(key) { return this.extra && this.extra[key] !== undefined ? this.extra[key] : null; },
 
     /* ── performance charts ────────────────────────────────────────────── */
 
@@ -753,10 +975,10 @@ document.addEventListener('alpine:init', () => {
 
       const cumData = { datasets: [{
         data: cum, borderColor: OB_BLUE, backgroundColor: 'rgba(52,152,219,0.10)', fill: 'origin',
-        borderWidth: 2, pointRadius: 0, pointHitRadius: 6, tension: 0 }] };
+        borderWidth: 1, pointRadius: 0, pointHitRadius: 6, tension: 0 }] };
       const ddData = { datasets: [
         { data: dd, borderColor: OB_PINK, backgroundColor: 'rgba(232,67,147,0.16)', fill: 'origin',
-          borderWidth: 2, pointRadius: 0, pointHitRadius: 6, tension: 0 },
+          borderWidth: 1, pointRadius: 0, pointHitRadius: 6, tension: 0 },
         // The deepest point: a marker with a surface-coloured ring so it reads
         // over the line, and hover-only like the rest.
         { data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6, pointBackgroundColor: OB_PINK,

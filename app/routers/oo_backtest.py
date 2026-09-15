@@ -17,6 +17,8 @@ Endpoints:
                                when the name exists and replace is not set
   GET    /strategies/{id}/load the saved file re-parsed and re-joined -- the
                                same payload as /parse, plus `saved`
+  PUT    /strategies/{id}/capital  {"capital_per_position": number|null} --
+                               the display input only; no re-parse
   DELETE /strategies/{id}
 
 A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
@@ -34,7 +36,7 @@ from datetime import datetime
 from pathlib import PurePath
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.db import get_pool
@@ -153,7 +155,8 @@ async def list_saved(pool=Depends(get_pool)):
 
 @router.post("/strategies")
 async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes: str = Form(""),
-                     replace: bool = Form(False), pool=Depends(get_pool)):
+                     replace: bool = Form(False), capital_per_position: str = Form(""),
+                     pool=Depends(get_pool)):
     filename = file.filename or ""
     content = await file.read()
     # The count and date range stored with the file come from the SERVER's
@@ -167,7 +170,7 @@ async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes:
             trade_count=int(len(df)),
             date_min=dates_open.min().date() if len(dates_open) else None,
             date_max=dates_close.max().date() if len(dates_close) else None,
-            replace=replace)
+            replace=replace, capital_per_position=capital_per_position)
     except store.NameTaken as exc:
         return JSONResponse(status_code=409, content={"detail": str(exc), "existing_id": exc.existing_id})
     except ValueError as exc:
@@ -194,6 +197,17 @@ async def load_saved(strategy_id: int, pool=Depends(get_pool)):
     if payload["n"] != meta["trade_count"]:
         payload["saved_count_changed"] = {"when_saved": meta["trade_count"], "now": payload["n"]}
     return payload
+
+
+@router.put("/strategies/{strategy_id}/capital")
+async def set_saved_capital(strategy_id: int, body: dict = Body(...), pool=Depends(get_pool)):
+    try:
+        saved = await store.set_capital(pool, strategy_id, body.get("capital_per_position"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if saved is None:
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    return {"strategy": saved}
 
 
 @router.delete("/strategies/{strategy_id}")

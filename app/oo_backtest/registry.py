@@ -36,6 +36,9 @@ Fields
   winRate     the section also shows win rate by bin
   format      how a value is displayed: "pct" | "usd" | "ratio" | "num" | "int"
   minDate     earliest date this metric has coverage for, ISO, or None.
+  pane        an extra, non-metric chart drawn in this section's row, or None.
+              "deployment" is the concurrent-positions chart; it sits beside
+              Day of Week so the page names no metric to place it.
 
 minDate IS FILLED AT REQUEST TIME (registry_with_coverage) from the first
 non-null close per index_ohlc series, not from the table's date range: a
@@ -66,15 +69,15 @@ def _range(key, label, column, lo, hi, step, spec, fmt, series, basis=None, labe
     return {"key": key, "label": label, "column": column, "type": "range",
             "min": lo, "max": hi, "step": step, "bins": _bins(spec, label_edge), "categories": None,
             "hasScatter": True, "section": True, "filter": True, "winRate": False,
-            "format": fmt, "minDate": None, "series": series, "basis": basis}
+            "format": fmt, "minDate": None, "series": series, "basis": basis, "pane": None}
 
 
-def _categorical(key, label, column, categories, *, section, filter, win_rate=False):
+def _categorical(key, label, column, categories, *, section, filter, win_rate=False, pane=None):
     return {"key": key, "label": label, "column": column, "type": "categorical",
             "min": None, "max": None, "step": None, "bins": None, "categories": categories,
             "hasScatter": False, "section": section, "filter": filter, "winRate": win_rate,
             "format": "int" if key != "exit_reason" else "text", "minDate": None,
-            "series": [], "basis": None}
+            "series": [], "basis": None, "pane": pane}
 
 
 def ratio_basis(stem: str) -> dict:
@@ -84,7 +87,8 @@ def ratio_basis(stem: str) -> dict:
 def build_registry() -> list[dict]:
     """Section order is list order. Filter order is list order too."""
     return [
-        _categorical("day_of_week", "Day of Week", "day_of_week", _DOW, section=True, filter=True),
+        _categorical("day_of_week", "Day of Week", "day_of_week", _DOW, section=True, filter=True,
+                     pane="deployment"),
         _categorical("exit_reason", "Exit Reason", "exit_reason", None, section=False, filter=True),
         _categorical("year", "P&L by Year", "year", None, section=True, filter=False, win_rate=True),
         _range("gap", "SPX Overnight Gap", "gap", -3.0, 3.0, 0.1, calc.gap_bin_spec(), "pct", ["spx"]),
