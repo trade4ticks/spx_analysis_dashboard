@@ -67,6 +67,9 @@ function obDistinct(values) {
   return [...s].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
+function obPct(r) { return r === null || r === undefined ? '—' : (r * 100).toFixed(1) + '%'; }
+function obLabel(k) { return String(k || '').replace(/_/g, ' ').replace('plus5', '+5 min').replace('minus5', '−5 min'); }
+
 function obFmt(v, fmt) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   switch (fmt) {
@@ -97,7 +100,6 @@ document.addEventListener('alpine:init', () => {
     marketLoading: false,
     marketError: '',
     marketDetail: false,
-    loadDetail: false,
     coverageError: '',
 
     // Which ratio basis the sections read: entry-time bars (default) or the
@@ -311,8 +313,15 @@ document.addEventListener('alpine:init', () => {
       if (mk.trades_without_daily_row) {
         out.push({ warn: true, text: `${mk.trades_without_daily_row} trades open on a date index_ohlc has no session for` });
       }
-      const nulls = Object.entries(mk.entry_bars || {}).filter(([, v]) => v.null).map(([k, v]) => `${k.toUpperCase()} ${v.null}`);
-      if (nulls.length) out.push({ warn: false, text: `No entry bar (null level): ${nulls.join(', ')}` });
+      // Null levels WITH their reasons: a count alone cannot tell coverage
+      // starting later from bars missing inside coverage.
+      for (const s of ['vix', 'vix3m', 'vix9d']) {
+        const r = mk.null_reasons && mk.null_reasons[s];
+        if (r && r.null) {
+          out.push({ warn: false, text: `${s.toUpperCase()} level null for ${r.null}: ` +
+                     Object.entries(r.reasons).map(([why, n]) => `${n} ${why}`).join('; ') });
+        }
+      }
       const pushed = Object.entries(mk.entry_bars || {}).filter(([, v]) => v.earlier_than_entry_bar).map(([k, v]) => `${k.toUpperCase()} ${v.earlier_than_entry_bar}`);
       if (pushed.length) out.push({ warn: false, text: `Entry bar was NaN, earlier bar used: ${pushed.join(', ')}` });
       // All-null gaps are what the zero-filled weekends produced for a
@@ -320,8 +329,10 @@ document.addEventListener('alpine:init', () => {
       for (const [name, v] of Object.entries(mk.gaps || {})) {
         const total = v.computed + v.null;
         if (v.null) {
+          const r = mk.null_reasons && mk.null_reasons[`${name}_gap`];
+          const why = r ? ' — ' + Object.entries(r.reasons).map(([k, n]) => `${n} ${k}`).join('; ') : '';
           out.push({ warn: v.null > total * 0.05,
-                     text: `${name.toUpperCase()} gap computed for ${v.computed.toLocaleString()} of ${total.toLocaleString()} trades` });
+                     text: `${name.toUpperCase()} gap computed for ${v.computed.toLocaleString()} of ${total.toLocaleString()} trades${why}` });
         }
       }
       if (mk.gap_crosscheck_error) {
@@ -329,16 +340,37 @@ document.addEventListener('alpine:init', () => {
       }
       const g = mk.gap_crosscheck;
       if (g) {
+        // The winning alignment is ALWAYS named. The first version printed it
+        // only when it was not "previous row", so a 63% previous-row match
+        // read as if the alignment question had not been asked.
         const aligned = g.best_alignment === 'previous_row';
         out.push({
-          warn: !aligned || g.disagree > 0,
-          text: `Gap vs Option Omega's column: ${g.agree} of ${g.compared} agree (${g.best_unit}, ±${g.tolerance})` +
-                (aligned ? '' : ` — best match is ${g.best_alignment.replace(/_/g, ' ')}, not the previous session: off by one?`) +
-                (g.skipped_uncomputable ? `; ${g.skipped_uncomputable} not computable, skipped` : ''),
+          warn: !aligned || g.rate < 0.95,
+          text: `Gap vs Option Omega: best is ${obLabel(g.best_alignment)}, ${g.best_unit} ±${g.tolerance} — ` +
+                `${g.agree.toLocaleString()} of ${g.compared.toLocaleString()} agree (${obPct(g.rate)})` +
+                (aligned ? '' : ' — NOT the previous session: off by one?') +
+                (g.skipped_uncomputable ? `; ${g.skipped_uncomputable} not computable` : '') +
+                '. Detail in "Market-data checks".',
         });
       }
       return out;
     },
+
+    /* ── market-data checks card (main column) ────────────────────────── */
+
+    mk() { return (this.meta && this.meta.market) || {}; },
+    hasMarketChecks() { const m = this.mk(); return !!(m.gap_crosscheck || m.label_test || m.null_reasons); },
+    pct(r) { return obPct(r); },
+    label(k) { return obLabel(k); },
+    nullTrades() {
+      const out = [];
+      for (const [name, r] of Object.entries(this.mk().null_reasons || {})) {
+        for (const t of r.trades || []) out.push({ name, ...t });
+      }
+      return out;
+    },
+    matchLine(m) { return Object.entries(m || {}).map(([k, n]) => `${k}: ${n}`).join(' · '); },
+    diagErrors() { return Object.entries(this.mk().diagnostic_errors || {}).map(([k, v]) => `${k}: ${v}`); },
 
     /* ── market freshness (read-only) ─────────────────────────────────── */
 

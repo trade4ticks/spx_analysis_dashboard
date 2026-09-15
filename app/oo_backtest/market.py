@@ -512,15 +512,41 @@ def _floor5(hms: str) -> str:
     return f"{m // 60:02d}:{m % 60:02d}:00"
 
 
+GAP_ALIGNMENTS = (("previous_row", "spx_prev_close"), ("two_rows_back", "spx_prev2_close"),
+                  ("same_day_close", "spx_close"))
+GAP_UNITS = ("pct", "points")
+_MAG_EDGES = {"points": (2, 5, 10, 20, 40), "pct": (0.05, 0.1, 0.25, 0.5, 1.0)}
+
+
+def _year_of(d) -> int:
+    return d.year if hasattr(d, "year") else int(str(d)[:4])
+
+
+def _mag_bucket(v: float, unit: str) -> str:
+    edges = _MAG_EDGES[unit]
+    a = abs(v)
+    lo = 0
+    for e in edges:
+        if a < e:
+            return f"{lo}–{e}"
+        lo = e
+    return f"≥{edges[-1]}"
+
+
 def gap_crosscheck(df: pd.DataFrame, daily: pd.DataFrame, tol_pct: float = 0.02, tol_pts: float = 0.5) -> dict | None:
     """Option Omega's own Gap column vs the computed SPX gap.
 
-    An off-by-one in the prior-row lookup is this phase's likeliest bug and is
-    otherwise invisible, so the vendor column is used as an oracle. Its UNIT is
-    not documented, so both are tried -- percent and index points -- and each
-    against three alignments of the prior close: the previous row (what the
-    page uses), two rows back, and the same day's close. The alignment that
-    agrees best is reported; if it is not "previous row", something is wrong.
+    The vendor column is used as an oracle for the prior-row lookup. Its UNIT
+    is undocumented, so every combination of unit (percent, index points) and
+    prior-close alignment (previous row -- what the page uses --, two rows
+    back, the same day's close) is scored and ALL SIX are returned, not just
+    the winner: "two rows back" beating "previous row" would be a different
+    diagnosis from "previous row wins at 63%".
+
+    For the winning variant the disagreements are broken down by YEAR and by
+    the vendor gap's MAGNITUDE, because a problem confined to older data points
+    at the backfill, and one that grows with gap size points at the opening
+    print rather than the prior close.
     """
     if "csv_gap" not in df.columns or df["csv_gap"].notna().sum() == 0 or daily.empty:
         return None
@@ -531,16 +557,14 @@ def gap_crosscheck(df: pd.DataFrame, daily: pd.DataFrame, tol_pct: float = 0.02,
     vendor = df["csv_gap"].tolist()
 
     variants = {}
-    for align, col in (("previous_row", "spx_prev_close"), ("two_rows_back", "spx_prev2_close"),
-                       ("same_day_close", "spx_close")):
-        for unit in ("pct", "points"):
+    for align, col in GAP_ALIGNMENTS:
+        for unit in GAP_UNITS:
             diffs, skipped = [], 0
             for dt, v in zip(dates, vendor):
                 r = by_date.get(dt)
                 if r is None or v is None or pd.isna(v):
                     continue
-                o, p = r.get("spx_open"), r.get(col)
-                fo, fp = _float(o), _float(p)
+                fo, fp = _float(r.get("spx_open")), _float(r.get(col))
                 if fo is None or fp is None:
                     calc = None
                 elif unit == "pct":
@@ -555,23 +579,258 @@ def gap_crosscheck(df: pd.DataFrame, daily: pd.DataFrame, tol_pct: float = 0.02,
                 diffs.append((dt, float(v), calc))
             tol = tol_pct if unit == "pct" else tol_pts
             agree = sum(1 for _, v, c in diffs if abs(v - c) <= tol)
-            variants[(align, unit)] = (agree, diffs, skipped)
+            variants[(align, unit)] = {"agree": agree, "diffs": diffs, "skipped": skipped, "tol": tol}
 
-    (align, unit), (agree, diffs, skipped) = max(variants.items(),
-                                                 key=lambda kv: (kv[1][0], kv[0][0] == "previous_row"))
-    worst = sorted(diffs, key=lambda x: -abs(x[1] - x[2]))[:5]
-    prev_row = {u: variants[("previous_row", u)][0] for u in ("pct", "points")}
+    (align, unit), best = max(variants.items(),
+                              key=lambda kv: (kv[1]["agree"], kv[0][0] == "previous_row"))
+    tol = best["tol"]
+
+    by_year: dict[int, dict] = {}
+    by_mag: dict[str, dict] = {}
+    for dt, v, c in best["diffs"]:
+        ok = abs(v - c) <= tol
+        y = by_year.setdefault(_year_of(dt), {"compared": 0, "agree": 0})
+        m = by_mag.setdefault(_mag_bucket(v, unit), {"compared": 0, "agree": 0})
+        for bucket in (y, m):
+            bucket["compared"] += 1
+            bucket["agree"] += ok
+    edges = _MAG_EDGES[unit]
+    mag_order = [f"{lo}–{hi}" for lo, hi in zip((0,) + edges[:-1], edges)] + [f"≥{edges[-1]}"]
+
+    def rate(a, n):
+        return round(a / n, 4) if n else None
+
+    disagreements = [(dt, v, c) for dt, v, c in best["diffs"] if abs(v - c) > tol]
+    worst = sorted(disagreements, key=lambda x: -abs(x[1] - x[2]))[:20]
     return {
-        "compared": len(diffs),
+        "compared": len(best["diffs"]),
         "best_alignment": align,
         "best_unit": unit,
-        "agree": agree,
-        "disagree": len(diffs) - agree,
-        "skipped_uncomputable": skipped,
-        "agree_previous_row": prev_row,
-        "worst": [{"date": dt.isoformat(), "vendor": round(v, 4), "computed": round(c, 4)} for dt, v, c in worst],
-        "tolerance": tol_pct if unit == "pct" else tol_pts,
+        "agree": best["agree"],
+        "disagree": len(best["diffs"]) - best["agree"],
+        "rate": rate(best["agree"], len(best["diffs"])),
+        "skipped_uncomputable": best["skipped"],
+        "tolerance": tol,
+        "variants": [{"alignment": a, "unit": u, "compared": len(v["diffs"]), "agree": v["agree"],
+                      "rate": rate(v["agree"], len(v["diffs"])), "skipped": v["skipped"], "tolerance": v["tol"]}
+                     for (a, u), v in variants.items()],
+        "by_year": [{"year": y, "compared": v["compared"], "agree": v["agree"],
+                     "disagree": v["compared"] - v["agree"], "rate": rate(v["agree"], v["compared"])}
+                    for y, v in sorted(by_year.items())],
+        "by_magnitude": [{"bucket": b, "compared": by_mag[b]["compared"], "agree": by_mag[b]["agree"],
+                          "rate": rate(by_mag[b]["agree"], by_mag[b]["compared"])}
+                         for b in mag_order if b in by_mag],
+        "worst": [{"date": dt.isoformat(), "vendor": round(v, 4), "computed": round(c, 4),
+                   "diff": round(v - c, 4)} for dt, v, c in worst],
+        # Kept for gap_decomposition(); stripped before the payload.
+        "_disagreements": disagreements,
     }
+
+
+# ── what a disagreeing gap actually matches ────────────────────────────────
+
+# The bars a vendor's opening print or prior close could plausibly have come
+# from. A start-labeled 09:30 bar's open is our open; its close (= ~09:35) and
+# the 09:35 bar are what a later print would match; a 09:25 row exists only if
+# the table has pre-market bars.
+OPEN_CANDIDATES = (("09:25", "open"), ("09:25", "close"), ("09:30", "open"), ("09:30", "close"),
+                   ("09:35", "open"), ("09:35", "close"), ("09:40", "open"))
+PREV_CLOSE_CANDIDATES = (("15:45", "close"), ("15:50", "close"), ("15:55", "open"), ("15:55", "close"),
+                         ("16:00", "open"), ("16:00", "close"))
+
+BARS_AT_SQL = f"""
+SELECT trade_date, quote_time,
+       {_valid('spx_open')} AS o, {_valid('spx_high')} AS h,
+       {_valid('spx_low')} AS l, {_valid('spx_close')} AS c
+FROM index_ohlc
+WHERE trade_date = ANY($1::date[]) AND quote_time = ANY($2::time[])
+"""
+
+
+async def fetch_bars(pool, dates: set, times: set) -> dict:
+    """{(date, 'HH:MM'): {o,h,l,c}} for the given dates x times (valid values only)."""
+    if not dates or not times:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(BARS_AT_SQL, sorted(dates), sorted(time.fromisoformat(t) for t in times))
+    return {(r["trade_date"], r["quote_time"].strftime("%H:%M")): {k: _float(r[k]) for k in "ohlc"}
+            for r in rows}
+
+
+def gap_decomposition(crosscheck: dict, daily: pd.DataFrame, bars: dict, tol: float = 0.5) -> dict | None:
+    """For each disagreeing day: which bar the vendor's gap is consistent with.
+
+    Holding our prior close fixed, the vendor's IMPLIED OPEN is prior + gap;
+    holding our open fixed, its IMPLIED PRIOR CLOSE is open - gap. Each is
+    matched to the nearest candidate bar value within `tol` points. If most
+    implied opens land on the 09:30 close / 09:35 bar, the vendor uses a later
+    opening print (or our bars are shifted); if the implied prior closes land
+    on a different close-of-day bar, the prior close is the problem. "none"
+    means neither explains it.
+
+    READ BOTH COLUMNS TOGETHER. When the market moves evenly, an open taken N
+    bars late and a prior close taken N bars early produce the SAME vendor
+    gap, and one disagreement can match in both columns. A clear diagnosis is
+    one column concentrated on a single candidate while the other is mostly
+    "none".
+    """
+    if not crosscheck or crosscheck["best_alignment"] != "previous_row":
+        return None
+    unit = crosscheck["best_unit"]
+    by_date = {r["trade_date"]: r for r in daily.to_dict("records")}
+    open_counts: dict[int, dict] = {}
+    prev_counts: dict[int, dict] = {}
+    for dt, v, _c in crosscheck["_disagreements"]:
+        r = by_date.get(dt)
+        if not r:
+            continue
+        o, p, pd_ = _float(r.get("spx_open")), _float(r.get("spx_prev_close")), r.get("prev_trade_date")
+        if o is None or p is None:
+            continue
+        implied_open = p + v if unit == "points" else p * (1 + v / 100.0)
+        implied_prev = o - v if unit == "points" else o / (1 + v / 100.0)
+        y = _year_of(dt)
+        for counts, implied, day, cands in ((open_counts, implied_open, dt, OPEN_CANDIDATES),
+                                            (prev_counts, implied_prev, pd_, PREV_CLOSE_CANDIDATES)):
+            best, dist = "none", None
+            for hm, field in cands:
+                val = (bars.get((day, hm)) or {}).get(field[0])
+                if val is None:
+                    continue
+                dd = abs(val - implied)
+                if dd <= tol and (dist is None or dd < dist):
+                    best, dist = f"{hm} {field}", dd
+            counts.setdefault(y, {})
+            counts[y][best] = counts[y].get(best, 0) + 1
+    fmt = lambda c: [{"year": y, "matches": dict(sorted(m.items(), key=lambda kv: -kv[1]))}   # noqa: E731
+                     for y, m in sorted(c.items())]
+    return {"tolerance_points": tol, "implied_open": fmt(open_counts), "implied_prev_close": fmt(prev_counts)}
+
+
+def gap_decomposition_bars_needed(crosscheck: dict | None, daily: pd.DataFrame) -> tuple[set, set]:
+    if not crosscheck or crosscheck["best_alignment"] != "previous_row":
+        return set(), set()
+    by_date = {r["trade_date"]: r for r in daily.to_dict("records")}
+    dates = set()
+    for dt, _v, _c in crosscheck["_disagreements"]:
+        dates.add(dt)
+        prev = (by_date.get(dt) or {}).get("prev_trade_date")
+        if prev is not None:
+            dates.add(prev)
+    times = {hm for hm, _ in OPEN_CANDIDATES + PREV_CLOSE_CANDIDATES}
+    return dates, times
+
+
+# ── is the table start-labeled, year by year? ───────────────────────────────
+
+def _shift5(hm: str, k: int) -> str:
+    h, m = map(int, hm.split(":"))
+    t = h * 60 + m + 5 * k
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
+def label_test_requests(df: pd.DataFrame) -> tuple[list, set, set]:
+    """Trades usable for the intraday label test: an entry time and a vendor
+    SPX price at that time (Option Omega's "Opening Price")."""
+    if "spx_open_price" not in df.columns or "time_opened" not in df.columns:
+        return [], set(), set()
+    items, dates, times = [], set(), set()
+    for d, t, px_ in zip(pd.to_datetime(df["date_opened"]).dt.date, df["time_opened"], df["spx_open_price"]):
+        hms = normalize_entry_time(t)
+        price = _float(px_)
+        if hms is None or price is None:
+            continue
+        tt = time.fromisoformat(hms)
+        if not (SESSION_OPEN <= tt <= LAST_BAR):
+            continue
+        own = _floor5(hms)[:5]
+        items.append((d, hms, price, own))
+        dates.add(d)
+        times.update({_shift5(own, -1), own, _shift5(own, 1)})
+    return items, dates, times
+
+
+def label_test(items: list, bars: dict, pad: float = 0.05) -> dict | None:
+    """Option Omega's SPX price at each entry time vs the bar that should hold it.
+
+    If bars are labeled by START, the price at 10:32 lies inside the 10:30
+    bar's [low, high]. If a source labels by END (or is shifted five minutes),
+    it lies inside the bar labeled 10:35 instead -- or 10:25 for the opposite
+    shift. Scored per YEAR, so a backfill labeled differently from the live
+    writer shows up as the years where "start" stops winning. Entries exactly on
+    a 5-minute boundary sit on the edge of two bars and are counted apart.
+    """
+    if not items:
+        return None
+    per_year: dict[int, dict] = {}
+    for d, hms, price, own in items:
+        y = per_year.setdefault(_year_of(d), {"trades": 0, "on_boundary": 0, "start": 0, "shift_plus5": 0,
+                                               "shift_minus5": 0, "no_bar": 0})
+        y["trades"] += 1
+        if int(hms[3:5]) % 5 == 0 and hms[6:] == "00":
+            y["on_boundary"] += 1
+        for key, hm in (("start", own), ("shift_plus5", _shift5(own, 1)), ("shift_minus5", _shift5(own, -1))):
+            b = bars.get((d, hm))
+            if b and b["l"] is not None and b["h"] is not None and b["l"] - pad <= price <= b["h"] + pad:
+                y[key] += 1
+        if not bars.get((d, own)):
+            y["no_bar"] += 1
+    out = []
+    for yr, v in sorted(per_year.items()):
+        n = v["trades"]
+        out.append({"year": yr, **v, **{f"{k}_rate": round(v[k] / n, 4) for k in ("start", "shift_plus5", "shift_minus5")}})
+    return {"pad_points": pad, "by_year": out}
+
+
+# ── why a value is null ─────────────────────────────────────────────────────
+
+def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverage: dict) -> dict:
+    """For every null gap and every null VIX-family level: the reason, counted,
+    with the trades listed (up to 25 per series)."""
+    by_date = {r["trade_date"]: r for r in daily.to_dict("records")} if not daily.empty else {}
+    dates = pd.to_datetime(df["date_opened"]).dt.date.tolist()
+    out: dict = {}
+
+    for name, col, s in (("spx_gap", "gap", "spx"), ("vix_gap", "vix_overnight_gap", "vix")):
+        counts, sample = {}, []
+        for i, (d, v) in enumerate(zip(dates, df[col])):
+            if _float(v) is not None:
+                continue
+            r = by_date.get(d)
+            if r is None:
+                why = "entry date is not a session in index_ohlc"
+            elif _float(r.get(f"{s}_open")) is None:
+                why = f"no valid 09:30 {s.upper()} open that day"
+            elif r.get("prev_trade_date") is None:
+                why = "first session in the table (no previous session)"
+            elif _float(r.get(f"{s}_prev_close")) is None:
+                why = f"previous session ({r['prev_trade_date']}) has no valid {s.upper()} close"
+            else:
+                why = "prior close is zero (should be impossible after validity filtering)"
+            counts[why] = counts.get(why, 0) + 1
+            if len(sample) < 25:
+                sample.append({"row": i, "date": d.isoformat(), "reason": why})
+        out[name] = {"null": sum(counts.values()), "reasons": counts, "trades": sample}
+
+    for s in _LEVEL_SERIES:
+        counts, sample = {}, []
+        first = coverage.get(s)
+        for i, (d, (kd, hms), v) in enumerate(zip(dates, keys, df[f"{s}_level"])):
+            if _float(v) is not None:
+                continue
+            if time.fromisoformat(hms) < SESSION_OPEN:
+                why = "entry before 09:30"
+            elif first and d.isoformat() < first:
+                why = f"entry date before {s.upper()} coverage ({first})"
+            elif d not in by_date:
+                why = "entry date is not a session in index_ohlc"
+            else:
+                why = f"no valid {s.upper()} bar at or before the entry time that day"
+            counts[why] = counts.get(why, 0) + 1
+            if len(sample) < 25:
+                sample.append({"row": i, "date": d.isoformat(), "time": hms, "reason": why})
+        out[s] = {"null": sum(counts.values()), "reasons": counts, "trades": sample}
+    return out
 
 
 async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -583,11 +842,33 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     entry_rows = [dict(r) for r in rows]
     out = apply_market(df, daily, entry_rows, keys)
     known = set(daily["trade_date"]) if not daily.empty else set()
+
+    # Diagnostics. None of them may cost the log its market data: each failure
+    # is logged with its traceback and reported by name.
+    diag_errors: dict = {}
+    crosscheck = decomposition = labels = None
     try:
-        crosscheck, crosscheck_error = gap_crosscheck(out, daily), None
-    except Exception as exc:  # noqa: BLE001 — a diagnostic must not cost the log its market data
+        crosscheck = gap_crosscheck(out, daily)
+    except Exception as exc:  # noqa: BLE001
         log.exception("oo-backtest gap cross-check failed")
-        crosscheck, crosscheck_error = None, f"{type(exc).__name__}: {exc}"
+        diag_errors["gap_crosscheck"] = f"{type(exc).__name__}: {exc}"
+    try:
+        dd, tt = gap_decomposition_bars_needed(crosscheck, daily)
+        items, ld, lt = label_test_requests(out)
+        bars = await fetch_bars(pool, dd | ld, tt | lt)
+        decomposition = gap_decomposition(crosscheck, daily, bars)
+        labels = label_test(items, bars)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("oo-backtest gap decomposition / label test failed")
+        diag_errors["gap_decomposition"] = f"{type(exc).__name__}: {exc}"
+    try:
+        reasons = null_reasons(out, daily, keys, coverage(daily))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("oo-backtest null reasons failed")
+        reasons, diag_errors["null_reasons"] = None, f"{type(exc).__name__}: {exc}"
+    if crosscheck:
+        crosscheck = {k: v for k, v in crosscheck.items() if not k.startswith("_")}
+
     report = {
         "joined": True,
         "source": "main.index_ohlc",
@@ -595,7 +876,12 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "entry_time": entry_info,
         "entry_bars": entry_bar_report(out, keys),
         "gap_crosscheck": crosscheck,
-        "gap_crosscheck_error": crosscheck_error,
+        "gap_decomposition": decomposition,
+        "label_test": labels,
+        "null_reasons": reasons,
+        "coverage": coverage(daily),
+        "diagnostic_errors": diag_errors,
+        "gap_crosscheck_error": diag_errors.get("gap_crosscheck"),
         # How many trades got a gap at all. All-null here is what the zero-
         # filled weekends produced for a Monday-only log, silently.
         "gaps": {name: {"computed": int(out[col].notna().sum()), "null": int(out[col].isna().sum())}

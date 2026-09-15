@@ -103,6 +103,7 @@ ZERO_HOLIDAY = [date(2023, 7, 4), date(2023, 7, 7)]
 WED, THU, MON2 = date(2023, 7, 5), date(2023, 7, 6), date(2023, 7, 10)
 NAN_HIGH_BAR, ZERO_LOW_BAR = time(10, 20), time(11, 10)   # on WED
 ZERO_VIX_OPEN_BAR = time(10, 0)                            # on THU
+JUMP = 3.0
 
 
 def session_times(d: date) -> list[time]:
@@ -143,6 +144,13 @@ def build_rows() -> list[tuple]:
                 vals["spx_low"] = 0.0                   # min() over raw lows would be 0
             if d == THU and t == ZERO_VIX_OPEN_BAR:
                 vals["vix_open"] = 0.0                  # a zero bar inside a real session
+            # A 3-point jump on two bars the gap decomposition is planted
+            # against. Without it the series is linear, and an open N bars late
+            # fits the same vendor gap as a prior close N bars early.
+            if (d, t) == (WED, time(15, 45)):
+                vals["spx_close"] = round(vals["spx_close"] + JUMP, 4)
+            if (d, t) == (MON2, time(9, 40)):
+                vals["spx_open"] = round(vals["spx_open"] + JUMP, 4)
             rows.append((d, t, vals))
         if d != EARLY:
             # 16:00 partial row with absurd values: must never be read.
@@ -260,6 +268,7 @@ async def run(dsn: str) -> None:
         await load(pool)
         await check_daily(pool)
         await check_entry_join(pool)
+        await check_diagnostics(pool)
         await check_planted(pool)
         await check_end_to_end(pool)
     finally:
@@ -411,6 +420,85 @@ async def check_entry_join(pool) -> None:
         check(z["skipped_uncomputable"] >= 1, f"a zero prior close is skipped and counted ({z['skipped_uncomputable']}), not raised")
     except Exception as exc:  # noqa: BLE001
         check(False, f"a zero prior close is skipped and counted, not raised — raised {type(exc).__name__}: {exc}")
+
+
+def bar_value(s: str, d: date, t: time, field: str) -> float:
+    return px(s, DAYS.index(d), session_times(d).index(t))[field]
+
+
+async def check_diagnostics(pool) -> None:
+    """The cross-check tables, the decomposition, the label test and the null
+    reasons -- each against a planted cause it must name."""
+    print("gap diagnostics")
+    daily, _ = await market.get_daily(pool)
+    base, _ = await market.join_market(pool, trades())
+
+    # Vendor gaps in POINTS: equal to ours, except two planted causes --
+    #   row 7 (Mon 07-10): the vendor's "open" is the 09:40 bar open
+    #   row 8 (Thu 07-06): the vendor's prior close is 07-05's 15:45 close
+    # Two bars away, not one: the fabricated SPX moves 0.5 pt per bar, which is
+    # exactly the tolerance, so a one-bar difference would still "agree".
+    vend = []
+    for i, r in base.iterrows():
+        d = r["date_opened"].date()
+        row = daily[daily["trade_date"] == d]
+        if row.empty or pd.isna(row.iloc[0]["spx_prev_close"]):
+            vend.append(None)
+            continue
+        o, p = row.iloc[0]["spx_open"], row.iloc[0]["spx_prev_close"]
+        if i == 7:
+            vend.append(bar_value("spx", MON2, time(9, 40), "open") + JUMP - p)
+        elif i == 8:
+            vend.append(o - (bar_value("spx", WED, time(15, 45), "close") + JUMP))
+        else:
+            vend.append(o - p)
+    t = trades()
+    t["csv_gap"] = vend
+    # Option Omega's SPX price at entry: row 6 (07-05 10:02:30) inside its own
+    # 10:00 bar only; row 7 (07-10 09:30:00, a boundary) at the 09:30 open.
+    t["spx_open_price"] = [None] * len(t)
+    t.loc[6, "spx_open_price"] = bar_value("spx", WED, time(10, 0), "open")
+    t.loc[7, "spx_open_price"] = bar_value("spx", MON2, time(9, 30), "open")
+    df, rep_ = await market.join_market(pool, t)
+
+    x = rep_["gap_crosscheck"]
+    check(len(x["variants"]) == 6 and {(v["alignment"], v["unit"]) for v in x["variants"]}
+          == {(a, u) for a, _ in market.GAP_ALIGNMENTS for u in market.GAP_UNITS},
+          "all six alignment x unit variants are reported, not only the winner")
+    check(x["best_alignment"] == "previous_row" and x["best_unit"] == "points"
+          and (x["agree"], x["compared"]) == (5, 7),
+          f"winner named: previous_row / points, 5 of 7 ({x['best_alignment']} / {x['best_unit']}, {x['agree']} of {x['compared']})")
+    check(sum(y["compared"] for y in x["by_year"]) == x["compared"]
+          and sum(b["compared"] for b in x["by_magnitude"]) == x["compared"],
+          "per-year and per-magnitude tables account for every compared trade")
+    check(not any(k.startswith("_") for k in x), "internal disagreement list is not in the payload")
+
+    dec = rep_["gap_decomposition"]
+    op = {y["year"]: y["matches"] for y in dec["implied_open"]}
+    pc = {y["year"]: y["matches"] for y in dec["implied_prev_close"]}
+    check(op.get(2023) == {"09:40 open": 1, "none": 1},
+          f"a vendor gap from the 09:40 open is identified as '09:40 open' ({op.get(2023)})")
+    check(pc.get(2023) == {"15:45 close": 1, "none": 1},
+          f"a vendor gap from a 15:45 prior close is identified as '15:45 close' ({pc.get(2023)})")
+
+    lt = {y["year"]: y for y in rep_["label_test"]["by_year"]}[2023]
+    check(lt["trades"] == 2 and lt["start"] == 2 and lt["shift_plus5"] == 0 and lt["on_boundary"] == 1,
+          f"prices inside their start-labeled bars score 'start' ({lt})")
+    t2 = t.copy()
+    t2.loc[6, "spx_open_price"] = bar_value("spx", WED, time(10, 5), "open")   # a +5 min shift
+    _, rep2 = await market.join_market(pool, t2)
+    lt2 = {y["year"]: y for y in rep2["label_test"]["by_year"]}[2023]
+    check(lt2["start"] == 1 and lt2["shift_plus5"] == 1,
+          f"a price from the NEXT bar scores '+5 min', not 'start' ({lt2})")
+
+    nr = rep_["null_reasons"]
+    check(nr["spx_gap"]["reasons"] == {"first session in the table (no previous session)": 2},
+          f"null SPX gaps explained: first session ({nr['spx_gap']['reasons']})")
+    check(nr["vix3m"]["reasons"].get("entry date before VIX3M coverage (2023-06-30)") == 2
+          and nr["vix3m"]["reasons"].get("entry before 09:30") == 1,
+          f"null VIX3M levels explained: coverage vs pre-open ({nr['vix3m']['reasons']})")
+    check(nr["vix"]["reasons"] == {"entry before 09:30": 1}, f"null VIX level explained ({nr['vix']['reasons']})")
+    check(rep_["diagnostic_errors"] == {}, f"no diagnostic raised ({rep_['diagnostic_errors']})")
 
 
 async def check_planted(pool) -> None:
