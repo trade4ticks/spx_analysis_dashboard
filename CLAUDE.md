@@ -32,8 +32,9 @@ $10/$25/$50/$100/$250 gives a bin count nearest 24 (tie → smaller step), outli
 `≥hi` end buckets (≥ because bins are left-closed). The section header names the step
 ("$25 bins (auto)"): two logs with different steps are not bar-for-bar comparable. Auto
 metrics are excluded from the fixed pd.cut parity; `check_auto_bins` tests them against a
-numpy reference instead. Everything else stays `fixed`. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
-dropped. Three section states, worded differently: **skipped** (the log has no values in
+numpy reference instead. Everything else stays `fixed`.
+
+A value outside a fixed category list (e.g. a Saturday) gets its own bar, never dropped. Three section states, worded differently: **skipped** (the log has no values in
 the column), **no data** (the current filter leaves none), **ready**. `check_oo_backtest`
 holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a
 filtered subset.
@@ -97,8 +98,10 @@ it would disagree with the table on days like 2026-04-08. The rule is derived fr
   recompute locally, no server round trip (the old Dash app round-tripped every slider
   nudge). Dates serialize as ISO strings deliberately.
 - **Bin edges come from the server; binning happens in JS.** A gate asserts JS binning
-  matches `pd.cut` at, just below, and just above every edge of every range metric. Any
-  new binning must be covered by that parity gate.
+  matches `pd.cut` at, just below, and just above every edge of every fixed range metric.
+  Any new binning must be covered by that parity gate. The one exception is `binning:
+  "auto"` (Premium): the server sends the rule (steps, target, percentiles), the page
+  builds the edges from the log, and `check_auto_bins` holds that against numpy.
 - **One metric registry** (`registry.py`) drives the filter sidebar, the sections, and the
   payload whitelist. Adding a metric should be one entry (the old app used five parallel
   dicts).
