@@ -127,10 +127,17 @@
     .ob-rank-fam { color:var(--text); text-decoration:none; }
     .ob-rank-fam.off { color:var(--dim); text-decoration:line-through; }
     .ob-rank-wrap { display:flex; height:320px; }
-    .ob-rank-axis { flex:0 0 56px; position:relative; }
+    /* Fixed width that the axis canvas cannot push: a flex item's default
+       min-width is its content, and a canvas's intrinsic width once grew this
+       column to ~290 px, shifting every bar right. */
+    .ob-rank-axis { flex:0 0 56px; width:56px; min-width:0; overflow:hidden; position:relative; }
     .ob-rank-scroll { flex:1; min-width:0; overflow-x:auto; overflow-y:hidden; }
     .ob-rank-inner { height:100%; position:relative; }
     .ob-rank-add { width:auto; max-width:320px; }
+    .ob-rank-foot { margin-top:6px; }
+    .ob-help { color:var(--accent); cursor:help; border-bottom:1px dotted var(--accent); margin-left:6px; }
+    .ob-rank-bhwarn { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px; font-weight:600;
+                      color:var(--warning); background:rgba(250,178,25,.08); border:1px solid rgba(250,178,25,.35); }
     .ob-rowfilter { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
     .ob-rowfilter-slider { flex:0 1 260px; min-width:160px; }
     .ob-range-now { font-size:11px; font-weight:700; color:var(--text); white-space:nowrap; }
@@ -535,15 +542,15 @@
                     x-text="surf.busy ? 'Ranking…' : (surf.result ? 'Recompute' : 'Rank metrics')"></button>
             <span class="ob-rank-stale" x-show="surfStale()">stale — filters or coverage changed since this ranking</span>
             <div class="seg">
-              <div class="seg-btn" :class="{on: surf.method==='spearman'}" @click="setSurfMethod('spearman')">Spearman</div>
-              <div class="seg-btn" :class="{on: surf.method==='pearson'}" @click="setSurfMethod('pearson')">Pearson</div>
+              <div class="seg-btn" :class="{on: surf.method==='spearman'}" @click="setSurfMethod('spearman')" :title="surfTip('spearman')">Spearman</div>
+              <div class="seg-btn" :class="{on: surf.method==='pearson'}" @click="setSurfMethod('pearson')" :title="surfTip('pearson')">Pearson</div>
             </div>
             <div class="seg">
               <template x-for="f in surfaceForms()" :key="f.value">
                 <div class="seg-btn" :class="{on: surf.form===f.value}" @click="setSurfForm(f.value)" x-text="f.label"></div>
               </template>
             </div>
-            <label class="ob-check" :title="'Send only trades from the latest coverage start among the metrics in view, so every bar is measured on the same period'">
+            <label class="ob-check" :title="surfTip('common')">
               <input type="checkbox" :checked="surf.common" @change="toggleCommon()">
               <span>Common coverage only</span>
               <span class="ob-dim" x-text="surfCommonText()"></span>
@@ -592,7 +599,13 @@
               </div>
             </div>
           </div>
-          <div class="ob-dim" style="margin-top:6px;" x-show="surf.result" x-text="surfFooter()"></div>
+          <div class="ob-dim ob-rank-foot" x-show="surf.result">
+            <span x-text="surfFooter()"></span>
+            <span class="ob-help" :title="surfTip('bh')">what is BH?</span>
+          </div>
+          <!-- Prominent, not folded into the footer: later-starting forms sit
+               systematically at low n and can fail BH left of the line. -->
+          <div class="ob-rank-bhwarn" x-show="surf.result && surfBhWarning()" x-text="'⚠ ' + surfBhWarning()"></div>
         </div>
       </div>
 

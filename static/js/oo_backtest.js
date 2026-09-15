@@ -1157,6 +1157,11 @@ document.addEventListener('alpine:init', () => {
     },
 
     surfView() {
+      // The rank rows live outside the proxy (OB_DATA.rank); reading
+      // surf.result -- replaced on every ranking -- is what makes the footer
+      // and the BH warning re-render. Without it both stayed blank on screen
+      // while every direct call returned the right text.
+      void this.surf.result;
       if (!OB_DATA.rank) return null;
       return obRankView(OB_DATA.rank, { method: this.surf.method, form: this.surf.form,
                                         hidden: new Set(Object.keys(this.surf.hidden).filter(k => this.surf.hidden[k])),
@@ -1168,12 +1173,76 @@ document.addEventListener('alpine:init', () => {
       if (!v) return '';
       const name = this.surf.method === 'spearman' ? 'Spearman' : 'Pearson';
       const bh = obBhBoundary(v.bars);
-      const line = bh.index === null ? 'none in view survive, so no line'
-        : `left of the dashed line` + (bh.failLeft ? ` — ${bh.failLeft} bar${bh.failLeft === 1 ? '' : 's'} left of it do${bh.failLeft === 1 ? 'es' : ''} not survive (their n is smaller)` : '');
+      const line = bh.index === null ? 'none in view survive, so no line' : 'left of the dashed line';
       return `${v.bars.length} bars · ${v.survivorsInView} in view survive Benjamini-Hochberg at q ${OB_BH_Q} (${name}; ` +
              `${v.survivorsAll} of ${v.computedAll} computed), ${line}` +
              (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
              ' · opacity by n · click a bar to add its section below';
+    },
+
+    /* The prominent note for bars left of the BH line that do NOT survive.
+     * Not noise: metrics sharing a coverage start share an n, so a later-
+     * starting form (z-scores) sits systematically at the low end of n and
+     * can fail BH at an |r| that passes for a level metric. Said with the
+     * forms and the n ranges, so the cause is visible. */
+    surfBhWarning() {
+      const v = this.surfView();
+      if (!v) return '';
+      const bh = obBhBoundary(v.bars);
+      if (!bh.failLeft) return '';
+      const left = v.bars.slice(0, bh.index);
+      const fail = left.filter(b => !b.survives), pass = left.filter(b => b.survives);
+      const byForm = {};
+      for (const b of fail) byForm[b.form] = (byForm[b.form] || 0) + 1;
+      const labels = this.surf.formLabels || {};
+      const forms = Object.entries(byForm).sort((a, b) => b[1] - a[1])
+        .map(([f, k]) => `${k} ${labels[f] || f}`).join(', ');
+      const range = bs => {
+        const ns = bs.map(b => b.n);
+        const lo = Math.min(...ns), hi = Math.max(...ns);
+        return lo === hi ? lo.toLocaleString() : `${lo.toLocaleString()}–${hi.toLocaleString()}`;
+      };
+      const s = fail.length === 1 ? '' : 's';
+      return `${fail.length} bar${s} left of the BH line do${fail.length === 1 ? 'es' : ''} NOT survive (${forms}): ` +
+             `n ${range(fail)} against ${range(pass)} for the bars that do. A later coverage start means fewer trades, ` +
+             `so the same |r| is weaker evidence. To compare like with like, view one form or use Common coverage only.`;
+    },
+
+    /* Tooltip text for the ranking's three statistical choices. */
+    surfTip(which) {
+      const n = this.surfView() ? this.surfView().computedAll : (this.surf.catalog || []).length || null;
+      // Coverage starts per form, read from the catalog -- never written in.
+      const starts = {};
+      for (const m of this.surf.catalog || []) {
+        if (m.min_date && (!starts[m.form] || m.min_date < starts[m.form])) starts[m.form] = m.min_date;
+      }
+      const labels = this.surf.formLabels || {};
+      const startText = Object.entries(starts).sort((a, b) => (a[1] < b[1] ? -1 : 1))
+        .map(([f, d]) => `${labels[f] || f} from ${d}`).join(', ');
+      switch (which) {
+        case 'spearman':
+          return 'Spearman ρ: correlation of RANKS. Asks whether P/L tends to rise or fall as the metric rises, ' +
+                 'whatever the shape of the relationship. One huge winner or an extreme metric value cannot ' +
+                 'dominate it. Prefer it when a relationship may be monotone but not a straight line.';
+        case 'pearson':
+          return 'Pearson r: LINEAR correlation of the raw values — how well a straight line fits P/L against the ' +
+                 'metric. A few large-P/L trades or extreme metric values can create or hide it. Where it disagrees ' +
+                 'with Spearman, outliers or a curved relationship are usually the reason.';
+        case 'bh':
+          return `Benjamini-Hochberg false-discovery control at q ${OB_BH_Q}, over every metric computed` +
+                 (n ? ` (${n})` : '') + ' — hidden families and other forms still count, because they were tested. ' +
+                 'Bars left of the dashed line have an adjusted p below q: of those, about 5% are expected to be ' +
+                 'false discoveries' + (n ? `, against ~${Math.round(n * 0.05)} of ${n} looking "significant" by chance at raw p < 0.05` : '') + '. ' +
+                 'It is not a cutoff on |r|: the adjusted p also depends on each metric\'s n. The p-values assume ' +
+                 'independent trades; trades sharing an entry bar share a value (see distinct bars in the hover).';
+        case 'common':
+          return 'Each metric is correlated over the trades that have a value for it, and metrics start on different ' +
+                 'dates' + (startText ? ` (${startText})` : '') + ', so without this a z-score bar and a level ' +
+                 'bar describe different periods. Common coverage only sends trades from the latest start among the ' +
+                 'metrics in view, so every bar is measured on the same trades — at the cost stated beside it.';
+        default:
+          return '';
+      }
     },
 
     renderRanking() {

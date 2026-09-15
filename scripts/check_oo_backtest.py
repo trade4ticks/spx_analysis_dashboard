@@ -1047,7 +1047,8 @@ global.fetch = async (url, init) => {
   if (url.endsWith('/surface/rank')) {
     const body = JSON.parse(init.body);
     sent.push(body.trades);
-    return j({ rows, report: { with_bar: 3, no_bar: body.trades.length - 3, distinct_entries: 3 }, lookahead_confirmed: true });
+    return j({ rows: sent.length > 3 ? job.rows2 : rows, report: { with_bar: 3, no_bar: body.trades.length - 3, distinct_entries: 3 },
+               lookahead_confirmed: true });
   }
   throw new Error('unexpected ' + url);
 };
@@ -1075,6 +1076,10 @@ global.fetch = async (url, init) => {
   await c.rankSurface();
   out.sent3 = sent[2];
   out.sub3 = c.surfSubline();
+  out.noWarn = c.surfBhWarning();
+  await c.rankSurface();
+  out.bhWarn = c.surfBhWarning();
+  out.tips = { bh: c.surfTip('bh'), common: c.surfTip('common'), spearman: c.surfTip('spearman'), pearson: c.surfTip('pearson') };
   c.setTrades(job.payload);
   out.clearedOnNewLog = c.surf.result === null;
   out.forms = c.surfaceForms().map(f => f.label);
@@ -1108,6 +1113,13 @@ def check_surface_ranking_ui() -> None:
         row("dead", "vov", "z", 2, None, None, None, None),
         row("new_fam", "brand_new", "level", 1000, 0.15, 0.15, 0.30, 0.30),
     ]
+    # Ranked by |rho|: a survivor, two z-score non-survivors at lower n, then
+    # a level survivor -- non-survivors LEFT of the line.
+    rows2 = [row("lv_1", "iv", "level", 1351, 0.30, 0.30, 0.001, 0.001),
+             row("z_1", "iv", "z", 1203, 0.28, 0.28, 0.07, 0.07),
+             row("z_2", "skew", "z", 1210, -0.27, -0.27, 0.08, 0.08),
+             row("lv_2", "skew", "level", 1340, 0.26, 0.26, 0.02, 0.02),
+             row("lv_3", "rv", "level", 1348, 0.05, 0.05, 0.60, 0.60)]
     catalog = [{"column_name": r["column"], "family": r["family"], "form": r["form"], "min_date": d,
                 "description": "desc " + r["column"], "formula": "f", "units": "vol_decimal"}
                for r, d in zip(rows, ["2020-01-02", "2021-04-05", "2020-01-02", "2021-01-05", "2021-04-05", "2020-01-02"])]
@@ -1120,7 +1132,7 @@ def check_surface_ranking_ui() -> None:
     reg = json.loads(json.dumps(REGISTRY))
     from app.oo_backtest import surface
     p = subprocess.run(["node", "-e", RANK_DRIVER, str(JS)],
-                       input=json.dumps({"rows": rows, "catalog": catalog, "payload": payload, "registry": reg,
+                       input=json.dumps({"rows": rows, "rows2": rows2, "catalog": catalog, "payload": payload, "registry": reg,
                                          "groups": surface.FAMILY_GROUPS, "other": surface.OTHER_GROUP,
                                          "formLabels": surface.FORM_LABELS}),
                        capture_output=True, text=True, encoding="utf-8")
@@ -1174,6 +1186,14 @@ def check_surface_ranking_ui() -> None:
           and "common coverage from 2021-04-05" in o["sub3"],
           f"enabling common coverage marks it stale; the next request sends only trades from the common start ({o['sub3']})")
     check(o["clearedOnNewLog"], "loading another log clears the previous ranking")
+    check(o["noWarn"] == "" and o["bhWarn"].startswith("2 bars left of the BH line do NOT survive (2 Z-score)")
+          and "n 1,203–1,210 against 1,340–1,351" in o["bhWarn"] and "Common coverage only" in o["bhWarn"],
+          f"prominent BH warning names the forms and n ranges of non-survivors left of the line ({o['bhWarn'][:120]})")
+    t = o["tips"]
+    check("Level from 2020-01-02" in t["common"] and "Z-score from 2021-04-05" in t["common"]
+          and "2021 at the time" not in t["common"] and "of 5 looking" in t["bh"] and "not a cutoff on |r|" in t["bh"]
+          and "RANKS" in t["spearman"] and "LINEAR" in t["pearson"],
+          "tooltips: BH, Spearman, Pearson, common coverage -- coverage starts and the chance count come from the data, not text")
     check(o["forms"] == ["All forms", "Level", "Daily chg", "Z-score"]
           and o["groups"] == ["IV:iv", "Skew:skew", "Realized & VRP:rv", "Spot dynamics:vov", "Other:brand_new"],
           f"form buttons and legend groups come from the catalog response; an unassigned family lands in Other "

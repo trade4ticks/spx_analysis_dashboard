@@ -63,7 +63,9 @@ and reported under the chart.
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —
-done; **P6c** added metric rows — done; **P6d** per-row filters — done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+done; **P6c** added metric rows — done; **P6d** per-row filters — done. **P6 is complete**; no
+separate doc (user, 2026-09-15) — explanations live in tooltips (BH, Spearman vs Pearson,
+common coverage only; `surfTip`, coverage dates and chance counts read from the data). **P6c** add-a-metric rows (generic "nice"-step auto bins, units
 formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
 trades a coverage gap would drop); P6e docs.
 
@@ -112,13 +114,21 @@ the chosen method (Spearman default / Pearson); form filter; legend toggles sing
 **BH is a faint dashed line after the last bar surviving q 0.05** (sorting method) — no bar
 outlines (the user found white borders abrasive). BH is not a pure |r| threshold (adjusted p
 depends on n), so survivors need not be a contiguous run: `obBhBoundary` puts the line after
-the last survivor and the footer counts non-survivors left of it. **Common coverage only** sends
+the last survivor. Non-survivors left of it get a **prominent warning box**, not a footer
+aside: metrics sharing a coverage start share n, so later-starting forms (z-scores) sit
+SYSTEMATICALLY at the low end of n and fail at an |r| that passes for levels — the box names
+their forms and n ranges. (An earlier note calling this "rare" was wrong.) **Common coverage only** sends
 only trades from the latest `min_date` among metrics in view, and states its cost first:
 trades in [earliest start, common start) that some metric in view would lose. Family hues
 (`surface.FAMILY_GROUPS`, 8 groups for ~14 families; unassigned → grey "Other") and form
 labels come with the catalog response — the page JS names no family (the dropped-scope
-guard enforces it). Derived values that read `OB_DATA.idx` must read `idxTick`, or Alpine
-never re-renders them (the headline was blank until that was added).
+guard enforces it). **Reactivity trap, hit twice:** anything derived from data kept outside
+the Alpine proxy must read a reactive value or it never re-renders — `OB_DATA.idx` →
+`idxTick` (the headline was blank), `OB_DATA.rank` → `surf.result` in `surfView()` (the
+footer and BH warning were blank on screen while direct calls, and so the node gates,
+returned the right text). Gates call methods directly and cannot see this; only a rendered
+check can. The fixed y-axis column needs `min-width:0; overflow:hidden` or its canvas's
+intrinsic width widens it (~290 px) and shifts every bar.
 
 **Added metric rows (P6c).** A ranking bar click or the family-grouped dropdown adds a
 section row below the ranking card. The row fetches that ONE metric for EVERY trade in the
