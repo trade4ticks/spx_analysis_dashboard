@@ -568,6 +568,121 @@ def check_stats_parity() -> None:
           f"same-day closes: max drawdown equals a stable-order pandas sort ({got['ties']['stats']['max_drawdown']:.2f})")
 
 
+SECTION_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+for (const [key, t] of Object.entries(job)) {
+  const d = obSectionData(t.cols, t.idx, t.metric, t.column);
+  out[key] = { rows: d.rows, valued: d.valued, fit: obOLS(d.xs, d.ys),
+               swapped: obOLS(d.ys, d.xs), raw: t.raw ? obOLS(t.raw.xs, t.raw.ys) : null };
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def check_section_parity() -> None:
+    """Every metric section's numbers vs the Python they replace: per-bin
+    count / total / mean / win rate against calculations.py calculate_bin_stats
+    over the same pd.cut, and the scatter's OLS line against
+    calculate_correlation (scipy linregress / pearsonr). Run over the whole
+    log AND a filtered subset, since the page recomputes from filtered rows."""
+    print("metric sections: shipped JS vs calculate_bin_stats / calculate_correlation")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("JS metric-section parity (node not installed)")
+        return
+    reg = json.loads(json.dumps(REGISTRY, allow_nan=False))
+    sections = [m for m in reg if m["section"]]
+    rng = random.Random(19)
+    n = 900
+
+    def values_for(m):
+        if m["key"] == "day_of_week":
+            # A 5 (Saturday) is outside the fixed list: it must get its own bar.
+            return [None if i % 41 == 0 else (5 if i % 97 == 0 else rng.randint(0, 4)) for i in range(n)]
+        if m["key"] == "year":
+            return [rng.randint(2017, 2026) for _ in range(n)]
+        e = m["bins"]["edges"]
+        span = (e[-1] - e[0]) or 1.0
+        pool = list(e) + [round(rng.uniform(e[0] - 0.2 * span, e[-1] + 0.2 * span), 2) for _ in range(n)]
+        return [None if i % 23 == 0 else rng.choice(pool) for i in range(n)]
+
+    pnl = [0.0 if i % 31 == 0 else round(rng.gauss(30, 500), 2) for i in range(n)]
+    subset = [i for i in range(n) if rng.random() < 0.4]
+    job, want = {}, {}
+    for m in sections:
+        col = m["basis"]["entry"] if m["basis"] else m["column"]
+        vals = values_for(m)
+        cols = {col: vals, "pnl": pnl}
+        for scope, idx in (("all", list(range(n))), ("subset", subset)):
+            key = f"{m['key']}:{scope}"
+            job[key] = {"cols": cols, "idx": idx, "metric": m, "column": col}
+            df = pd.DataFrame({col: pd.Series([math.nan if vals[i] is None else vals[i] for i in idx], dtype=float),
+                               "pnl": [pnl[i] for i in idx]})
+            if m["type"] == "range":
+                df = calc.apply_bin_spec(df, col, {"bins": [-math.inf] + m["bins"]["edges"] + [math.inf],
+                                                   "labels": m["bins"]["labels"],
+                                                   "right": m["bins"]["closed"] == "right"})
+                bs = calc.calculate_bin_stats(df, f"{col}_bin")
+                labels = list(bs["bin"].astype(str))
+                corr = calc.calculate_correlation(df, col)
+            else:
+                names = {c["value"]: c["label"] for c in (m["categories"] or [])}
+                bs = calc.calculate_bin_stats(df.dropna(subset=[col]).astype({col: int}), col)
+                labels = [names.get(int(v), str(int(v))) for v in bs["bin"]]
+                corr = None
+            want[key] = {"rows": [{"label": lab, "count": int(r["count"]), "total": float(r["total_pnl"]),
+                                   "avg": float(r["avg_pnl"]), "win": float(r["win_rate"])}
+                                  for lab, (_, r) in zip(labels, bs.iterrows())],
+                         "valued": int(df[col].notna().sum()), "corr": corr}
+
+    # Degenerate fits: two points; every x the same.
+    job["deg"] = {"cols": {"v": [1.0], "pnl": [1.0]}, "idx": [0], "metric": sections[2], "column": "v",
+                  "raw": {"xs": [3.0, 3.0, 3.0, 3.0], "ys": [1.0, -2.0, 5.0, 0.0]}}
+    job["two"] = {"cols": {"v": [1.0, 2.0], "pnl": [10.0, -4.0]}, "idx": [0, 1], "metric": sections[2], "column": "v"}
+
+    p = subprocess.run(["node", "-e", SECTION_DRIVER, str(JS)], input=json.dumps(job),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"section driver ran ({p.stderr.strip()[:300]})")
+        return
+    got = json.loads(p.stdout)
+
+    def close(a, b):
+        return a is not None and b is not None and math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-6)
+
+    for key, w in want.items():
+        g = got[key]
+        same_rows = (len(g["rows"]) == len(w["rows"]) and all(
+            a["label"] == b["label"] and a["count"] == b["count"]
+            and all(close(a[k], b[k]) for k in ("total", "avg", "win"))
+            for a, b in zip(g["rows"], w["rows"])))
+        first = next((i for i, (a, b) in enumerate(zip(g["rows"], w["rows"])) if a != b), None)
+        check(same_rows and g["valued"] == w["valued"],
+              f"{key}: {len(w['rows'])} bins equal calculate_bin_stats ({w['valued']} valued)"
+              + ("" if same_rows else f" — js {g['rows'][first] if first is not None else len(g['rows'])} vs pandas "
+                 f"{w['rows'][first] if first is not None else len(w['rows'])}"))
+        c = w["corr"]
+        if c is not None:
+            f = g["fit"]
+            ok = f is not None and all(close(f[a], c[b]) for a, b in
+                                       (("slope", "slope"), ("intercept", "intercept"), ("r", "correlation"), ("r2", "r_squared")))
+            check(ok, f"{key}: OLS slope/intercept/r/R² equal calculate_correlation"
+                  + ("" if ok else f" — js {f} vs {c}"))
+            check(f is not None and not close(g["swapped"]["slope"], c["slope"]),
+                  f"{key}: a fit of x on y (planted swap) IS detected")
+
+    dow = got["day_of_week:all"]["rows"]
+    check([r["label"] for r in dow] == ["Mon", "Tue", "Wed", "Thu", "Fri", "5"],
+          f"day of week: bars in Mon-Fri order, an off-list value kept as its own bar ({[r['label'] for r in dow]})")
+    check(got["two"]["fit"] is None and got["deg"]["raw"] is None,
+          "no OLS line from fewer than 3 points, or when every x is identical")
+
+
 COMPONENT_DRIVER = r"""
 const fs = require('fs');
 let factory;
@@ -596,6 +711,12 @@ c.filters.dateFrom = '2021-03-01'; c.onFilterChange(); out.date = snap();
 c.resetAllFilters();
 c.setHi(R('vix3m_vix'), c.rangeOf(R('vix3m_vix')).min); const before = copy(c.rangeOf(R('vix3m_vix')));
 c.setRatioBasis('close'); out.basis = { before, after: c.rangeOf(R('vix3m_vix')), specs: c.activeSpecs().map(s => s.column) };
+c.setRatioBasis('entry'); c.resetAllFilters();
+const states = () => Object.fromEntries(c.sectionMetrics().map(m => [m.key, c.sectionState(m)]));
+out.sectionsAll = { states: states(), vix: c.sections.vix, sub: c.sectionSub(R('vix')) };
+// Only the 2021-02-01 trade, whose VIX is null: the log HAS VIX, this filter does not.
+c.filters.dateFrom = '2021-02-01'; c.filters.dateTo = '2021-02-01'; c.onFilterChange();
+out.sectionsOne = { count: c.filteredCount, states: states() };
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -654,6 +775,16 @@ def check_component_filters() -> None:
     b = o["basis"]
     check(b["before"]["max"] < 1.2 and b["after"]["max"] == 1.3 and b["specs"] == [],
           f"switching ratio basis rebuilds that filter from the new column and drops the old narrowing ({b['after']})")
+    sa, so = o["sectionsAll"], o["sectionsOne"]
+    want_all = {"day_of_week": "ready", "year": "skipped", "gap": "skipped", "vix_gap": "skipped", "premium": "ready",
+                "vix": "ready", "vix3m": "skipped", "vix9d": "skipped", "vix3m_vix": "ready", "vix_vix9d": "skipped"}
+    check(sa["states"] == want_all,
+          f"on load: a section is ready where the log has values, skipped where the column is absent ({sa['states']})")
+    check(sa["vix"]["valued"] == 5 and sa["vix"]["fit"] is not None and "5 of 6 trades" in sa["sub"],
+          f"VIX section: 5 of 6 trades have a value, and the header says so ({sa['sub']})")
+    check(so["count"] == 1 and so["states"]["vix"] == "nodata" and so["states"]["premium"] == "ready"
+          and so["states"]["gap"] == "skipped",
+          f"a filter leaving no VIX value makes that section 'nodata', distinct from 'skipped' ({so['states']})")
 
 
 def main() -> int:
@@ -661,6 +792,7 @@ def main() -> int:
     check_against_source()
     check_binning()
     check_stats_parity()
+    check_section_parity()
     check_component_filters()
     check_dropped_scope()
     check_parsers()

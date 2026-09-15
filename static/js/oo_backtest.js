@@ -20,7 +20,9 @@
  * Phase 3: filters (one date range, a dual slider per range metric bounded by
  * the loaded data, checkboxes per categorical metric), the ten summary stats
  * and the cumulative P/L + drawdown charts, all recomputed in the browser.
- * The metric sections are still stubs.
+ * Phase 4: the ten metric sections -- avg and total P/L by bin, and P/L vs the
+ * metric with an OLS line (categorical metrics: no scatter; year adds win
+ * rate) -- recomputed on every filter change from the filtered rows.
  * ==========================================================================*/
 
 const OB_BLUE = '#3498db';   // positive (theme --accent)
@@ -31,7 +33,7 @@ const OB_PINK = '#e84393';   // negative
  * template binds to an individual value. */
 const OB_DATA = { columns: null, n: 0, file: null, idx: [] };
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
-const OB_CHARTS = { cum: null, dd: null };
+const OB_CHARTS = { cum: null, dd: null, sec: {} };
 
 /* ── pure helpers (exercised in node by scripts/check_oo_backtest.py) ─────── */
 
@@ -166,6 +168,66 @@ function obEquity(cols, idx) {
   return { points, maxDD };
 }
 
+/* P/L by bin for one metric section, as calculations.py calculate_bin_stats
+ * over pd.cut: per bin count, total, mean and win rate (pnl > 0), empty bins
+ * omitted (groupby observed=True), bins in label order. Trades with no value
+ * in `column` are in no bin.
+ *   range metric       bins from m.bins via obBinIndex
+ *   categorical metric one bin per value: m.categories order first, then any
+ *                      value the log has that the list lacks, labelled by the
+ *                      value itself -- a Saturday trade is shown, not dropped.
+ * Returns { valued, rows:[{label, count, total, avg, win}], xs, ys, rowsIdx }
+ * where xs/ys/rowsIdx are the (value, pnl, row) triples the scatter plots. */
+function obSectionData(cols, idx, m, column) {
+  const vals = cols[column] || [], pnl = cols.pnl;
+  const acc = new Map();   // label -> {extra, key, label, count, total, wins}
+  const xs = [], ys = [], rowsIdx = [];
+  const cats = m.categories ? new Map(m.categories.map((c, i) => [c.value, { i, label: c.label }])) : null;
+  for (const i of idx) {
+    const v = vals[i];
+    if (obNull(v)) continue;
+    // `extra` 0 sorts by bin/category index; 1 is a value outside a fixed
+    // category list (or any value of a data-derived one), sorted by value.
+    let extra = 0, key, label;
+    if (m.type === 'range') {
+      key = obBinIndex(v, m.bins); label = m.bins.labels[key];
+    } else if (cats && cats.has(v)) {
+      key = cats.get(v).i; label = cats.get(v).label;
+    } else {
+      extra = 1; key = v; label = String(v);
+    }
+    let b = acc.get(extra + ':' + key);
+    if (!b) acc.set(extra + ':' + key, b = { extra, key, label, count: 0, total: 0, wins: 0 });
+    b.count++; b.total += pnl[i]; if (pnl[i] > 0) b.wins++;
+    xs.push(v); ys.push(pnl[i]); rowsIdx.push(i);
+  }
+  const rows = [...acc.values()].sort((a, b) =>
+    a.extra - b.extra || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+  ).map(b => ({ label: b.label, count: b.count, total: b.total, avg: b.total / b.count, win: b.wins / b.count * 100 }));
+  return { valued: xs.length, rows, xs, ys, rowsIdx };
+}
+
+/* Ordinary least squares of y on x, as scipy.stats.linregress (the fit
+ * calculate_correlation reports). Null below 3 points, as that function
+ * returns, or when every x is identical (no line exists). r is null when every
+ * y is identical (Pearson r is undefined there). */
+function obOLS(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return null;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+  mx /= n; my /= n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+  }
+  if (sxx === 0) return null;
+  const slope = sxy / sxx;
+  const r = syy === 0 ? null : Math.max(-1, Math.min(1, sxy / Math.sqrt(sxx * syy)));
+  return { n, slope, intercept: my - slope * mx, r, r2: r === null ? null : r * r };
+}
+
 /* Days since the epoch for an ISO date, for a linear x axis (no date adapter). */
 function obDay(iso) { return Date.parse(iso + 'T00:00:00Z') / 86400000; }
 function obIsoDay(d) { return new Date(Math.round(d) * 86400000).toISOString().slice(0, 10); }
@@ -244,6 +306,9 @@ document.addEventListener('alpine:init', () => {
     dateBounds: { min: '', max: '' },
     filteredCount: 0,
     stats: null,
+    // Per metric-section summary {valued, bins, fit}, keyed by registry key;
+    // the chart data itself stays outside the proxy.
+    sections: {},
     _rafPending: false,
 
     // Which ratio basis the sections read: entry-time bars (default) or the
@@ -594,6 +659,7 @@ document.addEventListener('alpine:init', () => {
       this.filteredCount = idx.length;
       this.stats = obStats(OB_DATA.columns, idx);
       this.renderPerformance(obEquity(OB_DATA.columns, idx));
+      this.renderSections(idx);
     },
 
     fmtVal(m, v) { return obFmt(v, m.format); },
@@ -717,10 +783,125 @@ document.addEventListener('alpine:init', () => {
 
     binCount(m) { return m.bins ? m.bins.labels.length : null; },
 
-    /* A range section is skipped when its column is absent or all-null. */
+    /* ── metric sections ───────────────────────────────────────────────── */
+
+    /* Three states, each worded differently on screen so none reads as a
+     * broken chart:
+     *   skipped  the LOG has no values in the column (absent or all null)
+     *   nodata   the log has values, but no trade in the current filter does
+     *   ready    charts drawn from `sections[key]`
+     * Filled by renderSections(); a section recompute never makes a request. */
     sectionState(m) {
       if (!this.loaded) return 'empty';
-      return this.hasColumn(m) ? 'ready' : 'skipped';
+      if (!this.hasColumn(m)) return 'skipped';
+      const s = this.sections[m.key];
+      return s && s.valued ? 'ready' : 'nodata';
+    },
+
+    sectionSub(m) {
+      const s = this.sections[m.key];
+      const col = this.metricColumn(m);
+      if (!s || !s.valued) return col;
+      const of = s.valued === this.filteredCount ? '' : ` of ${this.filteredCount.toLocaleString()}`;
+      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${s.bins} ${m.type === 'range' ? 'bins' : 'values'}`;
+    },
+
+    fitText(m) {
+      const f = this.sections[m.key] && this.sections[m.key].fit;
+      if (!f) return 'no fit (fewer than 3 points, or one x value)';
+      // Cents where the slope is small: premium's is well under $1 per $1.
+      const slope = obMoney(f.slope, Math.abs(f.slope) < 10 ? 2 : 0) + ' per ' + (m.format === 'pct' ? '1%' : m.format === 'ratio' ? '1.0' : m.format === 'usd' ? '$1' : '1 pt');
+      return f.r === null ? `slope ${slope}` : `r ${f.r.toFixed(3)} · R² ${f.r2.toFixed(3)} · slope ${slope}`;
+    },
+
+    canvasId(m, which) { return `ob-sec-${m.key}-${which}`; },
+
+    /* "bin" for a range metric; the category's own name otherwise
+     * ("Day of Week" -> "day of week", "P&L by Year" -> "year"). */
+    binNoun(m) { return m.type === 'range' ? 'bin' : m.label.replace(/^P&L by /, '').toLowerCase(); },
+
+    renderSections(idx) {
+      const sections = {};
+      for (const m of this.sectionMetrics()) {
+        if (!this.hasColumn(m)) continue;
+        const d = obSectionData(OB_DATA.columns, idx, m, this.metricColumn(m));
+        const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
+        sections[m.key] = { valued: d.valued, bins: d.rows.length, fit };
+        if (d.valued) this.drawSection(m, d, fit);
+      }
+      this.sections = sections;
+    },
+
+    drawSection(m, d, fit) {
+      if (typeof Chart === 'undefined') return;
+      const signColor = v => (v >= 0 ? OB_BLUE : OB_PINK);
+      const grid = { color: 'rgba(255,255,255,0.05)' };
+      const tick = { color: '#9a9a9a', font: { size: 10 } };
+      const labels = d.rows.map(r => r.label);
+      const rowTip = r => [`${r.count.toLocaleString()} trade${r.count === 1 ? '' : 's'}`,
+                           `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(r.total)}`, `Win ${r.win.toFixed(1)}%`];
+      const bar = (values, yTick, color) => ({
+        type: 'bar',
+        data: { labels, datasets: [{ data: values, backgroundColor: values.map(color),
+                                     borderRadius: 4, borderSkipped: 'start', maxBarThickness: 36 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { grid: { display: false }, border: { display: false },
+                 ticks: { ...tick, autoSkip: true, maxRotation: 60, minRotation: 0 } },
+            y: { grid, border: { display: false }, ticks: { ...tick, maxTicksLimit: 6, callback: yTick } },
+          },
+          plugins: { legend: { display: false },
+                     tooltip: { callbacks: { title: it => it[0].label, label: it => rowTip(d.rows[it.dataIndex]) } } },
+        },
+      });
+      this.upsertChart(this.canvasId(m, 'avg'), bar(d.rows.map(r => r.avg), v => obMoney(v), signColor));
+      this.upsertChart(this.canvasId(m, 'total'), bar(d.rows.map(r => r.total), v => obMoney(v), signColor));
+      if (m.winRate) {
+        const cfg = bar(d.rows.map(r => r.win), v => v + '%', () => OB_BLUE);
+        Object.assign(cfg.options.scales.y, { min: 0, max: 100 });
+        this.upsertChart(this.canvasId(m, 'win'), cfg);
+      }
+      if (!m.hasScatter) return;
+
+      const cols = OB_DATA.columns;
+      const pts = d.xs.map((x, k) => ({ x, y: d.ys[k], row: d.rowsIdx[k] }));
+      let lo = Infinity, hi = -Infinity;
+      for (const x of d.xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
+      const line = fit ? [{ x: lo, y: fit.intercept + fit.slope * lo }, { x: hi, y: fit.intercept + fit.slope * hi }] : [];
+      this.upsertChart(this.canvasId(m, 'scatter'), {
+        type: 'scatter',
+        data: { datasets: [
+          { data: pts, pointRadius: 2.5, pointHoverRadius: 5, pointHitRadius: 4, borderWidth: 0,
+            pointBackgroundColor: pts.map(p => (p.y >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)')) },
+          { data: line, type: 'line', borderColor: '#e0e0e0', borderWidth: 2, borderDash: [5, 4],
+            pointRadius: 0, pointHitRadius: 0, fill: false },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+          scales: {
+            x: { type: 'linear', grid, border: { display: false }, ticks: { ...tick, maxTicksLimit: 7, callback: v => obFmt(v, m.format) } },
+            y: { grid, border: { display: false }, ticks: { ...tick, maxTicksLimit: 6, callback: v => obMoney(v) } },
+          },
+          plugins: { legend: { display: false },
+                     tooltip: { filter: it => it.datasetIndex === 0,
+                                callbacks: { title: it => cols.date_opened[it[0].raw.row],
+                                             label: it => `${m.label} ${obFmt(it.raw.x, m.format)} · P/L ${obMoney(it.raw.y)}` } } },
+        },
+      });
+    },
+
+    /* Create a section chart, or update it in place. A canvas Alpine has
+     * replaced is a different element: that chart is destroyed, not updated
+     * into a detached node. */
+    upsertChart(id, cfg) {
+      const el = document.getElementById(id);
+      const old = OB_CHARTS.sec[id];
+      if (old && old.canvas !== el) { old.destroy(); delete OB_CHARTS.sec[id]; }
+      if (!el) return;
+      const ch = OB_CHARTS.sec[id];
+      if (ch) { ch.data = cfg.data; ch.options = cfg.options; ch.update('none'); }
+      else OB_CHARTS.sec[id] = new Chart(el.getContext('2d'), cfg);
     },
 
     /* What the parser dropped or had to decide, said on load rather than left

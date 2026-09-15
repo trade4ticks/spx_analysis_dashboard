@@ -108,11 +108,6 @@
       min-height:70px; padding:12px; color:var(--dim); font-size:12px;
       border:1px dashed var(--border); border-radius:4px; background:rgba(0,0,0,.12);
     }
-    .ob-phase {
-      font-size:9px; font-weight:700; letter-spacing:.3px; text-transform:uppercase;
-      padding:1px 6px; border-radius:3px; margin-left:6px;
-      background:rgba(52,152,219,.12); color:var(--accent); border:1px solid var(--accent);
-    }
     .ob-empty { padding:50px 20px; text-align:center; color:var(--dim); font-size:13px; }
 
     .ob-sec-grid { display:grid; gap:10px; grid-template-columns:repeat(3, minmax(0,1fr)); }
@@ -383,22 +378,41 @@
         </div>
       </div>
 
-      <!-- One card per registry entry with section: true, in registry order. -->
+      <!-- One card per registry entry with section: true, in registry order.
+           The canvases stay in the DOM (x-show) so a chart survives a section
+           going to "no data" and back under a filter. -->
       <template x-for="m in sectionMetrics()" :key="m.key">
-        <div class="ob-card">
+        <div class="ob-card" x-show="loaded && filteredCount > 0">
           <div class="ob-card-hdr">
-            <span class="ob-card-title" x-text="m.label"></span><span class="ob-phase">P4</span>
-            <span class="ob-card-sub"
-                  x-text="metricColumn(m) + (m.bins ? ' · ' + binCount(m) + ' bins, ' + m.bins.closed + '-closed' + (m.bins.labelEdge === 'left' ? ', labelled by left edge' : '') : ' · categorical')"></span>
+            <span class="ob-card-title" x-text="m.label"></span>
+            <span class="ob-card-sub" x-text="sectionSub(m)"
+                  :title="m.bins ? binCount(m) + ' bins, ' + m.bins.closed + '-closed' + (m.bins.labelEdge === 'left' ? ', labelled by left edge' : '') : 'categorical'"></span>
           </div>
           <div class="ob-card-body">
-            <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'">
-              Skipped — this log has no values in <span x-text="' ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></span>
-            </div>
-            <div class="ob-sec-grid" :class="{ two: !m.hasScatter }" x-show="sectionState(m) !== 'skipped'">
-              <div class="ob-placeholder">Avg P/L by bin</div>
-              <div class="ob-placeholder">Total P/L by bin</div>
-              <div class="ob-placeholder" x-show="m.hasScatter">P/L vs metric (OLS)</div>
+            <!-- One text node: .ob-placeholder is a flex box, which would drop
+                 the space between a text run and a child span. -->
+            <div class="ob-placeholder" x-show="sectionState(m) === 'skipped'"
+                 x-text="'Skipped — this log has no values in ' + metricColumn(m) + (meta && meta.market && !meta.market.joined ? ' (market data not joined)' : '')"></div>
+            <div class="ob-placeholder" x-show="sectionState(m) === 'nodata'"
+                 x-text="'No data — none of the ' + filteredCount.toLocaleString() + ' filtered trades has a value in ' + metricColumn(m)"></div>
+            <div class="ob-sec-grid" :class="{ two: !m.hasScatter && !m.winRate }" x-show="sectionState(m) === 'ready'">
+              <div class="chart-box">
+                <div class="chart-title" x-text="'Avg P/L by ' + binNoun(m)"></div>
+                <div class="chart-canvas"><canvas :id="canvasId(m, 'avg')" role="img" :aria-label="'Average P/L by ' + m.label"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title" x-text="'Total P/L by ' + binNoun(m)"></div>
+                <div class="chart-canvas"><canvas :id="canvasId(m, 'total')" role="img" :aria-label="'Total P/L by ' + m.label"></canvas></div>
+              </div>
+              <div class="chart-box" x-show="m.winRate">
+                <div class="chart-title" x-text="'Win rate by ' + binNoun(m)"></div>
+                <div class="chart-canvas"><canvas :id="canvasId(m, 'win')" role="img" :aria-label="'Win rate by ' + m.label"></canvas></div>
+              </div>
+              <div class="chart-box" x-show="m.hasScatter">
+                <div class="chart-title"><span x-text="'P/L vs ' + m.label"></span>
+                  <span class="ob-dim" x-text="fitText(m)"></span></div>
+                <div class="chart-canvas"><canvas :id="canvasId(m, 'scatter')" role="img" :aria-label="'P/L against ' + m.label + ' with a least-squares line'"></canvas></div>
+              </div>
             </div>
           </div>
         </div>

@@ -13,8 +13,18 @@ Replaces the old Dash/Render backtest app. Code: `app/oo_backtest/` (parsers, `m
 `templates/oo_backtest.html`, `static/js/oo_backtest.js`.
 
 Phases: P1 scaffold/parsers/registry (`3c34b28`), P2 market data (`4e509b9`),
-P2b saved strategies (`10ec652`), P3 filters/stats/charts (`8e89003`). Remaining: P4 (ten
-metric sections), P5 (docs).
+P2b saved strategies (`10ec652`), P3 filters/stats/charts (`8e89003`), P4 the ten metric
+sections. Remaining: P5 (docs).
+
+**Metric sections (P4).** One card per registry entry with `section: true`: avg and total
+P/L by bin, plus P/L vs metric with an OLS line (categorical: no scatter; `winRate` adds a
+separate win-rate chart — never a second y-axis). Bins follow `calculate_bin_stats`:
+empty bins are omitted (`observed=True`), so a sparse range axis skips labels, as the old
+app did. A value outside a fixed category list (e.g. a Saturday) gets its own bar, never
+dropped. Three section states, worded differently: **skipped** (the log has no values in
+the column), **no data** (the current filter leaves none), **ready**. `check_oo_backtest`
+holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a
+filtered subset.
 
 ### What `main.index_ohlc` actually looks like
 
