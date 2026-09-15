@@ -370,10 +370,12 @@ document.addEventListener('alpine:init', () => {
       if (!z) return [];
       const out = [`${z.zero_filled_days} zero-filled days excluded (${z.zero_filled_weekend} weekend, ${z.zero_filled_weekdays} weekday)`];
       if (z.zero_filled_weekdays) out.push(`weekday: ${z.zero_filled_weekday_dates.join(', ')}`);
-      out.push(`${z.partial_zero_days} trading days with some zero bars` +
-               (z.partial_zero_days ? ` — bars by series: ${Object.entries(z.partial_zero_bars_by_series).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ')}` : ''));
-      for (const d of (z.partial_zero_sample || []).slice(0, 10)) {
-        out.push(`  ${d.date}: ${d.valid_bars} valid bars; zero bars SPX ${d.spx}, VIX ${d.vix}, VIX3M ${d.vix3m}, VIX9D ${d.vix9d}`);
+      const bySeries = o => Object.entries(o || {}).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ');
+      out.push(`${z.partial_days} trading days with some invalid bars` +
+               (z.partial_days ? ` — zero: ${bySeries(z.partial_zero_bars_by_series)}; NaN: ${bySeries(z.partial_nan_bars_by_series)}` : ''));
+      for (const d of (z.partial_sample || []).slice(0, 10)) {
+        out.push(`  ${d.date}: ${d.valid_bars} valid bars; zero/NaN SPX ${d.spx_zero}/${d.spx_nan}, ` +
+                 `VIX ${d.vix_zero}/${d.vix_nan}, VIX3M ${d.vix3m_zero}/${d.vix3m_nan}, VIX9D ${d.vix9d_zero}/${d.vix9d_nan}`);
       }
       return out;
     },

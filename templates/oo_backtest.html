@@ -158,7 +158,7 @@
              x-text="marketDetail ? 'hide detail' : 'show detail'"></a>
           <div class="ob-probe" x-show="marketDetail && market && market.ok">
             <div><b>coverage:</b> <span x-text="coverageLines().join(' · ')"></span></div>
-            <div style="margin-top:4px;"><b>zero-valued bars</b> (treated as missing):</div>
+            <div style="margin-top:4px;"><b>invalid bars</b> (zero or NaN, treated as missing):</div>
             <template x-for="line in zeroDayLines()" :key="line">
               <div x-text="line"></div>
             </template>

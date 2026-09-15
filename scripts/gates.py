@@ -22,6 +22,22 @@ and the summary says so in words.
     python scripts/gates.py --slow       include the slow ones (off by default)
     python scripts/gates.py --deploy     a gate that could not run on this host
                                          FAILS the run instead of being listed
+    python scripts/gates.py --vps --deploy [--ref GITREF]
+                                         ONLY the gates meant for the VPS (below);
+                                         --ref defaults to ORIG_HEAD, the commit
+                                         before the last `git pull`
+
+WHERE GATES RUN. The VPS deliberately lacks node, the sibling checkouts, and
+Postgres server binaries (initdb/pg_ctl) -- installing a server package there
+would start a second cluster beside the live database. So:
+
+  dev machine   everything except the vps-only pair; in particular
+                check_oo_backtest (node, source checkout) and
+                check_oo_market_sql (initdb). Run before pushing.
+  VPS           check_routes_smoke (the real app, real .env, real DB) and
+                check_template_render --report-diffs --ref ORIG_HEAD. Run after
+                `git pull`, via --vps. Nothing else is selected there, so a
+                deploy check cannot fail on tooling that is absent by design.
 
 A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
 (no Postgres binaries, running as root). That is reported as SKIP, never PASS.
@@ -44,7 +60,7 @@ EXIT_SKIPPED = 3
 
 
 class Gate:
-    def __init__(self, name, argv, note="", slow=False, live_flag=False, can_skip=False):
+    def __init__(self, name, argv, note="", slow=False, live_flag=False, can_skip=False, vps=False):
         self.name = name
         self.argv = argv
         self.note = note
@@ -53,6 +69,8 @@ class Gate:
         # Only a gate that declares it may exit EXIT_SKIPPED has 3 read as a
         # skip; for any other gate a 3 is an ordinary failure.
         self.can_skip = can_skip
+        # Selected by --vps: meant to run on the deployed host after a pull.
+        self.vps = vps
 
 
 def _s(script, *extra, **kw):
@@ -99,12 +117,12 @@ GATES = [
     # ── the OO/Mesosim backtest page ─────────────────────────────────────
     # It bins in the browser against edges defined in Python; a disagreement
     # about which side of an edge a value falls on is invisible on screen.
-    _s("check_oo_backtest.py",
-       note="JS binning == pd.cut; parsers; no dropped-scope columns"),
+    _s("check_oo_backtest.py", can_skip=True,
+       note="JS binning == pd.cut; parsers; dev machine (node, source checkout)"),
     # Starts a throwaway Postgres and runs the shipped index_ohlc SQL: early
     # closes, 'NaN' bars, the prior-session row, the entry bar's open.
     _s("check_oo_market_sql.py", can_skip=True,
-       note="market SQL on a temp cluster; SKIP without initdb or as root"),
+       note="market SQL on a temp cluster; dev machine only (needs initdb)"),
 
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
@@ -134,14 +152,14 @@ GATES = [
     # ── slower, and not usually what changed ─────────────────────────────
     _s("check_chart_contract.py", slow=True,
        note="chart modules route through window.FactorCharts"),
-    _s("check_routes_smoke.py", slow=True, note="every route imports"),
+    _s("check_routes_smoke.py", slow=True, vps=True, note="every route imports"),
 
     # ── listed so they appear as SKIP rather than not appearing ──────────
     #
     # A gate this runner cannot invoke has to be VISIBLE. Leaving them out of
     # the list entirely would make the table complete-looking and wrong, which
     # is the failure mode every script in it exists to prevent.
-    _s("check_template_render.py", slow=True),
+    _s("check_template_render.py", slow=True, vps=True),
     _s("check_grid_equivalence.py", slow=True),
 ]
 
@@ -167,6 +185,17 @@ NEEDS_ARGS = {
     "check_grid_equivalence": "needs --sweep SWEEP — a targeted comparison, "
                               "run by hand against a specific sweep",
 }
+
+
+def _with_ref(g: Gate, ref: str, report: bool) -> Gate:
+    """check_template_render with its --ref supplied (and, for a deploy,
+    --report-diffs: an intended template change is listed, not failed)."""
+    if g.name != "check_template_render":
+        return g
+    argv = [*g.argv, "--ref", ref] + (["--report-diffs"] if report else [])
+    out = Gate(g.name, argv, note=f"rendered vs {ref}", slow=g.slow, vps=g.vps)
+    out.ref_supplied = True
+    return out
 
 
 def run_one(g: Gate, live: bool):
@@ -206,9 +235,25 @@ def main() -> int:
     live = "--live" in args
     slow = "--slow" in args
     deploy = "--deploy" in args
+    vps = "--vps" in args
+    ref = None
+    if "--ref" in args:
+        i = args.index("--ref")
+        if i + 1 >= len(args):
+            print("--ref needs a git ref")
+            return 2
+        ref = args.pop(i + 1)
+        args.pop(i)
+    if vps and ref is None:
+        ref = "ORIG_HEAD"
     pats = [a for a in args if not a.startswith("--")]
 
-    gates = [g for g in GATES if slow or not g.slow]
+    if vps:
+        gates = [g for g in GATES if g.vps]
+    else:
+        gates = [g for g in GATES if slow or not g.slow]
+    if ref:
+        gates = [_with_ref(g, ref, report=vps) for g in gates]
     if pats:
         gates = [g for g in gates if any(p in g.name for p in pats)]
     if not gates:
@@ -217,7 +262,10 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         results = list(ex.map(lambda g: run_one(g, live), gates))
-    results.sort(key=lambda r: GATES.index(r[0]))
+    # By NAME: _with_ref() hands back a new Gate for template_render, which is
+    # not the object in GATES.
+    order = {g.name: i for i, g in enumerate(GATES)}
+    results.sort(key=lambda r: order[r[0].name])
 
     width = max(len(g.name) for g, *_ in results)
     passed = failed = skipped = 0
@@ -226,7 +274,7 @@ def main() -> int:
     print()
     for g, code, out, secs, err in results:
         status, detail = "PASS", g.note
-        if g.name in NEEDS_ARGS:
+        if g.name in NEEDS_ARGS and not getattr(g, "ref_supplied", False):
             status, detail = "SKIP", NEEDS_ARGS[g.name]
         elif g.can_skip and code == EXIT_SKIPPED:
             if deploy:
@@ -236,7 +284,12 @@ def main() -> int:
                 status, detail = "SKIP", last_line(out) or "could not run on this host"
         elif code != 0:
             gap = ENV_GAPS.get(g.name)
-            if gap and gap[0] in (out + err):
+            if gap and gap[0] in (out + err) and deploy:
+                # Same rule as a skip: a deploy check that could not run a
+                # gate has not checked what that gate checks.
+                status, detail = "FAIL", f"could not run on this host (--deploy): {gap[1]}"
+                failures.append((g.name, (out + err)))
+            elif gap and gap[0] in (out + err):
                 status, detail = "ENV ", gap[1]
             else:
                 status, detail = "FAIL", (last_line(out) or last_line(err)
@@ -271,13 +324,13 @@ def main() -> int:
         # Named again at the bottom. A skip mentioned once in a table is a
         # skip that gets read as a pass.
         for g, code, out, _, err in results:
-            if g.name in NEEDS_ARGS or (g.can_skip and code == EXIT_SKIPPED) or (
+            if (g.name in NEEDS_ARGS and not getattr(g, "ref_supplied", False)) or (g.can_skip and code == EXIT_SKIPPED) or (
                     code != 0 and ENV_GAPS.get(g.name)
                     and ENV_GAPS[g.name][0] in (out + err)):
                 print(f"    not run: {g.name}")
         if not deploy and any(g.can_skip and code == EXIT_SKIPPED for g, code, *_ in results):
             print("    (a deploy check must not skip these: rerun with --deploy as a non-root user)")
-    if not slow:
+    if not slow and not vps:
         n = sum(1 for g in GATES if g.slow)
         print(f"    {n} slow gates omitted; add --slow to include them")
     print()

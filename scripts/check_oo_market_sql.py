@@ -315,8 +315,13 @@ async def check_daily(pool) -> None:
     check(z["zero_filled_days"] == 10 and z["zero_filled_weekdays"] == 2
           and z["zero_filled_weekday_dates"] == ["2023-07-04", "2023-07-07"],
           f"zero-filled days reported, weekdays named ({z['zero_filled_weekday_dates']})")
-    check(z["partial_zero_days"] == 2 and z["partial_zero_bars_by_series"] == {"spx": 1, "vix": 1, "vix3m": 0, "vix9d": 0},
-          f"trading days carrying zero bars are counted per series {z['partial_zero_bars_by_series']}")
+    # 06-30: 'NaN' SPX close + 'NaN' VIX open; 07-05: 'NaN' SPX high + zero SPX
+    # low; 07-06: zero VIX open. A zero-only test would find two days, not three.
+    check(z["partial_days"] == 3
+          and z["partial_zero_bars_by_series"] == {"spx": 1, "vix": 1, "vix3m": 0, "vix9d": 0}
+          and z["partial_nan_bars_by_series"] == {"spx": 2, "vix": 1, "vix3m": 0, "vix9d": 0},
+          f"trading days with invalid bars counted, zero and NaN apart "
+          f"(days {z['partial_days']}, zero {z['partial_zero_bars_by_series']}, NaN {z['partial_nan_bars_by_series']})")
 
 
 def trades() -> pd.DataFrame:

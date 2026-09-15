@@ -48,9 +48,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import os
+
 import jinja2
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.assets import asset  # noqa: E402
 TPL_DIR = ROOT / "templates"
 
 # Partials are included BY pages and never rendered standalone.
@@ -65,11 +71,37 @@ def _env(directory: Path) -> jinja2.Environment:
     configuration changes, change it here too or this gate silently tests
     something other than what is served.
     """
-    return jinja2.Environment(
+    env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(str(directory)),
         autoescape=True,
         keep_trailing_newline=True,
     )
+    # The globals app/main.py registers. Without them every page raised
+    # "'asset' is undefined" on BOTH sides, so this gate had not verified a
+    # single page since asset() was introduced -- it reported 0/15 and
+    # nothing read it. Both sides hash the CURRENT static files, so a changed
+    # hash cannot show up as a template difference.
+    env.globals["asset"] = asset
+    env.globals["live_port"] = int(os.environ.get("LIVE_PORT", "8001"))
+    return env
+
+
+class _StubURL:
+    hostname = "localhost"
+    scheme = "http"
+    path = "/"
+
+    def __str__(self):
+        return "http://localhost/"
+
+
+class _StubRequest:
+    """What FastAPI always puts in a template's context; only what the
+    templates read (the nav builds the Equities Live link from url.hostname)."""
+    url = _StubURL()
+    base_url = _StubURL()
+    headers: dict = {}
+    query_params: dict = {}
 
 
 def _pages(directory: Path) -> list[str]:
@@ -104,13 +136,13 @@ def _render_all(directory: Path) -> dict[str, str | Exception]:
     out: dict[str, str | Exception] = {}
     for name in _pages(directory):
         try:
-            out[name] = env.get_template(name).render()
+            out[name] = env.get_template(name).render(request=_StubRequest())
         except Exception as e:  # noqa: BLE001 — report per page, keep sweeping
             out[name] = e
     return out
 
 
-def verify(ref: str) -> int:
+def verify(ref: str, report_diffs: bool = False) -> int:
     with tempfile.TemporaryDirectory() as td:
         base_dir = Path(td)
         _export_templates(ref, base_dir)
@@ -118,7 +150,7 @@ def verify(ref: str) -> int:
     head = _render_all(TPL_DIR)
 
     names = sorted(set(base) | set(head))
-    ok = bad = 0
+    ok = bad = broken = 0
     total = 0
     for name in names:
         b, h = base.get(name), head.get(name)
@@ -128,6 +160,7 @@ def verify(ref: str) -> int:
         if h is None:
             print(f"  {name:34s} REMOVED from working tree (present at {ref})")
             bad += 1
+            broken += 1
             continue
         for side, val in ((ref, b), ("working tree", h)):
             if isinstance(val, Exception):
@@ -135,6 +168,7 @@ def verify(ref: str) -> int:
                       f"{type(val).__name__}: {val}")
         if isinstance(b, Exception) or isinstance(h, Exception):
             bad += 1
+            broken += 1
             continue
         if b == h:
             ok += 1
@@ -150,6 +184,11 @@ def verify(ref: str) -> int:
     print()
     print(f"byte-identical vs {ref}: {ok}/{ok + bad} pages "
           f"({total:,} bytes verified)")
+    if report_diffs:
+        # Deploy mode: a deliberate template change is expected, so a DIFFERS
+        # page is listed above for review but does not fail. A page that does
+        # not render, or disappeared, still does.
+        return 1 if broken else 0
     return 1 if bad else 0
 
 
@@ -160,7 +199,11 @@ def main() -> int:
     ap.add_argument("--ref", required=True, metavar="GITREF",
                     help="git ref to compare rendered output against "
                          "(e.g. HEAD, a tag, or 1199cad for the pre-Jinja baseline)")
-    return verify(ap.parse_args().ref)
+    ap.add_argument("--report-diffs", action="store_true",
+                    help="list differing pages but exit 0 unless a page fails to render or was "
+                         "removed (for a deploy, where template changes are intended)")
+    a = ap.parse_args()
+    return verify(a.ref, report_diffs=a.report_diffs)
 
 
 if __name__ == "__main__":

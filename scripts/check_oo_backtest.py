@@ -28,6 +28,10 @@ Also checked, against fabricated logs rather than files on disk:
     entry, and flag MissingData / P&L disagreement when planted
 
     python scripts/check_oo_backtest.py
+
+WHERE IT RUNS: the development machine. It needs `node` (to execute the shipped
+JS) and the Options-Backtest-Dashboard checkout beside this repo. The VPS has
+neither, deliberately; there this exits 3 (NOT FULLY RUN), never 0.
 """
 from __future__ import annotations
 
@@ -53,6 +57,11 @@ from app.routers.oo_backtest import _parse  # noqa: E402
 JS = ROOT / "static" / "js" / "oo_backtest.js"
 
 FAILS: list[str] = []
+# Parts this host cannot run (no node, no sibling checkout of the source app).
+# Any entry makes the whole check exit EXIT_SKIPPED rather than PASS: a run
+# that skipped the JS parity check has not checked JS parity.
+NOT_RUN: list[str] = []
+EXIT_SKIPPED = 3
 
 
 def check(ok: bool, msg: str) -> None:
@@ -118,6 +127,11 @@ def run_js(job: dict) -> dict:
 
 def check_binning() -> None:
     print("binning: shipped JS vs pd.cut")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed — the shipped JS cannot be executed on this host")
+        NOT_RUN.append("JS binning parity (node not installed)")
+        return
     # The registry goes through JSON exactly as the endpoint sends it.
     reg = json.loads(json.dumps(REGISTRY, allow_nan=False))
     ranges = [m for m in reg if m["type"] == "range"]
@@ -170,6 +184,7 @@ def check_against_source() -> None:
     src = SOURCE_ROOT / "utils" / "calculations.py"
     if not src.exists():
         print(f"  SKIP  {src} not present — nothing to compare against on this host")
+        NOT_RUN.append("source-app bin comparison (no Options-Backtest-Dashboard checkout)")
         return
     import importlib.util
     sys.path.insert(0, str(SOURCE_ROOT))          # the source does `from config import …`
@@ -455,8 +470,12 @@ def main() -> int:
     check_real_mesosim()
     print()
     if FAILS:
-        print(f"FAIL: {len(FAILS)} check(s) failed")
+        print(f"FAIL: {len(FAILS)} check(s) failed" + (f"; also not run: {'; '.join(NOT_RUN)}" if NOT_RUN else ""))
         return 1
+    if NOT_RUN:
+        print(f"NOT FULLY RUN: everything that ran passed, but {len(NOT_RUN)} part(s) could not run here: "
+              + "; ".join(NOT_RUN))
+        return EXIT_SKIPPED
     print("PASS: OO/Mesosim Backtest registry, binning parity, payload and parsers")
     return 0
 

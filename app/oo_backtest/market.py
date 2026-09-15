@@ -87,6 +87,13 @@ def _zero_bar(s: str) -> str:
     return "(" + " OR ".join(f"{s}_{f} <= 0" for f in OHLC_FIELDS) + ")"
 
 
+def _nan_bar(s: str) -> str:
+    # Separate from _zero_bar: 'NaN' <= 0 is FALSE in Postgres, so a zero test
+    # alone under-counts invalid bars. NULL is neither -- before a series'
+    # coverage every bar is NULL, and that is not a data fault.
+    return "(" + " OR ".join(f"{s}_{f} = 'NaN'::float8" for f in OHLC_FIELDS) + ")"
+
+
 def _daily_select() -> str:
     parts = []
     for s in SERIES:
@@ -209,22 +216,24 @@ GROUP BY 1 ORDER BY 1
 """
 
 # Every session-window day that is either wholly without valid bars (zero-
-# filled) or a trading day carrying some zero/negative bars. Small: the first
-# kind is ~1 row per weekend day and holiday, the second should be rare.
+# filled) or a trading day carrying some zero/negative or 'NaN' bars. Small:
+# the first kind is ~1 row per weekend day and holiday, the second should be
+# rare.
 ZERO_DAYS_SQL = f"""
 WITH per_day AS (
     SELECT trade_date,
            count(*) AS bars,
            count({_any_valid_raw()}) AS valid_bars,
-           {", ".join(f"count(*) FILTER (WHERE {_zero_bar(s)}) AS {s}_zero_bars" for s in SERIES)}
+           {", ".join(f"count(*) FILTER (WHERE {_zero_bar(s)}) AS {s}_zero_bars" for s in SERIES)},
+           {", ".join(f"count(*) FILTER (WHERE {_nan_bar(s)}) AS {s}_nan_bars" for s in SERIES)}
     FROM index_ohlc
     WHERE quote_time BETWEEN TIME '09:30' AND TIME '15:55'
     GROUP BY trade_date
 )
 SELECT trade_date, extract(isodow FROM trade_date)::int AS isodow, bars, valid_bars,
-       {", ".join(f"{s}_zero_bars" for s in SERIES)}
+       {", ".join(f"{s}_zero_bars, {s}_nan_bars" for s in SERIES)}
 FROM per_day
-WHERE valid_bars = 0 OR {" OR ".join(f"{s}_zero_bars > 0" for s in SERIES)}
+WHERE valid_bars = 0 OR {" OR ".join(f"{s}_zero_bars > 0 OR {s}_nan_bars > 0" for s in SERIES)}
 ORDER BY trade_date
 """
 
@@ -266,8 +275,9 @@ async def get_daily(pool) -> tuple[pd.DataFrame, dict]:
                      "early-close=%d full-session=%s", len(daily), key[0], _CACHE["build_s"],
                      len(rep["spx"]["early_close_days"]), {s: rep[s]["full_session_count"] for s in SERIES})
             log.info("oo-backtest index_ohlc: %d zero-filled days excluded (%d weekdays); %d trading "
-                     "days carry zero bars %s", zsum["zero_filled_days"], zsum["zero_filled_weekdays"],
-                     zsum["partial_zero_days"], zsum["partial_zero_bars_by_series"])
+                     "days carry invalid bars, zero %s, NaN %s", zsum["zero_filled_days"],
+                     zsum["zero_filled_weekdays"], zsum["partial_days"],
+                     zsum["partial_zero_bars_by_series"], zsum["partial_nan_bars_by_series"])
             for s in SERIES:
                 if rep[s]["full_session_count"]:
                     log.warning("oo-backtest: %s close fell back on %d FULL sessions (e.g. %s) -- "
@@ -298,11 +308,13 @@ def zero_days_summary(rows: list[dict]) -> dict:
         "zero_filled_weekdays": len(weekday),
         # All of them: ~10 a year, and they should read as the NYSE holidays.
         "zero_filled_weekday_dates": [iso(r["trade_date"]) for r in weekday],
-        "partial_zero_days": len(partial),
+        # Trading days carrying some invalid bars, zero and 'NaN' counted apart.
+        "partial_days": len(partial),
         "partial_zero_bars_by_series": {s: sum(r[f"{s}_zero_bars"] for r in partial) for s in SERIES},
-        "partial_zero_days_by_series": {s: sum(1 for r in partial if r[f"{s}_zero_bars"]) for s in SERIES},
-        "partial_zero_sample": [{"date": iso(r["trade_date"]), "valid_bars": r["valid_bars"],
-                                 **{s: r[f"{s}_zero_bars"] for s in SERIES}} for r in partial[:25]],
+        "partial_nan_bars_by_series": {s: sum(r[f"{s}_nan_bars"] for r in partial) for s in SERIES},
+        "partial_sample": [{"date": iso(r["trade_date"]), "valid_bars": r["valid_bars"],
+                            **{f"{s}_zero": r[f"{s}_zero_bars"] for s in SERIES},
+                            **{f"{s}_nan": r[f"{s}_nan_bars"] for s in SERIES}} for r in partial[:25]],
     }
 
 
