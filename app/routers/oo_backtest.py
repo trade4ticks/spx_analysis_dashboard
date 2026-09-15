@@ -20,6 +20,12 @@ Endpoints:
   PUT    /strategies/{id}/capital  {"capital_per_position": number|null} --
                                the display input only; no re-parse
   DELETE /strategies/{id}
+  GET    /surface/catalog      ranked surface metrics: catalog fields + min_date
+                               (first non-null date, read from the table)
+  POST   /surface/rank         {"trades": [[date, time, pnl], ...]} -> per metric
+                               n, bars, Pearson/Spearman r + p + BH-adjusted p
+  POST   /surface/values       {"column": name, "trades": [[date, time], ...]} ->
+                               that metric at each trade's entry bar, in order
 
 A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
 today's market data; see app/oo_backtest/store.py.
@@ -40,7 +46,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from fastapi.responses import JSONResponse
 
 from app.db import get_pool
-from app.oo_backtest import data_loader, market, store
+from app.oo_backtest import data_loader, market, store, surface, surface_stats
 from app.oo_backtest.payload import assert_no_dropped_columns, trades_to_payload
 from app.oo_backtest.registry import registry_with_coverage
 
@@ -237,3 +243,68 @@ async def market_status(pool=Depends(get_pool)):
         "bar_labels": market.bar_labels(),
         "sessions": market.sessions(),
     }
+
+
+# ── surface metrics ─────────────────────────────────────────────────────────
+
+def _bar_rule(body: dict) -> str:
+    """The entry-bar rule for this request. The default is surface.BAR_RULE;
+    naming another is allowed so the two can be compared while the lookahead
+    question is open."""
+    rule = body.get("bar_rule") or surface.BAR_RULE
+    if rule not in surface.BAR_RULES:
+        raise HTTPException(400, f"bar_rule must be one of {sorted(surface.BAR_RULES)}.")
+    return rule
+
+
+async def _surface_catalog(pool) -> dict:
+    try:
+        return await surface.get_catalog(pool)
+    except Exception as exc:  # noqa: BLE001 — logged with traceback, surfaced by name
+        log.exception("oo-backtest surface catalog failed")
+        raise HTTPException(503, f"Surface metrics unavailable: {type(exc).__name__}: {exc}")
+
+
+@router.get("/surface/catalog")
+async def surface_catalog(pool=Depends(get_pool)):
+    return await _surface_catalog(pool)
+
+
+@router.post("/surface/rank")
+async def surface_rank(body: dict = Body(...), pool=Depends(get_pool)):
+    import time as _t
+    rule = _bar_rule(body)
+    try:
+        trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    cat = await _surface_catalog(pool)
+    cols = [m["column_name"] for m in cat["metrics"]]
+    rows, join_report = await surface.entry_values(pool, trades, cols, rule)
+    t0 = _t.monotonic()
+    bar_keys = [(t[0], r["bar_time"]) for t, r in zip(trades, rows)]
+    result = await asyncio.to_thread(surface_stats.rank, cat["metrics"], rows, [t[2] for t in trades], bar_keys)
+    compute_s = round(_t.monotonic() - t0, 3)
+    log.info("oo-backtest surface rank: %d trades, %d distinct entries, %d metrics; query %.2fs, stats %.2fs (%s)",
+             len(trades), join_report["distinct_entries"], len(cols), join_report["query_s"], compute_s, rule)
+    return {"rows": result, "report": {**parse_report, **join_report, "metrics": len(cols), "compute_s": compute_s},
+            "bar_rule": rule, "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED,
+            "catalog_built_at": cat["built_at"]}
+
+
+@router.post("/surface/values")
+async def surface_values(body: dict = Body(...), pool=Depends(get_pool)):
+    rule = _bar_rule(body)
+    column = body.get("column")
+    cat = await _surface_catalog(pool)
+    if column not in {m["column_name"] for m in cat["metrics"]}:
+        raise HTTPException(400, f"Unknown or unranked surface metric: {column!r}.")
+    try:
+        trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=False)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    rows, join_report = await surface.entry_values(pool, trades, [column], rule)
+    return {"column": column, "values": [r[column] for r in rows],
+            "bar_times": [r["bar_time"].strftime("%H:%M:%S") if r["bar_time"] else None for r in rows],
+            "report": {**parse_report, **join_report}, "bar_rule": rule,
+            "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED}

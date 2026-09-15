@@ -63,7 +63,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -293,6 +293,7 @@ async def run(dsn: str) -> None:
         await check_planted(pool)
         await check_end_to_end(pool)
         await check_saved_strategies(pool)
+        await check_surface(pool)
     finally:
         await pool.close()
 
@@ -652,6 +653,166 @@ async def check_end_to_end(pool) -> None:
           f"the payload's spx_sessions are the rollup's SPX sessions in the log's span ({rep['spx_sessions']})")
 
 
+# ── surface metrics ─────────────────────────────────────────────────────────
+#
+# Shaped like public.surface_metrics_core as verified on the VPS: rows only on
+# sessions (a missing day has NO rows, not zero rows), 78 bars 09:35..16:00,
+# DOUBLE PRECISION metrics, NULL before a metric's coverage and never after.
+# Each iv value encodes its own bar -- day index * 10000 + minutes since
+# midnight -- so a join that picks the wrong bar picks the wrong number.
+#
+#   S1 2024-03-04  iv, spot, forward present; chg_d, z, vrp NULL
+#   S2 2024-03-05  + chg_d
+#   (2024-03-06 absent: no rows at all)
+#   S3 2024-03-07  + z
+#   S4 2024-03-08  + vrp_3m
+# Catalog quirks: meta and spot/forward rows (excluded), ghost_col (catalogued,
+# not in the table), label_col (in the table as TEXT), uncat_col (in the
+# table, not catalogued).
+
+S_DAYS = [date(2024, 3, 4), date(2024, 3, 5), date(2024, 3, 7), date(2024, 3, 8)]
+S_ABSENT = date(2024, 3, 6)
+S_BACKFILL = date(2024, 3, 1)
+S_COLS = ["spot", "forward_30d", "iv_30d_atm", "chg_d_iv_30d_atm", "z_iv_30d_atm", "vrp_3m"]
+S_START = {"spot": 0, "forward_30d": 0, "iv_30d_atm": 0, "chg_d_iv_30d_atm": 1, "z_iv_30d_atm": 2, "vrp_3m": 3}
+
+
+def s_bars():
+    t = datetime.combine(date(2000, 1, 1), time(9, 35))
+    while t.time() <= time(16, 0):
+        yield t.time()
+        t += timedelta(minutes=5)
+
+
+def s_code(day_idx: int, t: time) -> float:
+    return float(day_idx * 10000 + t.hour * 60 + t.minute)
+
+
+async def load_surface(pool) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""CREATE TABLE surface_metrics_catalog (
+            column_name TEXT PRIMARY KEY, family TEXT, tenor TEXT, wing TEXT, form TEXT,
+            base_column TEXT, units TEXT, description TEXT, formula TEXT)""")
+        cat = [("trade_date", "meta", None, None, "level", None, "date", "Trading date", None),
+               ("quote_time", "meta", None, None, "level", None, "time", "Quote time", None),
+               ("spot", "spot", None, None, "level", None, "price", "Spot", None),
+               ("forward_30d", "forward", "30d", None, "level", None, "price", "Forward", None),
+               ("iv_30d_atm", "iv", "30d", "atm", "level", None, "vol_decimal", "IV 30d ATM", "sigma"),
+               ("chg_d_iv_30d_atm", "iv", "30d", "atm", "chg_d", "iv_30d_atm", "vol_decimal", "1d change", "d"),
+               ("z_iv_30d_atm", "iv", "30d", "atm", "z", "iv_30d_atm", "z_score", "z", "z"),
+               ("vrp_3m", "vrp", "3m", None, "level", None, "vol_decimal", "VRP 3m", "v"),
+               ("ghost_col", "iv", "7d", "atm", "level", None, "vol_decimal", "not in the table", None),
+               ("label_col", "iv", "7d", "atm", "level", None, "vol_decimal", "text in the table", None)]
+        await conn.executemany("INSERT INTO surface_metrics_catalog VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", cat)
+        cols = ", ".join(f"{c} DOUBLE PRECISION" for c in S_COLS)
+        await conn.execute(f"""CREATE TABLE surface_metrics_core (
+            trade_date DATE NOT NULL, quote_time TIME NOT NULL, {cols}, label_col TEXT, uncat_col DOUBLE PRECISION,
+            PRIMARY KEY (trade_date, quote_time))""")
+        await conn.execute("CREATE INDEX ON surface_metrics_core (trade_date)")
+        await conn.copy_records_to_table("surface_metrics_core", records=list(s_records(S_DAYS, 1)),
+                                         columns=["trade_date", "quote_time", *S_COLS, "label_col", "uncat_col"])
+        n = await conn.fetchval("SELECT count(*) FROM surface_metrics_core")
+        assert n == 78 * len(S_DAYS), n
+        assert await conn.fetchval("SELECT count(*) FROM surface_metrics_core WHERE trade_date = $1", S_ABSENT) == 0
+
+
+def s_records(days, first_idx):
+    for k, d in enumerate(days):
+        idx = first_idx + k
+        for t in s_bars():
+            code = s_code(idx, t)
+            vals = [code if k >= S_START[c] else None for c in S_COLS]
+            yield (d, t, *vals, "x", 1.0)
+
+
+async def check_surface(pool) -> None:
+    """The surface SQL through a real Postgres: catalog + coverage (and its
+    rebuild on a backfill), the entry bar under both rules, no reach-back to
+    the prior session, and the rank/values routes."""
+    print("surface metrics: catalog, coverage, entry bar, routes")
+    from fastapi import HTTPException
+    from app.oo_backtest import surface
+    from app.routers import oo_backtest as routes
+
+    await load_surface(pool)
+    cat = await surface.get_catalog(pool)
+    by = {m["column_name"]: m for m in cat["metrics"]}
+    rep = cat["report"]
+    check(sorted(by) == ["chg_d_iv_30d_atm", "iv_30d_atm", "vrp_3m", "z_iv_30d_atm"],
+          f"ranked: the four metrics; meta, spot and forward excluded ({sorted(by)})")
+    check(rep["missing_from_table"] == ["ghost_col"] and rep["wrong_type"] == ["label_col"]
+          and rep["uncatalogued"] == ["uncat_col"] and rep["excluded"] == 4,
+          f"catalog/table disagreements are reported, not guessed around ({rep})")
+    want = {"iv_30d_atm": "2024-03-04", "chg_d_iv_30d_atm": "2024-03-05", "z_iv_30d_atm": "2024-03-07", "vrp_3m": "2024-03-08"}
+    check({c: by[c]["min_date"] for c in want} == want,
+          f"min_date per metric is its first non-null date in the table ({ {c: by[c]['min_date'] for c in want} })")
+    built = cat["built_at"]
+    again = await surface.get_catalog(pool)
+    check(again["built_at"] == built, "an unchanged table is served from the cache")
+
+    async with pool.acquire() as conn:     # backfill: an earlier session with levels only
+        await conn.executemany("INSERT INTO surface_metrics_core VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                               [(S_BACKFILL, t, s_code(0, t), s_code(0, t), s_code(0, t), None, None, None, "x", 1.0)
+                                for t in s_bars()])
+    bf = {m["column_name"]: m["min_date"] for m in (await surface.get_catalog(pool))["metrics"]}
+    check(bf["iv_30d_atm"] == "2024-03-01" and bf["z_iv_30d_atm"] == "2024-03-07",
+          f"a backfill moves the first date and rebuilds coverage: iv now {bf['iv_30d_atm']}, z unchanged {bf['z_iv_30d_atm']}")
+
+    S2, S3 = S_DAYS[1], S_DAYS[2]
+    trades = [(S2, time(10, 2)), (S2, time(9, 30)), (S2, time(9, 35)), (S2, time(16, 20)),
+              (S_ABSENT, time(12, 0)), (S_DAYS[0], time(12, 0)), (S2, time(10, 2)), (None, None), (S3, time(15, 30))]
+    cols = ["iv_30d_atm", "z_iv_30d_atm"]
+    at, at_rep = await surface.entry_values(pool, trades, cols, "at_or_before_entry")
+    pv, _ = await surface.entry_values(pool, trades, cols, "previous_bar")
+    iv = lambda rows, i: rows[i]["iv_30d_atm"]   # noqa: E731
+    check(iv(at, 0) == s_code(2, time(10, 0)) and iv(pv, 0) == s_code(2, time(9, 55)),
+          "10:02 entry: at_or_before_entry reads the 10:00 bar, previous_bar the 09:55 bar")
+    check(iv(at, 1) is None and iv(pv, 1) is None and at[1]["bar_time"] is None,
+          "09:30 entry: no bar on the entry date at or before it -> null; the prior session's 16:00 is NOT used")
+    check(iv(at, 2) == s_code(2, time(9, 35)) and iv(pv, 2) is None,
+          "09:35 entry: its own bar under at_or_before_entry; nothing under previous_bar")
+    check(iv(at, 3) == s_code(2, time(16, 0)), "16:20 entry reads the 16:00 bar")
+    check(iv(at, 4) is None and iv(at, 7) is None, "a date with no rows, and a row with no date/time, get null")
+    check(iv(at, 5) == s_code(1, time(12, 0)) and at[5]["z_iv_30d_atm"] is None,
+          "before a metric's coverage its value is null while an earlier-starting metric on the same bar has one")
+    check(iv(at, 6) == iv(at, 0) and at_rep["distinct_entries"] == 7 and at_rep["no_bar"] == 3,
+          f"a repeated entry is looked up once and filled for both ({at_rep['distinct_entries']} distinct, {at_rep['no_bar']} with no bar)")
+    check(at[8]["z_iv_30d_atm"] == s_code(3, time(15, 30)), "15:30 entry on a z-covered day reads z from the 15:30 bar")
+
+    # Routes, called with the pool directly.
+    body = {"trades": [[d.isoformat(), t.strftime("%H:%M:%S"), float(k)] for d in S_DAYS
+                       for k, t in enumerate([time(10, 0), time(11, 0), time(12, 0), time(13, 0)])]}
+    r = await routes.surface_rank(body, pool=pool)
+    rows = {x["column"]: x for x in r["rows"]}
+    check(sorted(rows) == sorted(want) and rows["iv_30d_atm"]["n"] == 16 and rows["z_iv_30d_atm"]["n"] == 8
+          and rows["vrp_3m"]["n"] == 4 and rows["chg_d_iv_30d_atm"]["n"] == 12,
+          f"rank: n per metric follows coverage (iv 16, chg_d 12, z 8, vrp 4)")
+    check(all(x["pearson_p_bh"] is not None and x["spearman_p_bh"] is not None for x in r["rows"])
+          and rows["iv_30d_atm"]["bars"] == 16 and r["lookahead_confirmed"] is False
+          and r["bar_rule"] == "at_or_before_entry",
+          "rank: both BH p-values on every metric; distinct bars; the unconfirmed bar rule is stated in the response")
+    for bad_body, why in (({"trades": body["trades"], "bar_rule": "next_bar"}, "an unknown bar_rule"),
+                          ({"trades": "nope"}, "trades that are not a list")):
+        try:
+            await routes.surface_rank(bad_body, pool=pool)
+            check(False, f"rank refuses {why}")
+        except HTTPException as exc:
+            check(exc.status_code == 400, f"rank refuses {why} (400)")
+    v = await routes.surface_values({"column": "z_iv_30d_atm", "trades": [[S3.isoformat(), "15:30"], [S2.isoformat(), "15:30"]]},
+                                    pool=pool)
+    check(v["values"] == [s_code(3, time(15, 30)), None] and v["bar_times"] == ["15:30:00", "15:30:00"],
+          "values: aligned to the trades sent; null before coverage even where the bar exists")
+    for col in ("spot", "ghost_col", 'iv_30d_atm"; DROP TABLE surface_metrics_core; --'):
+        try:
+            await routes.surface_values({"column": col, "trades": [[S3.isoformat(), "15:30"]]}, pool=pool)
+            check(False, f"values refuses column {col!r}")
+        except HTTPException as exc:
+            check(exc.status_code == 400, f"values refuses column {col[:30]!r} (400): only ranked metrics reach SQL")
+    async with pool.acquire() as conn:
+        still = await conn.fetchval("SELECT count(*) FROM surface_metrics_core")
+    check(still == 78 * (len(S_DAYS) + 1), "the table is intact after the injection attempt")
+
+
 def main() -> int:
     if os.name == "posix" and os.geteuid() == 0:
         print("SKIP: running as root — initdb refuses to create a cluster as root; run as an ordinary user")
@@ -672,7 +833,7 @@ def main() -> int:
     if FAILS:
         print(f"FAIL: {len(FAILS)} market SQL check(s) failed")
         return 1
-    print("PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, saved strategies, planted faults")
+    print("PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, saved strategies, surface metrics, planted faults")
     return 0
 
 

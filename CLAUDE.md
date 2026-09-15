@@ -60,6 +60,37 @@ the parser and so contribute nothing (gate-checked against the v3.1 fixture). Tr
 opening or closing off an SPX session (e.g. 2026-04-08) are counted from the next session
 and reported under the chart.
 
+### Surface metrics exploration (P6, in progress)
+
+Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart (with
+"common coverage only"); **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
+trades a coverage gap would drop); P6e docs.
+
+**`public.surface_metrics_core`** (verified by the data owner): 110,258 rows, 545 MB, 458
+DOUBLE PRECISION columns, PK (trade_date, quote_time) + index on trade_date. Clean: no rows
+on non-trading days, 78 bars per session 09:35–16:00, no NaN, no zeros — none of the
+index_ohlc validity machinery applies. Start-labeled, aligned with index_ohlc (spot at T =
+spx_open at T). NULL before a metric's coverage, **never gaps after**, so a missing value
+is either "before coverage" or "no bar" (a 09:30 entry). Coverage moves with backfills —
+`surface.get_catalog` reads each metric's first non-null date and rebuilds when the table's
+first/last date changes; **never hardcode coverage dates**.
+**`surface_metrics_catalog`** is a real table (PK column_name); the repo CSV was diffed
+identical on 2026-09-15. Ranked set = catalog minus families `meta`, `spot`, `forward`
+(452 of 462); `log_ret` kept. Column names reach SQL only from that set.
+
+**Entry bar: lookahead UNCONFIRMED.** `surface.BAR_RULE` names the rule
+(`at_or_before_entry`, alternative `previous_bar`) and `LOOKAHEAD_CONFIRMED = False` rides
+on every response until the data owner confirms metrics are point-in-time at quote_time.
+Either way the bar is on the entry date only — never the prior session.
+
+Stats (`surface_stats.py`): pairwise n, distinct entry bars (effective sample, reported not
+corrected), Pearson and Spearman r + p, Benjamini-Hochberg for both over every metric
+computed (a hidden family is still a test). Endpoints `GET /surface/catalog`,
+`POST /surface/rank`, `POST /surface/values` (values fetched for ALL loaded trades, so a row
+follows page filters without another call). `scripts/measure_surface_rank.py` is the
+read-only VPS timing script for the 458-column join.
+
 ### What `main.index_ohlc` actually looks like
 
 5-minute bars, SPX/VIX/VIX3M/VIX9D full OHLC, 2017-01-01 → present.

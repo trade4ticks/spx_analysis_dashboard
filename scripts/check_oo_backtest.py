@@ -367,6 +367,84 @@ def _by_pid(p: dict) -> dict:
     return {pid: {k: v[i] for k, v in c.items()} for i, pid in enumerate(c["position_id"])}
 
 
+
+def check_surface_stats() -> None:
+    """Surface ranking maths (app/oo_backtest/surface_stats.py) against scipy
+    directly, BH against scipy.stats.false_discovery_control, and the ranked
+    metric set against the real catalog (surface_metrics_catalog.csv, diffed
+    identical to the live table on 2026-09-15)."""
+    print("surface metrics: ranking stats vs scipy, BH, metric set")
+    import numpy as np
+    from scipy import stats as sps
+    from app.oo_backtest import surface, surface_stats as ss
+
+    rng = random.Random(31)
+    n = 700
+    pnl = [round(rng.gauss(20, 400), 2) for _ in range(n)]
+    x = [None if i < 150 else pnl[i] * 0.0004 + rng.gauss(0.15, 0.03) for i in range(n)]   # late coverage, weak signal
+    bars = [(i // 3,) for i in range(n)]                                                      # three trades per bar
+    got = ss.correlate(x, pnl, bars)
+    xs = np.array([v for v in x if v is not None]); ys = np.array([pnl[i] for i in range(n) if x[i] is not None])
+    pr, sr = sps.pearsonr(xs, ys), sps.spearmanr(xs, ys)
+    close = lambda a, b: a is not None and math.isclose(a, float(b), rel_tol=1e-12, abs_tol=1e-15)   # noqa: E731
+    check(got["n"] == 550 and got["bars"] == len({bars[i] for i in range(n) if x[i] is not None})
+          and close(got["pearson"], pr.statistic) and close(got["pearson_p"], pr.pvalue)
+          and close(got["spearman"], sr.statistic) and close(got["spearman_p"], sr.pvalue),
+          f"correlate: n={got['n']} (pairwise, nulls dropped), bars={got['bars']}, r/rho and p equal scipy")
+    check(got["bars"] < got["n"], "distinct entry bars are counted separately from n (shared bars)")
+    for label, xv, yv in (("two points", [1.0, 2.0], [1.0, 3.0]), ("constant metric", [0.2] * 10, list(range(10))),
+                          ("constant P/L", list(range(10)), [5.0] * 10)):
+        g = ss.correlate(xv, yv, list(range(len(xv))))
+        check(g["pearson"] is None and g["spearman_p"] is None, f"{label}: no correlation, not a NaN")
+
+    ps = [rng.random() ** 3 for _ in range(452)] + [None, None]
+    rng.shuffle(ps)
+    bh = ss.benjamini_hochberg(ps)
+    ref = sps.false_discovery_control(np.array([p for p in ps if p is not None]), method="bh")
+    check(all(math.isclose(a, b, rel_tol=1e-12) for a, b in zip([b for b in bh if b is not None], ref)),
+          f"BH equals scipy.stats.false_discovery_control over {len(ref)} p-values; None stays None")
+    check([i for i, b in enumerate(bh) if b is None] == [i for i, p in enumerate(ps) if p is None],
+          "a metric with no p is excluded from m and stays None")
+    # Raw p*m/k is 0.03, 0.03, 0.021: the running minimum from the top pulls
+    # the first two down to 0.021. Without it they would stay 0.03.
+    toy = ss.benjamini_hochberg([0.01, 0.02, 0.021])
+    check(all(math.isclose(a, b) for a, b in zip(toy, [0.021, 0.021, 0.021])),
+          f"BH by hand: [0.01, 0.02, 0.021] -> all 0.021 (the step-down minimum applies) ({toy})")
+
+    cat = pd.read_csv(ROOT / "surface_metrics_catalog.csv").astype(object).where(lambda d: d.notna(), None).to_dict("records")
+    table = {r["column_name"]: "double precision" for r in cat if r["family"] != "meta"}
+    table.update({"trade_date": "date", "quote_time": "time without time zone", "day_of_week": "integer",
+                  "days_to_monthly_opex": "integer"})
+    ranked, rep = surface.metric_set(cat, table)
+    fams = {r["family"] for r in ranked}
+    check(rep["catalog_rows"] == 462 and rep["ranked"] == 452 and rep["excluded"] == 10
+          and not ({"meta", "spot", "forward"} & fams) and "log_ret" in fams,
+          f"ranked set: 462 catalog rows - 4 meta - spot - 5 forward_* = {rep['ranked']}; log_ret kept")
+    check({r["form"] for r in ranked} == {"level", "chg_d", "chg_1w", "z"},
+          f"forms present: {sorted({r['form'] for r in ranked})}")
+    planted = dict(table, **{"iv_30d_atm": "text"})
+    planted.pop("vix_30d")
+    planted["not_in_catalog"] = "double precision"
+    _, prep = surface.metric_set(cat, planted)
+    check(prep["wrong_type"] == ["iv_30d_atm"] and prep["missing_from_table"] == ["vix_30d"]
+          and "not_in_catalog" in prep["uncatalogued"],
+          "planted: a non-double column, a catalogued column missing from the table and an uncatalogued one are reported")
+    check(surface.quote_ident('a"b') == '"a""b"', "identifiers are quoted with embedded quotes doubled")
+    try:
+        surface.entry_sql(["iv_30d_atm"], "tomorrow")
+        check(False, "an unknown bar rule is refused")
+    except ValueError:
+        check(True, "an unknown bar rule is refused")
+    check(surface.BAR_RULE in surface.BAR_RULES and surface.LOOKAHEAD_CONFIRMED is False,
+          f"bar rule is named ({surface.BAR_RULE}) and lookahead is flagged unconfirmed until the data owner confirms")
+
+    tr, trep = surface.parse_trades([["2024-01-02", "15:30:00", 12.5], ["bad", "10:00", 1], ["2024-01-03", "", 2],
+                                     ["2024-01-04", "3:30 PM", "x"]], with_pnl=True)
+    check(len(tr) == 4 and trep == {"trades": 4, "bad_date": 1, "bad_time": 1, "bad_pnl": 1}
+          and tr[3][1] == __import__("datetime").time(15, 30),
+          f"parse_trades keeps every row in order and counts what did not parse ({trep})")
+
+
 def check_real_mesosim() -> None:
     """Real MesoSim events, trimmed to the positions that exercise each rule.
 
@@ -1122,6 +1200,7 @@ def main() -> int:
     check_dropped_scope()
     check_parsers()
     check_real_mesosim()
+    check_surface_stats()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed" + (f"; also not run: {'; '.join(NOT_RUN)}" if NOT_RUN else ""))
