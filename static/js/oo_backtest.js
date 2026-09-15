@@ -252,11 +252,38 @@ function obExtraStats(cols, idx, stats, capital, peak) {
 }
 
 
+
+/* Where the BH boundary line goes in a sorted bar list: after the LAST bar
+ * that survives. Benjamini-Hochberg is not a pure |r| threshold -- the
+ * adjusted p also depends on each metric's n -- so survivors need not be an
+ * unbroken run from the left. The line goes after the last one, and the bars
+ * that sit on the wrong side of it are counted, so the line never quietly
+ * misstates which bars survive.
+ *   index         bars[0 .. index-1] are left of the line; null when none survive
+ *   failLeft      non-survivors left of the line
+ *   survivors     survivors in the list */
+function obBhBoundary(bars) {
+  let last = -1, survivors = 0;
+  bars.forEach((b, i) => { if (b.survives) { last = i; survivors++; } });
+  if (last < 0) return { index: null, failLeft: 0, survivors: 0 };
+  return { index: last + 1, failLeft: last + 1 - survivors, survivors };
+}
+
+/* A row filter's range state from the row's own values (display units):
+ * bounds snapped outward to a slider step one tenth of the bin step. */
+function obRowFilterState(values, binStep, prevScope) {
+  const ext = obExtent(values);
+  if (!ext) return null;
+  const step = obClean(binStep ? binStep / 10 : Math.max((ext.max - ext.min) / 100, 1e-6));
+  const min = obSnap(ext.min, step, 'floor'), max = obSnap(ext.max, step, 'ceil');
+  return { min, max, lo: min, hi: max, step, n: ext.n, scope: prevScope || 'row' };
+}
+
 /* ── surface metrics ranking (P6b) ─────────────────────────────────────── */
 
 /* Family colours and form labels come from the server with the catalog
  * (surface.FAMILY_GROUPS / FORM_LABELS): the page names no metric family. */
-const OB_BH_Q = 0.05;       // BH false-discovery level a bar must clear to be outlined
+const OB_BH_Q = 0.05;       // BH false-discovery level; the dashed line follows the last bar that clears it
 
 function obSurfGroupOf(family, groups, other) {
   return (groups || []).find(g => g.families.includes(family)) || other || { label: 'Other', color: '#8a8a8a' };
@@ -603,6 +630,7 @@ document.addEventListener('alpine:init', () => {
     // when they change -- without it the coverage headline stayed blank.
     idxTick: 0,
     surfRows: [],      // added surface metric sections, registry-shaped (P6c)
+    marketChecksOpen: false,   // the diagnostics pane starts collapsed
     extra: null,       // obExtraStats
     deploy: null,      // {peak, peakDay, offSession, unclosed, days, hasSessions}
 
@@ -865,7 +893,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     activeCount() {
-      return (this.dateActive() ? 1 : 0) + this.registry.filter(m => m.filter && this.isActive(m)).length;
+      return (this.dateActive() ? 1 : 0) + this.registry.filter(m => m.filter && this.isActive(m)).length
+        + this.surfRows.filter(m => this.rowFilterOnPage(m)).length;
     },
 
     setLo(m, raw) {
@@ -916,6 +945,7 @@ document.addEventListener('alpine:init', () => {
 
     resetAllFilters() {
       this.initFilters();
+      for (const m of this.surfRows) if (m.rowFilter) { m.rowFilter.lo = m.rowFilter.min; m.rowFilter.hi = m.rowFilter.max; }
       this.onFilterChange();
     },
 
@@ -945,6 +975,10 @@ document.addEventListener('alpine:init', () => {
         } else {
           specs.push({ kind: 'set', column: m.column, allowed: new Set(this.catOf(m).selected) });
         }
+      }
+      // An added row's filter joins the page only in page scope.
+      for (const m of this.surfRows) {
+        if (this.rowFilterOnPage(m)) specs.push({ kind: 'range', column: m.column, lo: m.rowFilter.lo, hi: m.rowFilter.hi });
       }
       return specs;
     },
@@ -1133,8 +1167,11 @@ document.addEventListener('alpine:init', () => {
       const v = this.surfView();
       if (!v) return '';
       const name = this.surf.method === 'spearman' ? 'Spearman' : 'Pearson';
+      const bh = obBhBoundary(v.bars);
+      const line = bh.index === null ? 'none in view survive, so no line'
+        : `left of the dashed line` + (bh.failLeft ? ` — ${bh.failLeft} bar${bh.failLeft === 1 ? '' : 's'} left of it do${bh.failLeft === 1 ? 'es' : ''} not survive (their n is smaller)` : '');
       return `${v.bars.length} bars · ${v.survivorsInView} in view survive Benjamini-Hochberg at q ${OB_BH_Q} (${name}; ` +
-             `${v.survivorsAll} of ${v.computedAll} computed) — outlined` +
+             `${v.survivorsAll} of ${v.computedAll} computed), ${line}` +
              (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
              ' · opacity by n · click a bar to add its section below';
     },
@@ -1163,13 +1200,37 @@ document.addEventListener('alpine:init', () => {
                 method === 'pearson' ? pr + (b.survives ? '  ✓ BH' : '') : pr,
                 `${b.family} · ${b.form}${b.tenor ? ' · ' + b.tenor : ''}${b.wing ? ' · ' + b.wing : ''}`];
       };
+      // The BH boundary: a faint vertical line after the last surviving bar,
+      // drawn by a per-chart plugin (no outline on the bars themselves).
+      const bh = obBhBoundary(v.bars);
+      const bhLine = {
+        id: 'obBhLine',
+        afterDatasetsDraw(chart) {
+          if (bh.index === null) return;
+          const meta = chart.getDatasetMeta(0);
+          const a = meta.data[bh.index - 1], b = meta.data[bh.index];
+          if (!a) return;
+          const x = b ? (a.x + b.x) / 2 : a.x + a.width;
+          const { top, bottom } = chart.chartArea;
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(x + 0.5, top); ctx.lineTo(x + 0.5, bottom); ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = 'rgba(255,255,255,0.45)';
+          ctx.font = '10px sans-serif';
+          ctx.fillText(`BH q ${OB_BH_Q}`, x + 4, top + 10);
+          ctx.restore();
+        },
+      };
       const cfg = {
         type: 'bar',
+        plugins: [bhLine],
         data: { labels: v.bars.map(b => b.column), datasets: [{
           data: v.bars.map(b => b.value),
           backgroundColor: v.bars.map(b => obRgba(b.group.color, b.alpha)),
-          borderColor: v.bars.map(b => (b.survives ? '#f2f2f2' : 'rgba(0,0,0,0)')),
-          borderWidth: v.bars.map(b => (b.survives ? 1.5 : 0)),
           borderSkipped: false, barPercentage: 0.8, categoryPercentage: 1.0 }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
@@ -1205,7 +1266,9 @@ document.addEventListener('alpine:init', () => {
       };
       for (const [key, node, c] of [['rank', el, cfg], ['rankAxis', axisEl, axisCfg]]) {
         const ch = OB_CHARTS[key];
-        if (ch && ch.canvas !== node) { ch.destroy(); OB_CHARTS[key] = null; }
+        // Plugins are fixed at construction, and the BH line closes over this
+        // render's bars: rebuild the bar chart rather than update it.
+        if (ch && (ch.canvas !== node || key === 'rank')) { ch.destroy(); OB_CHARTS[key] = null; }
         if (OB_CHARTS[key]) { OB_CHARTS[key].data = c.data; OB_CHARTS[key].options = c.options; OB_CHARTS[key].resize(); OB_CHARTS[key].update('none'); }
         else OB_CHARTS[key] = new Chart(node.getContext('2d'), c);
       }
@@ -1264,7 +1327,7 @@ document.addEventListener('alpine:init', () => {
         bins: { edges: null, labels: null, closed: 'left', labelEdge: 'both' }, categories: null,
         hasScatter: true, section: true, filter: false, winRate: false, pane: null, basis: null, series: [],
         format: { decimals: u.decimals, suffix: u.suffix }, scale: u.scale, minDate: meta.min_date,
-        family: meta.family, form: meta.form, removable: true, loading: true, error: '', report: null,
+        family: meta.family, form: meta.form, removable: true, loading: true, error: '', report: null, rowFilter: null,
       };
       this.surfRows = [...this.surfRows, row];
       await this.fetchSurfRow(row.key);
@@ -1296,18 +1359,20 @@ document.addEventListener('alpine:init', () => {
           .concat(vals.some(v => v !== null) ? [row.column] : []);
         row.report = { withValue: vals.filter(v => v !== null).length, trades: vals.length, noBar: body.report.no_bar };
         this.computeAutoBins();
+        this.initRowFilter(row);
       } catch (e) {
         console.error('oo-backtest surface values', e);
         if (token === OB_DATA.logToken) row.error = `Could not fetch ${row.surfColumn}: ${e.message}`;
       } finally {
         if (token === OB_DATA.logToken) {
           row.loading = false;
-          this.$nextTick(() => this.renderSections(OB_DATA.idx));
+          this.$nextTick(() => this.recompute());
         }
       }
     },
 
     removeSurfRow(m) {
+      const wasOnPage = this.rowFilterOnPage(m);
       for (const which of ['avg', 'total', 'win', 'scatter']) {
         const id = this.canvasId(m, which);
         if (OB_CHARTS.sec[id]) { OB_CHARTS.sec[id].destroy(); delete OB_CHARTS.sec[id]; }
@@ -1318,6 +1383,7 @@ document.addEventListener('alpine:init', () => {
       delete OB_DATA.autoBins[m.key];
       const { [m.key]: _gone, ...rest } = this.sections;
       this.sections = rest;
+      if (wasOnPage) this.onFilterChange();
     },
 
     scrollToRow(m) {
@@ -1336,6 +1402,75 @@ document.addEventListener('alpine:init', () => {
     },
 
     columnLabel(m) { return m.removable ? m.label : this.metricColumn(m); },
+
+
+    /* ── per-row filters (P6d) ─────────────────────────────────────────── */
+
+    /* Each added row has its own range filter with a scope:
+     *   row   (default) narrows only that row's charts; the page is untouched
+     *   page  a filter like the sidebar's: every stat, chart and section, and
+     *         any trade WITHOUT a value for the metric is dropped once narrowed.
+     * Page scope is the old app's "Filter Scope" trap -- a z-score filter
+     * silently discarding every pre-2021 trade -- so its cost is stated while
+     * the page scope is selected, before and while it narrows. */
+    initRowFilter(row) {
+      const prev = row.rowFilter ? row.rowFilter.scope : null;
+      row.rowFilter = obRowFilterState((OB_DATA.columns || {})[row.column], this.autoSteps[row.key], prev);
+    },
+
+    rowFilterActive(m) { const f = m.rowFilter; return !!f && (f.lo > f.min || f.hi < f.max); },
+    rowFilterOnPage(m) { return m.rowFilter && m.rowFilter.scope === 'page' && this.rowFilterActive(m); },
+
+    setRowLo(m, raw) { const f = m.rowFilter; if (!f) return; f.lo = Math.min(+raw, f.hi); this.onFilterChange(); },
+    setRowHi(m, raw) { const f = m.rowFilter; if (!f) return; f.hi = Math.max(+raw, f.lo); this.onFilterChange(); },
+    resetRowFilter(m) { const f = m.rowFilter; if (!f) return; f.lo = f.min; f.hi = f.max; this.onFilterChange(); },
+    setRowScope(m, scope) {
+      if (!m.rowFilter || m.rowFilter.scope === scope) return;
+      m.rowFilter.scope = scope;
+      this.onFilterChange();
+    },
+
+    /* The page's filtered rows WITHOUT this row's own filter -- what the
+     * row's cost and its row-scope narrowing are measured against. */
+    idxWithout(m) {
+      const own = m.column;
+      const specs = this.activeSpecs().filter(sp => sp.column !== own);
+      return obApplyFilters(OB_DATA.columns, OB_DATA.n, specs);
+    },
+
+    /* What whole-page scope costs through the coverage gap: trades the page
+     * would otherwise show that have no value for this metric, split into
+     * "entered before its data starts" and "no bar at the entry time". */
+    rowScopeCost(m) {
+      void this.idxTick;
+      if (!m.rowFilter || !OB_DATA.columns || !OB_DATA.columns[m.column]) return null;
+      const vals = OB_DATA.columns[m.column], dates = OB_DATA.columns.date_opened;
+      const base = this.idxWithout(m);
+      let before = 0, noBar = 0;
+      for (const i of base) {
+        if (vals[i] !== null && vals[i] !== undefined) continue;
+        if (m.minDate && dates[i] && dates[i] < m.minDate) before++; else noBar++;
+      }
+      return { base: base.length, dropped: before + noBar, before, noBar };
+    },
+
+    rowScopeText(m) {
+      const c = this.rowScopeCost(m);
+      if (!c || m.rowFilter.scope !== 'page') return '';
+      const why = [c.before ? `${c.before.toLocaleString()} entered before its data starts (${m.minDate})` : '',
+                   c.noBar ? `${c.noBar.toLocaleString()} with no bar at the entry time` : ''].filter(Boolean).join(', ');
+      if (!c.dropped) return 'Whole page: every filtered trade has a value — no coverage cost';
+      const verb = this.rowFilterActive(m) ? 'dropping' : 'moving the slider will drop';
+      return `Whole page: ${verb} ${c.dropped.toLocaleString()} of ${c.base.toLocaleString()} filtered trades with no value — ${why}`;
+    },
+
+    rowFilterText(m) {
+      const f = m.rowFilter;
+      if (!f) return '';
+      const u = m.format && m.format.suffix ? ' ' + m.format.suffix : '';
+      const dec = Math.max(m.format.decimals ?? 2, obDecimals(f.step));
+      return `${f.lo.toFixed(dec)} – ${f.hi.toFixed(dec)}${u}`;
+    },
 
     /* ── capital per position ──────────────────────────────────────────── */
 
@@ -1631,7 +1766,8 @@ document.addEventListener('alpine:init', () => {
       // are not bar-for-bar comparable, and this is where that shows.
       const auto = m.binning === 'auto' && this.autoSteps[m.key] !== undefined
         ? ` · ${this.stepText(m)} bins (auto)` : '';
-      const cover = m.removable && m.minDate ? ` · data from ${m.minDate}` : '';
+      const cover = (m.removable && m.minDate ? ` · data from ${m.minDate}` : '') +
+        (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m) ? ' · row filter applied' : '');
       return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}${cover}`;
     },
 
@@ -1675,7 +1811,13 @@ document.addEventListener('alpine:init', () => {
         const bins = m.type === 'range' ? this.binsFor(m) : null;
         if (m.type === 'range' && !bins) continue;
         const mm = bins === m.bins ? m : { ...m, bins };
-        const d = obSectionData(OB_DATA.columns, idx, mm, this.metricColumn(m));
+        // A row-scoped filter narrows this section only.
+        let rowIdx = idx;
+        if (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m)) {
+          const vals = OB_DATA.columns[m.column], f = m.rowFilter;
+          rowIdx = idx.filter(i => vals[i] !== null && vals[i] >= f.lo && vals[i] <= f.hi);
+        }
+        const d = obSectionData(OB_DATA.columns, rowIdx, mm, this.metricColumn(m));
         const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
         sections[m.key] = { valued: d.valued, bins: d.rows.filter(r => r.count).length, fit };
         if (d.valued) this.drawSection(m, d, fit);

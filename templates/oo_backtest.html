@@ -131,6 +131,11 @@
     .ob-rank-scroll { flex:1; min-width:0; overflow-x:auto; overflow-y:hidden; }
     .ob-rank-inner { height:100%; position:relative; }
     .ob-rank-add { width:auto; max-width:320px; }
+    .ob-rowfilter { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+    .ob-rowfilter-slider { flex:0 1 260px; min-width:160px; }
+    .ob-range-now { font-size:11px; font-weight:700; color:var(--text); white-space:nowrap; }
+    .ob-rowfilter-cost { margin-top:0; flex-basis:100%; }
+    .ob-collapsible { cursor:pointer; user-select:none; }
     .ob-card-desc { font-size:11px; color:var(--dim); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .ob-capital { display:flex; align-items:center; gap:8px; padding:8px 10px; }
     .ob-capital-field { display:flex; align-items:center; gap:4px; margin-left:auto; color:var(--dim); font-size:12px; }
@@ -435,6 +440,27 @@
             <a href="#" class="ob-reset" x-show="m.removable" @click.prevent="removeSurfRow(m)" title="Remove this row">remove</a>
           </div>
           <div class="ob-card-body">
+            <!-- An added row's own filter (P6d). Row scope narrows only this
+                 row; whole-page scope filters everything and states what the
+                 metric's coverage gap would drop. -->
+            <template x-if="m.removable && m.rowFilter">
+              <div class="ob-rowfilter">
+                <span class="ob-lbl">Filter</span>
+                <div class="ob-dual ob-rowfilter-slider">
+                  <input type="range" :min="m.rowFilter.min" :max="m.rowFilter.max" :step="m.rowFilter.step"
+                         :value="m.rowFilter.lo" @input="setRowLo(m, $event.target.value)" :aria-label="m.label + ' minimum'">
+                  <input type="range" :min="m.rowFilter.min" :max="m.rowFilter.max" :step="m.rowFilter.step"
+                         :value="m.rowFilter.hi" @input="setRowHi(m, $event.target.value)" :aria-label="m.label + ' maximum'">
+                </div>
+                <span class="ob-range-now" x-text="rowFilterText(m)"></span>
+                <a href="#" class="ob-reset" x-show="rowFilterActive(m)" @click.prevent="resetRowFilter(m)">reset</a>
+                <div class="seg">
+                  <div class="seg-btn" :class="{on: m.rowFilter.scope==='row'}" @click="setRowScope(m, 'row')">This row</div>
+                  <div class="seg-btn" :class="{on: m.rowFilter.scope==='page'}" @click="setRowScope(m, 'page')">Whole page</div>
+                </div>
+                <span class="ob-parse-note warn ob-rowfilter-cost" x-show="rowScopeText(m)" x-text="rowScopeText(m)"></span>
+              </div>
+            </template>
             <!-- One text node: .ob-placeholder is a flex box, which would drop
                  the space between a text run and a child span. -->
             <div class="ob-placeholder" x-show="sectionState(m) === 'loading'"
@@ -580,9 +606,11 @@
 
       <!-- Market-data checks: why any gap or VIX-family level is null. -->
       <div class="ob-card" x-show="loaded && hasMarketChecks()">
-        <div class="ob-card-hdr"><span class="ob-card-title">Market-data checks</span>
-          <span class="ob-card-sub">diagnostics — not filtered</span></div>
-        <div class="ob-card-body">
+        <!-- Collapsed by default: diagnostics, opened when wanted. -->
+        <div class="ob-card-hdr ob-collapsible" @click="marketChecksOpen = !marketChecksOpen">
+          <span class="ob-card-title" x-text="(marketChecksOpen ? '▾ ' : '▸ ') + 'Market-data checks'"></span>
+          <span class="ob-card-sub" x-text="'diagnostics — not filtered · ' + (marketChecksOpen ? 'hide' : 'show')"></span></div>
+        <div class="ob-card-body" x-show="marketChecksOpen">
           <template x-for="e in diagErrors()" :key="e"><div class="ob-err" x-text="e"></div></template>
 
           <template x-if="mk().null_reasons">

@@ -1032,6 +1032,9 @@ out.covOne = obCommonCoverage(dates, [0, 1, 2], ['2020-01-02', '2020-01-02']);
 const cols = { date_opened: dates, time_opened: ['10:00:00', '15:30:00', null, '09:30:00', '12:00:00', '15:55:00', '10:00:00'],
                pnl: [1, 2, 3, 4, 5, 6, 7] };
 out.tradesAll = obRankTrades(cols, [0, 1, 2, 3, 4, 5], null);
+const sv = a => a.map(x => ({ survives: x }));
+out.bh = { prefix: obBhBoundary(sv([true, true, false, false])), gap: obBhBoundary(sv([true, false, true, false, false])),
+           none: obBhBoundary(sv([false, false])), all: obBhBoundary(sv([true, true])) };
 out.tradesFrom = obRankTrades(cols, [0, 1, 2, 3, 4, 5, 6], '2021-04-06');
 
 // Component, with the server stubbed.
@@ -1142,6 +1145,10 @@ def check_surface_ranking_ui() -> None:
     check(abs(a["skew_a"] - (0.12 + 0.88 * 400 / 1348)) < 1e-9 and a2["skew_a"] > a["skew_a"]
           and "iv_a" not in a2 and o["noIv"]["survivorsAll"] == 2,
           "opacity is n against the largest n IN VIEW; hiding iv re-packs and lifts the rest; BH count over all computed is unchanged")
+    bh = o["bh"]
+    check(bh["prefix"] == {"index": 2, "failLeft": 0, "survivors": 2} and bh["gap"] == {"index": 3, "failLeft": 1, "survivors": 2}
+          and bh["none"]["index"] is None and bh["all"]["index"] == 2,
+          "BH line goes after the last survivor; a non-survivor left of it (smaller n) is counted, not hidden")
     other = next(b for b in o["spear"]["bars"] if b["column"] == "new_fam")
     check(other["group"]["label"] == "Other", "a family with no assigned hue is drawn grey under Other")
     cv = o["cov"]
@@ -1222,8 +1229,36 @@ global.fetch = async (url, init) => {
                    binsSame: JSON.stringify(c.binsFor(iv)) === JSON.stringify(out.iv.bins) };
   c.resetAllFilters(); c.recompute();
 
+  // ── per-row filter and scope (P6d)
+  const dow = () => c.sections.day_of_week.valued;
+  const rf = iv.rowFilter;
+  out.rf0 = { min: rf.min, max: rf.max, step: rf.step, scope: rf.scope, n: rf.n, text: c.rowScopeText(iv) };
+  c.setRowLo(iv, 20); c.setRowHi(iv, 26);
+  out.rowScope = { count: c.filteredCount, rowValued: c.sections[iv.key].valued, dow: dow(), active: c.activeCount(),
+                   specs: c.activeSpecs().length, sub: c.sectionSub(iv), text: c.rowScopeText(iv) };
+  const inRange = OBD.columns['surface__iv_30d_atm'].filter(v => v !== null && v >= 20 && v <= 26).length;
+  out.inRange = inRange;
+  c.setRowScope(iv, 'page');
+  out.pageScope = { count: c.filteredCount, dow: dow(), active: c.activeCount(), text: c.rowScopeText(iv),
+                    stale: null };
+  c.resetRowFilter(iv);
+  out.pageUntouched = { count: c.filteredCount, active: c.activeCount(), text: c.rowScopeText(iv) };
+  c.setRowHi(iv, 26);
+  c.resetAllFilters();
+  out.afterResetAll = { count: c.filteredCount, lo: iv.rowFilter.lo === iv.rowFilter.min, hi: iv.rowFilter.hi === iv.rowFilter.max,
+                        scope: iv.rowFilter.scope };
+  c.setRowHi(iv, 26);
+  out.beforeRemovePage = c.filteredCount;
+  c.setRowScope(iv, 'row');
+  c.resetRowFilter(iv);
+
   await c.addSurfRow('z_iv_30d_atm');
-  out.z = { state: c.sectionState(R('z_iv_30d_atm')), skipped: c.skippedText(R('z_iv_30d_atm')) };
+  out.z = { state: c.sectionState(R('z_iv_30d_atm')), skipped: c.skippedText(R('z_iv_30d_atm')),
+            rowFilter: R('z_iv_30d_atm').rowFilter };
+  // A page-scoped filter on a row that is then removed: the page recovers.
+  const ivRow = R('iv_30d_atm');
+  c.setRowScope(ivRow, 'page'); c.setRowHi(ivRow, 22);
+  out.pageBeforeRemoval = c.filteredCount;
   await c.addSurfRow('broken');
   out.broken = { state: c.sectionState(R('broken')), error: R('broken').error };
 
@@ -1232,6 +1267,7 @@ global.fetch = async (url, init) => {
   await c.rankSurface();
   c.surfRows.filter(r => r.surfColumn !== 'iv_30d_atm').forEach(r => c.removeSurfRow(r));
   c.removeSurfRow(R('iv_30d_atm'));
+  out.afterPageRowRemoved = c.filteredCount;
   out.removed = { rows: c.surfRows.length, col: 'surface__iv_30d_atm' in OBD.columns,
                   present: c.presentColumns.includes('surface__iv_30d_atm'), sections: Object.keys(c.sections).filter(k => k.startsWith('surf_')) };
   c.surfClickBar(0);
@@ -1273,7 +1309,7 @@ def check_surface_rows() -> None:
     values = {"iv_30d_atm": [None if i < 5 else round(rng.uniform(0.11, 0.32), 4) for i in range(n)],
               "z_iv_30d_atm": [None] * n}
     catalog = [{"column_name": "iv_30d_atm", "family": "iv", "form": "level", "units": "vol_decimal",
-                "description": "30d ATM implied vol", "formula": "sigma", "min_date": "2020-01-02"},
+                "description": "30d ATM implied vol", "formula": "sigma", "min_date": "2021-01-10"},
                {"column_name": "z_iv_30d_atm", "family": "iv", "form": "z", "units": "z_score",
                 "description": "z of iv", "formula": "z", "min_date": "2023-04-05"},
                {"column_name": "broken", "family": "skew", "form": "level", "units": "mystery",
@@ -1300,7 +1336,7 @@ def check_surface_rows() -> None:
     check(iv["col"] == want and iv["scale"] == 100 and iv["format"] == {"decimals": 2, "suffix": "vol pts"},
           "vol_decimal values are scaled to vol points on arrival (0.1406 -> 14.06), formatted to 2 decimals")
     check(iv["state"] == "ready" and iv["inSections"] and iv["valued"] == 55
-          and "55 of 60 trades with a value" in iv["sub"] and "vol pts bins (auto)" in iv["sub"] and "data from 2020-01-02" in iv["sub"],
+          and "55 of 60 trades with a value" in iv["sub"] and "vol pts bins (auto)" in iv["sub"] and "data from 2021-01-10" in iv["sub"],
           f"the row is a ready section of the page, rendered by the shared section code ({iv['sub']})")
     check(iv["bins"]["labels"][0].startswith("<") and iv["bins"]["labels"][-1].startswith("≥")
           and iv["step"].endswith("vol pts") and f"per {iv['step']}" in iv["fit"],
@@ -1309,6 +1345,29 @@ def check_surface_rows() -> None:
     f = o["filtered"]
     check(f["calls"] == 1 and f["valued"] < 55 and f["count"] < n and f["binsSame"],
           f"a page filter re-bins the row from the filtered trades with no request, and does not move its edges ({f})")
+    r0 = o["rf0"]
+    ivvals = [v * 100 for v in values["iv_30d_atm"] if v is not None]
+    check(r0["min"] <= min(ivvals) and r0["max"] >= max(ivvals) and r0["scope"] == "row" and r0["n"] == 55
+          and abs(r0["step"] - 0.1) < 1e-12 and r0["text"] == "",
+          f"row filter: bounds from the row's own values in vol points, step a tenth of the bin step, row scope by default ({r0})")
+    rs = o["rowScope"]
+    check(rs["count"] == n and rs["dow"] == n and rs["rowValued"] == o["inRange"] and rs["active"] == 0 and rs["specs"] == 0
+          and "row filter applied" in rs["sub"] and rs["text"] == "",
+          f"row scope narrows only that row ({rs['rowValued']} in 20-26 vol pts); page count, other sections and "
+          f"the active-filter count are untouched")
+    ps = o["pageScope"]
+    check(ps["count"] == o["inRange"] and ps["dow"] == o["inRange"] and ps["active"] == 1
+          and ps["text"] == "Whole page: dropping 5 of 60 filtered trades with no value — 3 entered before its data starts (2021-01-10), 2 with no bar at the entry time",
+          f"whole-page scope filters every section and states the coverage cost, split before-coverage / no bar ({ps['text']})")
+    pu = o["pageUntouched"]
+    check(pu["count"] == n and pu["active"] == 0 and pu["text"].startswith("Whole page: moving the slider will drop 5 of 60"),
+          f"page scope with the slider untouched drops nothing, but says what narrowing will cost ({pu['text'][:60]})")
+    ar = o["afterResetAll"]
+    check(ar["count"] == n and ar["lo"] and ar["hi"] and ar["scope"] == "page",
+          "reset all filters also resets row filters (keeping each row's scope)")
+    check(o["pageBeforeRemoval"] < n and o["afterPageRowRemoved"] == n,
+          f"removing a row whose filter was on the page re-filters the page ({o['pageBeforeRemoval']} -> {o['afterPageRowRemoved']})")
+    check(o["z"]["rowFilter"] is None, "a row with no values gets no filter control")
     check(o["z"]["state"] == "skipped" and "its data starts 2023-04-05" in o["z"]["skipped"],
           f"a metric whose coverage starts after every trade says so instead of drawing nothing ({o['z']['skipped']})")
     check(o["broken"]["state"] == "error" and "Unknown or unranked" in o["broken"]["error"],

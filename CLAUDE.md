@@ -63,7 +63,7 @@ and reported under the chart.
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —
-done; **P6c** added metric rows — done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+done; **P6c** added metric rows — done; **P6d** per-row filters — done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
 formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
 trades a coverage gap would drop); P6e docs.
 
@@ -108,8 +108,11 @@ into "entered before coverage" and "no bar at the entry time" (on the OO log ~1,
 2,097; before ranking it states how many predate the metrics in view). Bars: fixed 12 px,
 horizontal scroll, y axis in its own fixed chart beside the scroller; sorted by |value| of
 the chosen method (Spearman default / Pearson); form filter; legend toggles single families
-(hidden families re-pack; BH still counts them); opacity = `obBarAlpha(n, max n in view)`;
-BH survivors at q 0.05 of the sorting method are outlined. **Common coverage only** sends
+(hidden families re-pack; BH still counts them); opacity = `obBarAlpha(n, max n in view)`.
+**BH is a faint dashed line after the last bar surviving q 0.05** (sorting method) — no bar
+outlines (the user found white borders abrasive). BH is not a pure |r| threshold (adjusted p
+depends on n), so survivors need not be a contiguous run: `obBhBoundary` puts the line after
+the last survivor and the footer counts non-survivors left of it. **Common coverage only** sends
 only trades from the latest `min_date` among metrics in view, and states its cost first:
 trades in [earliest start, common start) that some metric in view would lose. Family hues
 (`surface.FAMILY_GROUPS`, 8 groups for ~14 families; unassigned → grey "Other") and form
@@ -130,6 +133,18 @@ is stated per bin step. A duplicate add scrolls to the row; a failed fetch leave
 row; a new log refetches every row (a log token discards late responses); remove drops the
 column, bins and charts. The section card is one Jinja macro (`metric_section_card`) shared
 by built-in and added rows. Rows are not saved with a strategy.
+
+**Per-row filters (P6d).** Each added row with values gets a dual slider (display units,
+step = bin step / 10) and a scope toggle. **This row** (default) narrows only that row's
+charts — page count, stats, other sections and the active-filter count are untouched.
+**Whole page** adds a range spec to `activeSpecs()` like a sidebar filter, so once narrowed
+every trade WITHOUT a value is dropped (the old app's Filter Scope trap). While page scope is
+selected the row states the cost against the page's other filters: trades with no value,
+split "entered before its data starts" / "no bar at the entry time" — before narrowing
+("moving the slider will drop N") and while narrowing ("dropping N"). Reset-all resets row
+filters (keeps scope); removing a page-scoped row re-filters the page.
+
+The **Market-data checks** pane is collapsed by default (header toggles it).
 
 ### What `main.index_ohlc` actually looks like
 
