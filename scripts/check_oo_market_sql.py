@@ -28,14 +28,22 @@ while every Monday gap on the VPS came out null.
   2023-07-05 Wed  full; gap must use 07-03's 12:55 close; one bar's SPX high is
                   'NaN' and another's SPX low is 0.0 (neither may reach high/low)
   2023-07-06 Thu  full; the 10:00 VIX open is 0.0 (an entry there takes 09:55)
-  2023-07-07 Fri  zero-filled "holiday", then 07-08/09 zero-filled weekend
-  2023-07-10 Mon  full; gap must use THURSDAY 07-06
+  2023-07-07 Fri  HOLIDAY WITH VIX ARTIFACTS: 25 valid VIX bars (09:30-11:30),
+                  everything else zero -- the shape VIX ingestion writes on
+                  real holidays. Not a session for any series. Then 07-08/09
+                  zero-filled weekend.
+  2023-07-10 Mon  full; SPX and VIX gaps must use THURSDAY 07-06, not the
+                  artifact Friday (the 2026-07-06 bug)
+  2023-07-11 Tue  FULL VIX SESSION, NO SPX (78 VIX bars; SPX/VIX3M/VIX9D zero)
+                  -- the 2026-04-08 shape: a VIX session, not an SPX one
+  2023-07-12 Wed  full; SPX gap must use 07-10 (skipping 07-11), VIX gap 07-11
   2023-07-15/16   Sat/Sun  zero-filled, after the last session (freshness must not report them)
 
 Planted faults, each of which must change the answer: a close pinned to
 15:55, a prior close from trade_date - 1, an entry join reading the bar
-close, a raw max() over a NaN high, and a "previous row" that includes the
-zero-filled days.
+close, a raw max() over a NaN high, a "previous row" that includes the
+zero-filled days, and a "previous row" over days with ANY valid bar (which
+takes the VIX-artifact holiday).
 
 EXITS 3 (skipped), never 0, where it cannot run: no Postgres server binaries,
 no asyncpg, or running as root (initdb refuses root). scripts/gates.py shows
@@ -94,12 +102,18 @@ def find_bin() -> Path | None:
 # ── fabricated bars ─────────────────────────────────────────────────────────
 
 DAYS = [date(2023, 6, 29), date(2023, 6, 30), date(2023, 7, 3), date(2023, 7, 5),
-        date(2023, 7, 6), date(2023, 7, 10)]
+        date(2023, 7, 6), date(2023, 7, 10), date(2023, 7, 11), date(2023, 7, 12)]
 EARLY = date(2023, 7, 3)
 NAN = "NaN"
 ZERO_WEEKEND = [date(2023, 6, 24), date(2023, 6, 25), date(2023, 7, 1), date(2023, 7, 2),
                 date(2023, 7, 8), date(2023, 7, 9), date(2023, 7, 15), date(2023, 7, 16)]
-ZERO_HOLIDAY = [date(2023, 7, 4), date(2023, 7, 7)]
+ZERO_HOLIDAY = [date(2023, 7, 4)]
+ARTIFACT_HOLIDAY = date(2023, 7, 7)          # 25 valid VIX bars, nothing else
+ARTIFACT_BARS = 25
+VIX_ONLY = date(2023, 7, 11)                 # full VIX session, SPX/VIX3M/VIX9D zero
+WED2 = date(2023, 7, 12)
+SPX_DAYS = [d for d in [date(2023, 6, 29), date(2023, 6, 30), date(2023, 7, 3), date(2023, 7, 5),
+                        date(2023, 7, 6), date(2023, 7, 10), date(2023, 7, 12)]]
 WED, THU, MON2 = date(2023, 7, 5), date(2023, 7, 6), date(2023, 7, 10)
 NAN_HIGH_BAR, ZERO_LOW_BAR = time(10, 20), time(11, 10)   # on WED
 ZERO_VIX_OPEN_BAR = time(10, 0)                            # on THU
@@ -143,8 +157,12 @@ def build_rows() -> list[tuple]:
                 vals["spx_low"] = 0.0                   # min() over raw lows would be 0
             if d == THU and t == ZERO_VIX_OPEN_BAR:
                 vals["vix_open"] = 0.0                  # a zero bar inside a real session
+            if d == VIX_ONLY:
+                for sr in ("spx", "vix3m", "vix9d"):    # the 2026-04-08 shape
+                    for f in ("open", "high", "low", "close"):
+                        vals[f"{sr}_{f}"] = 0.0
             rows.append((d, t, vals))
-        if d != EARLY:
+        if d not in (EARLY, VIX_ONLY):
             # 16:00 partial row with absurd values: must never be read.
             rows.append((d, time(16, 0), {f"{s}_{f}": 99999.0 for s in market.SERIES
                                          for f in ("open", "high", "low", "close")}))
@@ -153,6 +171,14 @@ def build_rows() -> list[tuple]:
     for d in ZERO_WEEKEND + ZERO_HOLIDAY:
         for t in session_times(date(2023, 6, 29)):
             rows.append((d, t, {c: 0.0 for c in OHLC_COLS_ALL}))
+    # The holiday VIX artifacts: the first 25 bars carry plausible VIX values,
+    # every other value on the day is zero.
+    for k, t in enumerate(session_times(date(2023, 6, 29))):
+        vals = {c: 0.0 for c in OHLC_COLS_ALL}
+        if k < ARTIFACT_BARS:
+            for f, v in px("vix", 4, k).items():
+                vals[f"vix_{f}"] = v
+        rows.append((ARTIFACT_HOLIDAY, t, vals))
     # A pre-market row on day one, also never read.
     rows.append((DAYS[0], time(9, 25), {f"{s}_{f}": -1.0 for s in market.SERIES
                                         for f in ("open", "high", "low", "close")}))
@@ -248,9 +274,12 @@ async def load(pool) -> None:
         await conn.copy_records_to_table("index_ohlc", records=recs, columns=["trade_date", "quote_time", *OHLC_COLS])
         n_nan = await conn.fetchval("SELECT count(*) FROM index_ohlc WHERE spx_close = 'NaN'::float8")
         assert n_nan == 1, n_nan   # the fixture really stores NaN, not NULL
-        n_zero_days = await conn.fetchval("""SELECT count(DISTINCT trade_date) FROM index_ohlc
-                                             WHERE spx_close = 0 AND vix_close = 0""")
+        n_zero_days = await conn.fetchval("""SELECT count(*) FROM (SELECT trade_date FROM index_ohlc
+                                             GROUP BY trade_date HAVING max(spx_close) = 0 AND max(vix_close) = 0) z""")
         assert n_zero_days == len(ZERO_WEEKEND + ZERO_HOLIDAY), n_zero_days   # really zero-filled, not absent
+        n_art = await conn.fetchval("SELECT count(*) FROM index_ohlc WHERE trade_date = $1 AND vix_close > 0",
+                                    ARTIFACT_HOLIDAY)
+        assert n_art == ARTIFACT_BARS, n_art
 
 
 async def run(dsn: str) -> None:
@@ -273,12 +302,13 @@ async def check_daily(pool) -> None:
     daily, fresh = await market.get_daily(pool)
     by = {r["trade_date"]: r for r in daily.to_dict("records")}
     check(sorted(by) == DAYS,
-          f"one row per TRADING day; the {len(ZERO_WEEKEND + ZERO_HOLIDAY)} zero-filled days are not rows ({len(by)})")
-    check(fresh["latest_date"] == "2023-07-10" and fresh["latest_time"] == "15:55:00"
+          f"one row per day with a session in some series; zero-filled days and the VIX-artifact holiday are not rows ({len(by)})")
+    check(ARTIFACT_HOLIDAY not in by, "the holiday with 25 VIX artifact bars is not a rollup row")
+    check(fresh["latest_date"] == "2023-07-12" and fresh["latest_time"] == "15:55:00"
           and fresh["latest_raw_date"] == "2023-07-16",
           f"freshness is the last VALID session bar, not the trailing zero-filled weekend "
           f"({fresh['latest_date']} {fresh['latest_time']}; raw {fresh['latest_raw_date']})")
-    for d in DAYS:
+    for d in SPX_DAYS:
         r = by[d]
         want, wt = expected_close("spx", d)
         check(r["spx_close"] == want and r["spx_close_time"] == wt,
@@ -287,13 +317,22 @@ async def check_daily(pool) -> None:
         hi, lo = expected_hi_lo(d)
         check(r["spx_high"] == hi and r["spx_low"] == lo,
               f"{d}: high/low ignore the 16:00 row, a 'NaN' high and a zero low ({r['spx_high']}/{r['spx_low']} vs {hi}/{lo})")
-    check(by[DAYS[3]]["prev_trade_date"] == EARLY, "07-05's previous row is 07-03 (not the 07-04 holiday)")
+    check(by[DAYS[3]]["spx_prev_date"] == EARLY, "07-05's previous SPX session is 07-03 (not the 07-04 holiday)")
     check(by[DAYS[3]]["spx_prev_close"] == expected_close("spx", EARLY)[0],
           "07-05's prior close is 07-03's 12:55 close")
-    check(by[DAYS[2]]["prev_trade_date"] == DAYS[1] and by[DAYS[2]]["spx_prev_close"] == expected_close("spx", DAYS[1])[0],
-          "Monday 07-03's previous row is FRIDAY 06-30, not the zero-filled Sunday")
-    check(by[MON2]["prev_trade_date"] == THU and by[MON2]["spx_prev_close"] == expected_close("spx", THU)[0],
-          "Monday 07-10's previous row is THURSDAY 07-06, across a zero-filled Friday holiday and weekend")
+    check(by[DAYS[2]]["spx_prev_date"] == DAYS[1] and by[DAYS[2]]["spx_prev_close"] == expected_close("spx", DAYS[1])[0],
+          "Monday 07-03's previous SPX session is FRIDAY 06-30, not the zero-filled Sunday")
+    check(by[MON2]["spx_prev_date"] == THU and by[MON2]["spx_prev_close"] == expected_close("spx", THU)[0]
+          and by[MON2]["vix_prev_date"] == THU and by[MON2]["vix_prev_close"] == expected_close("vix", THU)[0],
+          "Monday 07-10: SPX AND VIX previous session is THURSDAY 07-06, not the VIX-artifact Friday (2026-07-06 bug)")
+    vo = by[VIX_ONLY]
+    check(vo["vix_session"] and not vo["spx_session"] and vo["spx_bars"] == 0 and pd.isna(vo["spx_close"])
+          and pd.isna(vo["spx_high"]) and vo["vix_close"] == expected_close("vix", VIX_ONLY)[0],
+          "07-11 (full VIX, no SPX) is a VIX session and not an SPX one; SPX fields null")
+    check(by[WED2]["spx_prev_date"] == MON2 and by[WED2]["vix_prev_date"] == VIX_ONLY,
+          "07-12: SPX previous session is 07-10 (skips the VIX-only day); VIX previous session is 07-11")
+    check(pd.isna(vo["spx_prev_date"]) and vo["vix_prev_date"] == MON2,
+          "07-11 has no SPX previous session of its own (not an SPX session); its VIX previous session is 07-10")
     check(by[DAYS[3]]["vix_prev_close"] == expected_close("vix", EARLY)[0],
           "VIX prior close follows the same trading-day rows")
     check(pd.isna(by[DAYS[0]]["spx_prev_close"]), "first date: no prior close -> null")
@@ -310,20 +349,27 @@ async def check_daily(pool) -> None:
           f"coverage from real closes, not from the zero-filled 06-24 {cov}")
     labels = market.bar_labels()
     y = labels[0]
-    check(y["days"] == 6 and y["days_with_0930"] == 6 and y["days_with_1555"] == 4   # 06-30 NaN close, 07-03 early
-          and y["days_with_valid_1600"] == 5 and y["days_with_premarket"] == 1 and y["zero_filled_days"] == 10,
-          f"bar-label diagnostics count trading days only, zero-filled days apart {y}")
-    z = market.zero_days()
-    check(z["zero_filled_days"] == 10 and z["zero_filled_weekdays"] == 2
-          and z["zero_filled_weekday_dates"] == ["2023-07-04", "2023-07-07"],
-          f"zero-filled days reported, weekdays named ({z['zero_filled_weekday_dates']})")
+    check(y["days"] == 7 and y["days_with_0930"] == 7 and y["days_with_1555"] == 5   # 06-30 NaN close, 07-03 early
+          and y["days_with_valid_1600"] == 6 and y["days_with_premarket"] == 1
+          and y["non_spx_session_days"] == len(ZERO_WEEKEND) + 3,   # + 07-04, 07-07, 07-11
+          f"bar-label diagnostics count SPX sessions only {y}")
+    z = market.sessions()
+    check(z["zero_filled_days"] == len(ZERO_WEEKEND + ZERO_HOLIDAY) and z["zero_filled_weekday_dates"] == ["2023-07-04"],
+          f"zero-filled days reported, weekdays named ({z['zero_filled_days']}, {z['zero_filled_weekday_dates']})")
+    check(z["artifact_only_days"] == 1 and z["artifact_only"][0]["date"] == "2023-07-07" and z["artifact_only"][0]["vix"] == 25,
+          f"the VIX-artifact holiday is reported as artifact-only ({z['artifact_only']})")
+    sx, vx = z["by_series"]["spx"], z["by_series"]["vix"]
+    check(sx["sessions"] == 7 and sx["shortest_kept"] == {"date": "2023-07-03", "bars": 42}
+          and sx["missing_on_session_days"] == ["2023-07-11"],
+          f"SPX: 7 sessions, shortest kept the 42-bar early close, missing on the VIX-only day ({sx})")
+    check(vx["sessions"] == 8 and vx["longest_rejected"] == {"date": "2023-07-07", "bars": 25}
+          and vx["shortest_kept"]["bars"] == 42,
+          f"VIX: longest artifact rejected is 25 bars on 07-07; shortest session kept 42 ({vx['longest_rejected']}, {vx['shortest_kept']})")
     # 06-30: 'NaN' SPX close + 'NaN' VIX open; 07-05: 'NaN' SPX high + zero SPX
-    # low; 07-06: zero VIX open. A zero-only test would find two days, not three.
-    check(z["partial_days"] == 3
-          and z["partial_zero_bars_by_series"] == {"spx": 1, "vix": 1, "vix3m": 0, "vix9d": 0}
-          and z["partial_nan_bars_by_series"] == {"spx": 2, "vix": 1, "vix3m": 0, "vix9d": 0},
-          f"trading days with invalid bars counted, zero and NaN apart "
-          f"(days {z['partial_days']}, zero {z['partial_zero_bars_by_series']}, NaN {z['partial_nan_bars_by_series']})")
+    # low; 07-06: zero VIX open -- counted inside sessions, zero and NaN apart.
+    check((sx["zero_bars_in_sessions"], sx["nan_bars_in_sessions"], vx["zero_bars_in_sessions"], vx["nan_bars_in_sessions"])
+          == (1, 2, 1, 1), f"invalid bars inside sessions counted per series ({sx['zero_bars_in_sessions']}/"
+                           f"{sx['nan_bars_in_sessions']}, {vx['zero_bars_in_sessions']}/{vx['nan_bars_in_sessions']})")
 
 
 def trades() -> pd.DataFrame:
@@ -338,6 +384,9 @@ def trades() -> pd.DataFrame:
         (DAYS[3], "10:02:30"),      # 6 mid-bar -> 10:00 bar's OPEN
         (MON2, "09:30:00"),         # 7 Monday after a zero-filled Friday + weekend
         (THU, "10:00:00"),          # 8 VIX 10:00 open is 0.0 -> 09:55 for VIX only
+        (VIX_ONLY, "10:00:00"),     # 9 full VIX session, no SPX: VIX computes, SPX null
+        (WED2, "09:30:00"),         # 10 SPX gap vs 07-10, VIX gap vs 07-11
+        (ARTIFACT_HOLIDAY, "10:00:00"),  # 11 a VIX artifact bar exists at 10:00 -> level null
     ]
     return pd.DataFrame({"date_opened": pd.to_datetime([d for d, _ in rows]),
                          "time_opened": [t for _, t in rows], "pnl": [1.0] * len(rows)})
@@ -362,8 +411,15 @@ async def check_entry_join(pool) -> None:
     check(L[8]["vix_bar_time"] == "09:55:00" and L[8]["vix_level"] == bar_open("vix", THU, time(9, 55))
           and L[8]["vix3m_bar_time"] == "10:00:00",
           "a ZERO VIX open on the entry bar -> 09:55 for VIX only, never a level of 0")
+    check(L[9]["vix_level"] == bar_open("vix", VIX_ONLY, time(10, 0)) and pd.isna(L[9]["gap"])
+          and math.isclose(L[9]["vix_overnight_gap"],
+                           (bar_open("vix", VIX_ONLY, time(9, 30)) - expected_close("vix", MON2)[0])
+                           / expected_close("vix", MON2)[0] * 100),
+          "VIX-only day: VIX level and VIX gap (vs 07-10) compute; SPX gap null")
+    check(pd.isna(L[11]["vix_level"]) and pd.isna(L[11]["vix_bar_time"]),
+          "an entry on the VIX-artifact holiday gets no VIX level, though a VIX bar exists at that time")
     e = rep["entry_time"]
-    check(e["entry_time_found"] == 8 and e["entry_time_fallback_0930"] == 1 and e["before_open"] == 1,
+    check(e["entry_time_found"] == 11 and e["entry_time_fallback_0930"] == 1 and e["before_open"] == 1,
           f"entry-time coverage reported {e}")
     check(rep["entry_bars"]["vix"]["earlier_than_entry_bar"] == 2, "bars pushed back by NaN and by zero are counted")
 
@@ -378,8 +434,18 @@ async def check_entry_join(pool) -> None:
     tc = expected_close("spx", THU)[0]
     check(math.isclose(L[7]["gap"], (bar_open("spx", MON2, time(9, 30)) - tc) / tc * 100),
           f"Monday 07-10 SPX gap is against THURSDAY's close ({L[7]['gap']:.5f}%)")
+    c10 = expected_close("spx", MON2)[0]
+    check(math.isclose(L[10]["gap"], (bar_open("spx", WED2, time(9, 30)) - c10) / c10 * 100),
+          f"07-12 SPX gap is against 07-10, skipping the VIX-only 07-11 ({L[10]['gap']:.5f}%)")
+    v11 = expected_close("vix", VIX_ONLY)[0]
+    check(math.isclose(L[10]["vix_overnight_gap"], (bar_open("vix", WED2, time(9, 30)) - v11) / v11 * 100),
+          "07-12 VIX gap is against 07-11's VIX close")
+    vt = expected_close("vix", THU)[0]
+    check(math.isclose(L[7]["vix_overnight_gap"], (bar_open("vix", MON2, time(9, 30)) - vt) / vt * 100),
+          "Monday 07-10 VIX gap is against THURSDAY's VIX close, not the artifact Friday's")
     g = rep["gaps"]
-    check(g["spx"] == {"computed": 7, "null": 2}, f"gap computed/null counts reported (both 06-29 trades null) {g['spx']}")
+    check(g["spx"] == {"computed": 8, "null": 4},
+          f"gap computed/null counts (06-29 x2, VIX-only day, artifact holiday) {g['spx']}")
     vprev = expected_close("vix", DAYS[1])[0]
     check(math.isclose(L[0]["vix_overnight_gap"], (bar_open("vix", EARLY, time(9, 30)) - vprev) / vprev * 100),
           "VIX gap: 09:30 open vs prior row's close")
@@ -393,12 +459,19 @@ async def check_diagnostics(pool) -> None:
     print("null reasons")
     _, rep_ = await market.join_market(pool, trades())
     nr = rep_["null_reasons"]
-    check(nr["spx_gap"]["reasons"] == {"first session in the table (no previous session)": 2},
-          f"null SPX gaps explained: first session ({nr['spx_gap']['reasons']})")
-    check(nr["vix3m"]["reasons"].get("entry date before VIX3M coverage (2023-06-30)") == 2
-          and nr["vix3m"]["reasons"].get("entry before 09:30") == 1,
-          f"null VIX3M levels explained: coverage vs pre-open ({nr['vix3m']['reasons']})")
-    check(nr["vix"]["reasons"] == {"entry before 09:30": 1}, f"null VIX level explained ({nr['vix']['reasons']})")
+    not_session = "entry date is not a session in index_ohlc (no series has a session that day)"
+    check(nr["spx_gap"]["reasons"] == {"first SPX session in the table (no earlier SPX session)": 2,
+                                        "no SPX session that day (0 valid SPX bars; 34 required)": 1,
+                                        not_session: 1},
+          f"null SPX gaps: first session x2, the VIX-only day names SPX, the artifact holiday is no session "
+          f"({nr['spx_gap']['reasons']})")
+    check(nr["vix_gap"]["reasons"] == {"first VIX session in the table (no earlier VIX session)": 2, not_session: 1},
+          f"null VIX gaps: the VIX-only day is NOT among them ({nr['vix_gap']['reasons']})")
+    check(nr["vix3m"]["reasons"] == {"entry date before VIX3M coverage (2023-06-30)": 2, "entry before 09:30": 1,
+                                      "no VIX3M session that day (0 valid VIX3M bars; 34 required)": 1, not_session: 1},
+          f"null VIX3M levels explained ({nr['vix3m']['reasons']})")
+    check(nr["vix"]["reasons"] == {"entry before 09:30": 1, not_session: 1},
+          f"null VIX levels: pre-open and the artifact holiday ({nr['vix']['reasons']})")
     check(rep_["diagnostic_errors"] == {}, f"no diagnostic raised ({rep_['diagnostic_errors']})")
 
 
@@ -416,6 +489,11 @@ async def check_planted(pool) -> None:
               AND quote_time = TIME '15:55'""", EARLY)
         bar_close = await conn.fetchval("""SELECT vix_close FROM index_ohlc
                                            WHERE trade_date = $1 AND quote_time = TIME '10:00'""", DAYS[3])
+        # "Any valid bar" as the session rule: the day before Monday 07-10
+        # that has one is the VIX-artifact Friday.
+        any_valid_prev = await conn.fetchval("""SELECT max(trade_date) FROM index_ohlc
+            WHERE trade_date < $1 AND quote_time BETWEEN TIME '09:30' AND TIME '15:55'
+              AND ((spx_close > 0 AND spx_close <> 'NaN') OR (vix_close > 0 AND vix_close <> 'NaN'))""", MON2)
     daily, _ = await market.get_daily(pool)
     by = {r["trade_date"]: r for r in daily.to_dict("records")}
     check(pinned is None and by[EARLY]["spx_close"] is not None,
@@ -424,7 +502,9 @@ async def check_planted(pool) -> None:
           f"a prior close from trade_date - 1 lands on the zero-filled holiday ({cal_prev}); the previous row does not")
     check(isinstance(raw_high, float) and math.isnan(raw_high) and not math.isnan(by[WED]["spx_high"]),
           f"a raw max() over a 'NaN' high IS NaN in Postgres ({raw_high}); the rollup's high is {by[WED]['spx_high']}")
-    check(raw_prev_row_close == 0.0 and by[EARLY]["prev_trade_date"] == DAYS[1],
+    check(any_valid_prev == ARTIFACT_HOLIDAY and by[MON2]["spx_prev_date"] == THU and by[MON2]["vix_prev_date"] == THU,
+          f"an 'any valid bar' rule takes the artifact holiday ({any_valid_prev}) as Monday's previous day; the session rule takes Thursday")
+    check(raw_prev_row_close == 0.0 and by[EARLY]["spx_prev_date"] == DAYS[1],
           "a previous row over ALL dates gives Monday a close of 0 (the zero-filled Sunday); the rollup gives Friday")
     df, _ = await market.join_market(pool, trades())
     check(df.loc[6, "vix_level"] != bar_close, "the entry join is not reading the bar's close (5 min lookahead)")

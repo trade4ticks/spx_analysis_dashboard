@@ -184,24 +184,24 @@
           </div>
           <div class="ob-note" style="margin-top:4px;" x-text="marketSummary()"></div>
           <div class="ob-parse-note warn" x-show="marketStale()"
-               x-text="'Stale — expected the ' + (market ? market.expected_session : '') + ' session'"></div>
+               x-text="staleText()"></div>
           <div class="ob-parse-note warn" x-show="fallbackWarn()">Close fell back on full sessions — see detail</div>
           <div class="ob-err" x-show="coverageError" x-text="'Coverage unavailable: ' + coverageError"></div>
           <a href="#" class="ob-dim" x-show="market && market.ok" @click.prevent="marketDetail = !marketDetail"
              x-text="marketDetail ? 'hide detail' : 'show detail'"></a>
           <div class="ob-probe" x-show="marketDetail && market && market.ok">
             <div><b>coverage:</b> <span x-text="coverageLines().join(' · ')"></span></div>
-            <div style="margin-top:4px;"><b>invalid bars</b> (zero or NaN, treated as missing):</div>
-            <template x-for="line in zeroDayLines()" :key="line">
+            <div style="margin-top:4px;"><b>sessions</b> (per series; zero/NaN bars are missing):</div>
+            <template x-for="line in sessionLines()" :key="line">
               <div x-text="line"></div>
             </template>
             <div style="margin-top:4px;"><b>close not from 15:55:</b></div>
             <template x-for="line in fallbackLines()" :key="line">
               <div x-text="line"></div>
             </template>
-            <div style="margin-top:4px;"><b>trading days per year</b> (days · 09:30 · 15:55 · valid 16:00 · pre-market · zero-filled):</div>
+            <div style="margin-top:4px;"><b>SPX sessions per year</b> (days · 09:30 · 15:55 · valid 16:00 · pre-market · non-SPX-session days):</div>
             <template x-for="y in (market && market.bar_labels ? market.bar_labels : [])" :key="y.year">
-              <div x-text="y.year + ': ' + y.days + ' · ' + y.days_with_0930 + ' · ' + y.days_with_1555 + ' · ' + y.days_with_valid_1600 + ' · ' + y.days_with_premarket + ' · ' + y.zero_filled_days"></div>
+              <div x-text="y.year + ': ' + y.days + ' · ' + y.days_with_0930 + ' · ' + y.days_with_1555 + ' · ' + y.days_with_valid_1600 + ' · ' + y.days_with_premarket + ' · ' + y.non_spx_session_days"></div>
             </template>
             <div style="margin-top:4px;" x-text="market ? ('rollup: ' + market.days + ' sessions, built ' + market.built_at + ' in ' + market.build_s + 's') : ''"></div>
           </div>

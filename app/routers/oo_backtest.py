@@ -211,18 +211,15 @@ async def market_status(pool=Depends(get_pool)):
     except Exception as exc:  # noqa: BLE001
         log.warning("oo-backtest market-status failed: %s", exc)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    now_et = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
-    expected = market.expected_last_session(now_et)
-    latest = fresh["latest_date"]
+    today_et = datetime.now(ZoneInfo("America/New_York")).date()
     return {
         "ok": True,
         "source": "main.index_ohlc",
         **fresh,
-        "expected_session": expected.isoformat(),
-        "stale": bool(latest is None or latest < expected.isoformat()),
+        **market.staleness(fresh["latest_date"], today_et),
         "days": int(len(daily)),
         "coverage": market.coverage(daily),
         "close_fallback": market.fallback_report(daily),
         "bar_labels": market.bar_labels(),
-        "zero_days": market.zero_days(),
+        "sessions": market.sessions(),
     }

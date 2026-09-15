@@ -507,6 +507,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     marketStale() { return !!(this.market && this.market.ok && this.market.stale); },
+    staleText() {
+      const m = this.market || {};
+      return m.age_days === null || m.age_days === undefined
+        ? 'Stale — no valid SPX bar in index_ohlc'
+        : `Stale — latest valid SPX bar is ${m.age_days} days old (limit ${m.stale_after_days})`;
+    },
 
     fallbackLines() {
       const fb = (this.market && this.market.close_fallback) || {};
@@ -521,17 +527,30 @@ document.addEventListener('alpine:init', () => {
       return Object.values(fb).some(v => v.full_session_count > 0);
     },
 
-    zeroDayLines() {
-      const z = this.market && this.market.zero_days;
+    /* How the per-series session rule classified the table. The shortest
+     * session kept and the longest artifact rejected sit either side of the
+     * threshold -- if either comes close to it, the threshold needs a look. */
+    sessionLines() {
+      const z = this.market && this.market.sessions;
       if (!z) return [];
-      const out = [`${z.zero_filled_days} zero-filled days excluded (${z.zero_filled_weekend} weekend, ${z.zero_filled_weekdays} weekday)`];
-      if (z.zero_filled_weekdays) out.push(`weekday: ${z.zero_filled_weekday_dates.join(', ')}`);
-      const bySeries = o => Object.entries(o || {}).map(([k, v]) => `${k.toUpperCase()} ${v}`).join(', ');
-      out.push(`${z.partial_days} trading days with some invalid bars` +
-               (z.partial_days ? ` — zero: ${bySeries(z.partial_zero_bars_by_series)}; NaN: ${bySeries(z.partial_nan_bars_by_series)}` : ''));
-      for (const d of (z.partial_sample || []).slice(0, 10)) {
-        out.push(`  ${d.date}: ${d.valid_bars} valid bars; zero/NaN SPX ${d.spx_zero}/${d.spx_nan}, ` +
-                 `VIX ${d.vix_zero}/${d.vix_nan}, VIX3M ${d.vix3m_zero}/${d.vix3m_nan}, VIX9D ${d.vix9d_zero}/${d.vix9d_nan}`);
+      const out = [
+        `a series has a session with ≥ ${z.min_session_bars} valid bars`,
+        `${z.zero_filled_days} zero-filled days (${z.zero_filled_weekdays} weekdays)`,
+        `${z.artifact_only_days} artifact-only days (bars, but no series reaches a session)` +
+          (z.artifact_only.length ? `: ${z.artifact_only.slice(0, 12).map(a => a.date).join(', ')}` +
+                                    (z.artifact_only.length > 12 ? ', …' : '') : ''),
+      ];
+      for (const [s, v] of Object.entries(z.by_series || {})) {
+        const kept = v.shortest_kept ? `${v.shortest_kept.bars} (${v.shortest_kept.date})` : '—';
+        const rej = v.longest_rejected ? `${v.longest_rejected.bars} (${v.longest_rejected.date})` : '—';
+        let line = `${s.toUpperCase()}: ${v.sessions} sessions; shortest kept ${kept}; longest rejected ${rej}`;
+        if (v.missing_on_session_days.length) {
+          line += `; missing on ${v.missing_on_session_days.length} session days (e.g. ${v.missing_on_session_days.slice(0, 3).join(', ')})`;
+        }
+        if (v.zero_bars_in_sessions || v.nan_bars_in_sessions) {
+          line += `; invalid bars in sessions: ${v.zero_bars_in_sessions} zero, ${v.nan_bars_in_sessions} NaN`;
+        }
+        out.push(line);
       }
       return out;
     },
