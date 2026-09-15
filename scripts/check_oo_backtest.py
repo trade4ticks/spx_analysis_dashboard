@@ -430,19 +430,86 @@ def check_surface_stats() -> None:
           and "not_in_catalog" in prep["uncatalogued"],
           "planted: a non-double column, a catalogued column missing from the table and an uncatalogued one are reported")
     check(surface.quote_ident('a"b') == '"a""b"', "identifiers are quoted with embedded quotes doubled")
-    try:
-        surface.entry_sql(["iv_30d_atm"], "tomorrow")
-        check(False, "an unknown bar rule is refused")
-    except ValueError:
-        check(True, "an unknown bar rule is refused")
-    check(surface.BAR_RULE in surface.BAR_RULES and surface.LOOKAHEAD_CONFIRMED is False,
-          f"bar rule is named ({surface.BAR_RULE}) and lookahead is flagged unconfirmed until the data owner confirms")
+    check(surface.BAR_RULE == "at_or_before_entry" and surface.LOOKAHEAD_CONFIRMED is True
+          and not hasattr(surface, "BAR_RULES") and "INTERVAL" not in surface.entry_sql(["iv_30d_atm"]),
+          "entry bar fixed at at_or_before_entry, lookahead confirmed; the previous_bar alternative is gone")
+    check_surface_matrix()
 
     tr, trep = surface.parse_trades([["2024-01-02", "15:30:00", 12.5], ["bad", "10:00", 1], ["2024-01-03", "", 2],
                                      ["2024-01-04", "3:30 PM", "x"]], with_pnl=True)
     check(len(tr) == 4 and trep == {"trades": 4, "bad_date": 1, "bad_time": 1, "bad_pnl": 1}
           and tr[3][1] == __import__("datetime").time(15, 30),
           f"parse_trades keeps every row in order and counts what did not parse ({trep})")
+
+
+def check_surface_matrix() -> None:
+    """The vectorised ranking against per-metric scipy calls at full size:
+    2,097 trades x 452 metrics, shaped like the VPS run -- metrics starting on
+    different dates (so n differs per metric), ~36% of trades with no bar,
+    ties, a constant metric, a metric with too few values, P/L the page could
+    not parse, and trades sharing a bar."""
+    import time as _t
+    import numpy as np
+    from scipy import stats as sps
+    from app.oo_backtest import surface_stats as ss
+
+    rng = np.random.default_rng(37)
+    T, C = 2097, 452
+    pnl = rng.normal(20, 400, T).round(2)
+    pnl[rng.choice(T, 6, replace=False)] = np.nan                   # unparseable P/L
+    bar_ids = np.arange(T) // 2                                       # two trades per bar
+    no_bar = np.zeros(T, bool); no_bar[:754] = True                   # the pre-coverage 36%
+    starts = rng.choice([754, 800, 910, 1150, 1203], C)               # coverage start per metric
+    X = rng.normal(0, 1, (T, C)) + np.outer(pnl, rng.normal(0, 0.002, C))
+    X[:, ::7] = X[:, ::7].round(1)                                    # heavy ties for Spearman
+    for j in range(C):
+        X[: starts[j], j] = np.nan
+    X[no_bar] = np.nan
+    X[np.isfinite(X[:, 3]), 3] = 0.15                                 # constant wherever covered
+    X[:, 5] = np.nan; X[2000:2002, 5] = [1.0, 2.0]                     # only two values
+    X[:, 9] = np.nan                                                  # no coverage at all
+    X[1500, 11] = np.nan                                              # a metric with its own null pattern
+
+    t0 = _t.monotonic()
+    got = ss.correlations(X, pnl, bar_ids)
+    took = _t.monotonic() - t0
+
+    bad, checked = [], 0
+    for j in range(C):
+        m = np.isfinite(X[:, j]) & np.isfinite(pnl)
+        n = int(m.sum())
+        want_bars = len(np.unique(bar_ids[m]))
+        if got["n"][j] != n or got["bars"][j] != want_bars:
+            bad.append((j, "n/bars", got["n"][j], n)); continue
+        x, y = X[m, j], pnl[m]
+        if n < 3 or np.all(x == x[0]) or np.all(y == y[0]):
+            if not all(np.isnan(got[f][j]) for f in ("pearson", "pearson_p", "spearman", "spearman_p")):
+                bad.append((j, "should be undefined")); continue
+            continue
+        pr, sr = sps.pearsonr(x, y), sps.spearmanr(x, y)
+        for f, want in (("pearson", pr.statistic), ("pearson_p", pr.pvalue),
+                        ("spearman", sr.statistic), ("spearman_p", sr.pvalue)):
+            # Not bit-identical (summation order differs): r within 1e-12
+            # relative, p within 1e-9 -- p magnifies r's last-digit noise.
+            # Measured: r 2e-14, p 1.6e-12.
+            if not math.isclose(got[f][j], want, rel_tol=1e-9 if f.endswith("_p") else 1e-12, abs_tol=1e-300):
+                bad.append((j, f, got[f][j], want))
+        checked += 1
+    ns = np.sort(got["n"][got["n"] > 0])
+    check(not bad, f"all {C} metrics: n, bars, r, rho and both p equal per-metric scipy "
+                   f"({checked} with a correlation){' — ' + str(bad[:3]) if bad else ''}")
+    check(len(set(ns.tolist())) >= 5 and ns[0] < ns[len(ns) // 2] < ns[-1],
+          f"n really differs per metric, so pairwise dropping is exercised (min {ns[0]}, median {ns[len(ns) // 2]}, max {ns[-1]})")
+    check(np.isnan(got["pearson"][[3, 5, 9]]).all() and got["n"][5] == 2 and got["n"][9] == 0,
+          "constant, two-value and uncovered metrics have no correlation; their n is still reported")
+    check(took < 0.3, f"2,097 x 452 in {took * 1000:.0f} ms here (target < 300 ms on the VPS)")
+
+    rows = ss.rank([{"column_name": f"m{j}", "family": "f", "tenor": None, "wing": None, "form": "level"} for j in range(C)],
+                   X, [None if np.isnan(p) else float(p) for p in pnl], bar_ids)
+    ps = [r["spearman_p"] for r in rows]
+    check(all(r["spearman_p_bh"] is None for r, p in zip(rows, ps) if p is None)
+          and sum(p is not None for p in ps) == checked,
+          f"rank(): BH over the {checked} metrics with a p; the rest stay None")
 
 
 def check_real_mesosim() -> None:

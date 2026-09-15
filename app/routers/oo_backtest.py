@@ -247,14 +247,13 @@ async def market_status(pool=Depends(get_pool)):
 
 # ── surface metrics ─────────────────────────────────────────────────────────
 
-def _bar_rule(body: dict) -> str:
-    """The entry-bar rule for this request. The default is surface.BAR_RULE;
-    naming another is allowed so the two can be compared while the lookahead
-    question is open."""
-    rule = body.get("bar_rule") or surface.BAR_RULE
-    if rule not in surface.BAR_RULES:
-        raise HTTPException(400, f"bar_rule must be one of {sorted(surface.BAR_RULES)}.")
-    return rule
+def _check_bar_rule(body: dict) -> None:
+    """The entry bar is fixed (surface.BAR_RULE; lookahead confirmed absent).
+    A request naming another rule -- the removed previous_bar -- is refused
+    rather than silently answered with the only rule there is."""
+    rule = body.get("bar_rule")
+    if rule is not None and rule != surface.BAR_RULE:
+        raise HTTPException(400, f"bar_rule {rule!r} is not supported; the entry bar is {surface.BAR_RULE}.")
 
 
 async def _surface_catalog(pool) -> dict:
@@ -273,28 +272,30 @@ async def surface_catalog(pool=Depends(get_pool)):
 @router.post("/surface/rank")
 async def surface_rank(body: dict = Body(...), pool=Depends(get_pool)):
     import time as _t
-    rule = _bar_rule(body)
+    _check_bar_rule(body)
     try:
         trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=True)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     cat = await _surface_catalog(pool)
     cols = [m["column_name"] for m in cat["metrics"]]
-    rows, join_report = await surface.entry_values(pool, trades, cols, rule)
+    bar_times, X, join_report = await surface.entry_matrix(pool, trades, cols)
     t0 = _t.monotonic()
-    bar_keys = [(t[0], r["bar_time"]) for t, r in zip(trades, rows)]
-    result = await asyncio.to_thread(surface_stats.rank, cat["metrics"], rows, [t[2] for t in trades], bar_keys)
+    ids: dict = {}
+    bar_ids = [ids.setdefault((t[0], bt), len(ids)) for t, bt in zip(trades, bar_times)]
+    result = await asyncio.to_thread(surface_stats.rank, cat["metrics"], X, [t[2] for t in trades], bar_ids)
     compute_s = round(_t.monotonic() - t0, 3)
-    log.info("oo-backtest surface rank: %d trades, %d distinct entries, %d metrics; query %.2fs, stats %.2fs (%s)",
-             len(trades), join_report["distinct_entries"], len(cols), join_report["query_s"], compute_s, rule)
+    log.info("oo-backtest surface rank: %d trades (%d with a bar), %d distinct entries, %d metrics; "
+             "query %.2fs, stats %.3fs", len(trades), join_report["with_bar"], join_report["distinct_entries"],
+             len(cols), join_report["query_s"], compute_s)
     return {"rows": result, "report": {**parse_report, **join_report, "metrics": len(cols), "compute_s": compute_s},
-            "bar_rule": rule, "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED,
+            "bar_rule": surface.BAR_RULE, "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED,
             "catalog_built_at": cat["built_at"]}
 
 
 @router.post("/surface/values")
 async def surface_values(body: dict = Body(...), pool=Depends(get_pool)):
-    rule = _bar_rule(body)
+    _check_bar_rule(body)
     column = body.get("column")
     cat = await _surface_catalog(pool)
     if column not in {m["column_name"] for m in cat["metrics"]}:
@@ -303,8 +304,8 @@ async def surface_values(body: dict = Body(...), pool=Depends(get_pool)):
         trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=False)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    rows, join_report = await surface.entry_values(pool, trades, [column], rule)
+    rows, join_report = await surface.entry_values(pool, trades, [column])
     return {"column": column, "values": [r[column] for r in rows],
             "bar_times": [r["bar_time"].strftime("%H:%M:%S") if r["bar_time"] else None for r in rows],
-            "report": {**parse_report, **join_report}, "bar_rule": rule,
+            "report": {**parse_report, **join_report}, "bar_rule": surface.BAR_RULE,
             "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED}

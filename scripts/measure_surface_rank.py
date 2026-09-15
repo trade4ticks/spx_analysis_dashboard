@@ -120,13 +120,15 @@ async def main() -> int:
 
         for rnd in (1, 2):
             t0 = time.monotonic()
-            rows, jrep = await surface.entry_values(pool, trades, cols)
-            lap("join (all ranked columns)", t0)
+            bar_times, X, jrep = await surface.entry_matrix(pool, trades, cols)
+            lap("join + matrix (all ranked columns)", t0)
             t0 = time.monotonic()
-            bar_keys = [(t[0], r["bar_time"]) for t, r in zip(trades, rows)]
-            result = surface_stats.rank(ranked, rows, [t[2] for t in trades], bar_keys)
+            ids: dict = {}
+            bar_ids = [ids.setdefault((t[0], bt), len(ids)) for t, bt in zip(trades, bar_times)]
+            result = surface_stats.rank(ranked, X, [t[2] for t in trades], bar_ids)
             lap("stats (pearson+spearman+BH)", t0)
-        print(f"join: {jrep['distinct_entries']} distinct entries, {jrep['no_bar']} trades with no bar")
+        print(f"join: {jrep['distinct_entries']} distinct entries; {jrep['with_bar']} trades with a bar, "
+              f"{jrep['no_bar']} without")
 
         keys = sorted({(t[0], t[1]) for t in trades if t[0] and t[1]})
         async with pool.acquire() as conn:
@@ -139,8 +141,7 @@ async def main() -> int:
 
         ns = sorted(r["n"] for r in result)
         rank_json = json.dumps({"rows": result}, default=str)
-        one = cols[0]
-        values_json = json.dumps({"values": [r[one] for r in rows]}, default=str)
+        values_json = json.dumps({"values": [None if v != v else v for v in X[:, 0].tolist()]}, default=str)
         print(f"rank n per metric: min {ns[0]}, median {ns[len(ns) // 2]}, max {ns[-1]} (of {len(trades)} trades)")
         print(f"payload: rank {len(rank_json) / 1024:.0f} KB; values for one metric {len(values_json) / 1024:.0f} KB; "
               f"request body ~{len(json.dumps([[d.isoformat(), t, p] for d, t, p in raw])) / 1024:.0f} KB")

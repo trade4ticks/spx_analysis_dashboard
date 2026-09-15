@@ -762,20 +762,18 @@ async def check_surface(pool) -> None:
     trades = [(S2, time(10, 2)), (S2, time(9, 30)), (S2, time(9, 35)), (S2, time(16, 20)),
               (S_ABSENT, time(12, 0)), (S_DAYS[0], time(12, 0)), (S2, time(10, 2)), (None, None), (S3, time(15, 30))]
     cols = ["iv_30d_atm", "z_iv_30d_atm"]
-    at, at_rep = await surface.entry_values(pool, trades, cols, "at_or_before_entry")
-    pv, _ = await surface.entry_values(pool, trades, cols, "previous_bar")
+    at, at_rep = await surface.entry_values(pool, trades, cols)
     iv = lambda rows, i: rows[i]["iv_30d_atm"]   # noqa: E731
-    check(iv(at, 0) == s_code(2, time(10, 0)) and iv(pv, 0) == s_code(2, time(9, 55)),
-          "10:02 entry: at_or_before_entry reads the 10:00 bar, previous_bar the 09:55 bar")
-    check(iv(at, 1) is None and iv(pv, 1) is None and at[1]["bar_time"] is None,
+    check(iv(at, 0) == s_code(2, time(10, 0)), "10:02 entry reads its own 10:00 bar")
+    check(iv(at, 1) is None and at[1]["bar_time"] is None,
           "09:30 entry: no bar on the entry date at or before it -> null; the prior session's 16:00 is NOT used")
-    check(iv(at, 2) == s_code(2, time(9, 35)) and iv(pv, 2) is None,
-          "09:35 entry: its own bar under at_or_before_entry; nothing under previous_bar")
+    check(iv(at, 2) == s_code(2, time(9, 35)), "09:35 entry reads the 09:35 bar")
     check(iv(at, 3) == s_code(2, time(16, 0)), "16:20 entry reads the 16:00 bar")
     check(iv(at, 4) is None and iv(at, 7) is None, "a date with no rows, and a row with no date/time, get null")
     check(iv(at, 5) == s_code(1, time(12, 0)) and at[5]["z_iv_30d_atm"] is None,
           "before a metric's coverage its value is null while an earlier-starting metric on the same bar has one")
-    check(iv(at, 6) == iv(at, 0) and at_rep["distinct_entries"] == 7 and at_rep["no_bar"] == 3,
+    check(iv(at, 6) == iv(at, 0) and at_rep["distinct_entries"] == 7 and at_rep["no_bar"] == 3
+          and at_rep["with_bar"] == 6,
           f"a repeated entry is looked up once and filled for both ({at_rep['distinct_entries']} distinct, {at_rep['no_bar']} with no bar)")
     check(at[8]["z_iv_30d_atm"] == s_code(3, time(15, 30)), "15:30 entry on a z-covered day reads z from the 15:30 bar")
 
@@ -788,10 +786,10 @@ async def check_surface(pool) -> None:
           and rows["vrp_3m"]["n"] == 4 and rows["chg_d_iv_30d_atm"]["n"] == 12,
           f"rank: n per metric follows coverage (iv 16, chg_d 12, z 8, vrp 4)")
     check(all(x["pearson_p_bh"] is not None and x["spearman_p_bh"] is not None for x in r["rows"])
-          and rows["iv_30d_atm"]["bars"] == 16 and r["lookahead_confirmed"] is False
-          and r["bar_rule"] == "at_or_before_entry",
-          "rank: both BH p-values on every metric; distinct bars; the unconfirmed bar rule is stated in the response")
-    for bad_body, why in (({"trades": body["trades"], "bar_rule": "next_bar"}, "an unknown bar_rule"),
+          and rows["iv_30d_atm"]["bars"] == 16 and r["lookahead_confirmed"] is True
+          and r["bar_rule"] == "at_or_before_entry" and r["report"]["with_bar"] == 16,
+          "rank: both BH p-values on every metric; distinct bars; trades with a bar reported; bar rule stated")
+    for bad_body, why in (({"trades": body["trades"], "bar_rule": "previous_bar"}, "the removed previous_bar rule"),
                           ({"trades": "nope"}, "trades that are not a list")):
         try:
             await routes.surface_rank(bad_body, pool=pool)
@@ -811,6 +809,19 @@ async def check_surface(pool) -> None:
     async with pool.acquire() as conn:
         still = await conn.fetchval("SELECT count(*) FROM surface_metrics_core")
     check(still == 78 * (len(S_DAYS) + 1), "the table is intact after the injection attempt")
+
+    # A MID-RANGE insert -- the live-backfill shape that moves neither the
+    # first nor the last date. The 2024-03-06 gap gets a session with vrp_3m,
+    # which otherwise starts 2024-03-08: coverage must see it.
+    before = {m["column_name"]: m["min_date"] for m in (await surface.get_catalog(pool))["metrics"]}
+    async with pool.acquire() as conn:
+        await conn.executemany("INSERT INTO surface_metrics_core VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                               [(S_ABSENT, t, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, "x", 1.0) for t in s_bars()])
+    after_cat = await surface.get_catalog(pool)
+    after = {m["column_name"]: m["min_date"] for m in after_cat["metrics"]}
+    check(before["vrp_3m"] == "2024-03-08" and after["vrp_3m"] == "2024-03-06"
+          and after_cat["first_date"] == "2024-03-01" and after_cat["last_date"] == "2024-03-08",
+          f"a mid-range insert (dates unchanged) still rebuilds coverage: vrp_3m {before['vrp_3m']} -> {after['vrp_3m']}")
 
 
 def main() -> int:

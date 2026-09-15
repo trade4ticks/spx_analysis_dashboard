@@ -63,7 +63,10 @@ and reported under the chart.
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart (with
-"common coverage only"); **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+"common coverage only"). P6b must state PROMINENTLY in the chart header how many trades
+have a metric bar (on the OO log 754 of 2,097 have none — metrics start 2020, the log 2018 —
+so effective n is ~1,300, not 2,097), and "common coverage only" must show what it costs
+(trades dropped) before it is enabled; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
 formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
 trades a coverage gap would drop); P6e docs.
 
@@ -73,20 +76,29 @@ on non-trading days, 78 bars per session 09:35–16:00, no NaN, no zeros — non
 index_ohlc validity machinery applies. Start-labeled, aligned with index_ohlc (spot at T =
 spx_open at T). NULL before a metric's coverage, **never gaps after**, so a missing value
 is either "before coverage" or "no bar" (a 09:30 entry). Coverage moves with backfills —
-`surface.get_catalog` reads each metric's first non-null date and rebuilds when the table's
-first/last date changes; **never hardcode coverage dates**.
+`surface.get_catalog` reads each metric's first non-null date (index walk, ~4 s on the VPS,
+cached; a full scan is no faster) and rebuilds when the table's first date, last date **or
+row count** changes — dates alone missed a mid-range insert during a live backfill. An
+UPDATE into existing rows is not detected. **Never hardcode coverage dates**.
 **`surface_metrics_catalog`** is a real table (PK column_name); the repo CSV was diffed
 identical on 2026-09-15. Ranked set = catalog minus families `meta`, `spot`, `forward`
 (452 of 462); `log_ret` kept. Column names reach SQL only from that set.
 
-**Entry bar: lookahead UNCONFIRMED.** `surface.BAR_RULE` names the rule
-(`at_or_before_entry`, alternative `previous_bar`) and `LOOKAHEAD_CONFIRMED = False` rides
-on every response until the data owner confirms metrics are point-in-time at quote_time.
-Either way the bar is on the entry date only — never the prior session.
+**Entry bar: the entry's own bar, no lookahead (confirmed 2026-09-15).** Every metric is
+point-in-time at quote_time with backward-looking windows, so `BAR_RULE =
+"at_or_before_entry"`, `LOOKAHEAD_CONFIRMED = True`; the `previous_bar` alternative was
+removed and a request naming it gets a 400. The bar is on the entry date only — never the
+prior session.
 
 Stats (`surface_stats.py`): pairwise n, distinct entry bars (effective sample, reported not
 corrected), Pearson and Spearman r + p, Benjamini-Hochberg for both over every metric
-computed (a hidden family is still a test). Endpoints `GET /surface/catalog`,
+computed (a hidden family is still a test). **Vectorised by null pattern**: columns sharing
+a null mask (one group per coverage start) form a dense submatrix; P/L is ranked once PER
+GROUP (ranking it once globally corrupts late-starting metrics' Spearman — gate-planted);
+p from `special.betaincc` (Pearson) and `special.stdtr` (Spearman) as scipy does. VPS: the
+per-metric scipy loop took 2.5 s; locally the rewrite does 2,097 × 452 in ~75 ms. Matches
+per-metric scipy to r 2e-14 / p 1.6e-12 relative (gate: 1e-12 / 1e-9), not bit-identical.
+The join (26 ms, fully cached, PK backward scan) needs no index or column reduction. Endpoints `GET /surface/catalog`,
 `POST /surface/rank`, `POST /surface/values` (values fetched for ALL loaded trades, so a row
 follows page filters without another call). `scripts/measure_surface_rank.py` is the
 read-only VPS timing script for the 458-column join.
