@@ -72,6 +72,25 @@ FAMILY_GROUPS = [
 OTHER_GROUP = {"label": "Other", "color": "#8a8a8a"}
 FORM_LABELS = {"level": "Level", "chg_d": "Daily chg", "chg_1w": "Weekly chg", "z": "Z-score"}
 
+# How an added metric row shows its catalog `units`. `scale` is applied to the
+# values when the page fetches them, so bins, axes and (P6d) filters all work
+# in display units: vol_decimal 0.1406 -> 14.06 vol points (data owner,
+# 2026-09-15), a log return 0.0037 -> 0.37 %. A unit not listed uses DEFAULT.
+UNIT_FORMATS = {
+    "vol_decimal": {"scale": 100, "decimals": 2, "suffix": "vol pts"},
+    "z_score": {"scale": 1, "decimals": 2, "suffix": "z"},
+    "slope": {"scale": 1, "decimals": 4, "suffix": ""},
+    "ratio": {"scale": 1, "decimals": 3, "suffix": ""},
+    "log_return": {"scale": 100, "decimals": 2, "suffix": "%"},
+    "corr": {"scale": 1, "decimals": 3, "suffix": ""},
+}
+DEFAULT_UNIT_FORMAT = {"scale": 1, "decimals": 4, "suffix": ""}
+
+# Bins for an added row: the Premium rule (~24 bins over p1..p99, outliers in
+# end buckets) with "nice" steps -- 1, 2, 2.5, 5 x 10^k around the span -- since
+# these scales run from 0.0001 to thousands.
+ROW_AUTO_BINS = {"steps": "nice", "targetBins": 24, "pLo": 1, "pHi": 99}
+
 CATALOG_FIELDS = ("column_name", "family", "tenor", "wing", "form", "base_column", "units",
                   "description", "formula")
 
@@ -186,7 +205,8 @@ async def get_catalog(pool) -> dict:
             "last_date": key[1].isoformat() if key[1] else None, "row_count": key[2],
             "built_at": _CACHE["built_at"], "build_s": _CACHE["build_s"],
             "bar_rule": BAR_RULE, "lookahead_confirmed": LOOKAHEAD_CONFIRMED,
-            "family_groups": FAMILY_GROUPS, "other_group": OTHER_GROUP, "form_labels": FORM_LABELS}
+            "family_groups": FAMILY_GROUPS, "other_group": OTHER_GROUP, "form_labels": FORM_LABELS,
+            "unit_formats": UNIT_FORMATS, "default_unit_format": DEFAULT_UNIT_FORMAT, "row_auto_bins": ROW_AUTO_BINS}
 
 
 # ── requests from the page ──────────────────────────────────────────────────

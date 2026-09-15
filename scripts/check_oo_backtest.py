@@ -875,7 +875,7 @@ eval(fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
-  const bins = obAutoBins(t.values, t.auto, 'usd');
+  const bins = obAutoBins(t.values, t.auto, t.auto.steps === 'nice' ? { decimals: 2, suffix: '' } : 'usd');
   if (!bins) { out[key] = null; continue; }
   const idx = t.values.map((_, i) => i);
   const d = obSectionData({ v: t.values, pnl: t.pnl }, idx, { type: 'range', bins, categories: null }, 'v');
@@ -890,21 +890,27 @@ def auto_bins_reference(values: list, auto: dict) -> dict | None:
     np.percentile's default (linear), each step's span snapped outward, the
     step whose bin count is nearest targetBins (ties to the smaller step)."""
     import numpy as np
+    clean = lambda x: float(f"{x:.12g}")   # noqa: E731 -- Number(x.toPrecision(12))
     v = np.array([x for x in values if x is not None], dtype=float)
     if not len(v):
         return None
     p_lo, p_hi = np.percentile(v, auto["pLo"]), np.percentile(v, auto["pHi"])
+    steps = auto["steps"]
+    if steps == "nice":
+        span = p_hi - p_lo if p_hi - p_lo > 0 else (abs(p_hi) or 1.0)
+        e = math.floor(math.log10(span / auto["targetBins"]))
+        steps = [clean(m * 10.0 ** k) for k in range(e - 1, e + 2) for m in (1, 2, 2.5, 5)]
     best = None
-    for step in auto["steps"]:
-        lo = math.floor(p_lo / step) * step
-        hi = math.ceil(p_hi / step) * step
+    for step in steps:
+        lo = clean(math.floor(p_lo / step) * step)
+        hi = clean(math.ceil(p_hi / step) * step)
         if hi <= lo:
-            hi = lo + step
+            hi = clean(lo + step)
         n = round((hi - lo) / step)
         if best is None or abs(n - auto["targetBins"]) < abs(best[3] - auto["targetBins"]):
             best = (step, lo, hi, n)
     step, lo, hi, n = best
-    return {"step": step, "edges": [lo + k * step for k in range(n + 1)], "n": n}
+    return {"step": step, "edges": [clean(lo + k * step) for k in range(n + 1)], "n": n}
 
 
 def check_auto_bins() -> None:
@@ -939,6 +945,20 @@ def check_auto_bins() -> None:
         "with_nulls": [None if i % 9 == 0 else round(rng.gauss(300, 80), 0) for i in range(400)],
     }
     job = {k: {"values": v, "auto": auto, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]} for k, v in cases.items()}
+    # Added surface rows: "nice" steps over arbitrary scales, in display units.
+    from app.oo_backtest import surface as _surface
+    nice = _surface.ROW_AUTO_BINS
+    nice_cases = {
+        "nice_vol_pts": [round(rng.gauss(18, 5), 4) for _ in range(1300)],          # vol_decimal x 100
+        "nice_z": [round(rng.gauss(0, 1.1), 6) for _ in range(1200)],
+        "nice_tiny_slope": [rng.gauss(0.004, 0.0015) for _ in range(900)],
+        "nice_negative_skew": [rng.gauss(-0.21, 0.04) for _ in range(900)],
+        "nice_constant": [0.25] * 40,
+        "nice_zero": [0.0] * 40,
+    }
+    for k, v in nice_cases.items():
+        cases[k] = v
+        job[k] = {"values": v, "auto": nice, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]}
     p = subprocess.run(["node", "-e", AUTO_DRIVER, str(JS)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
@@ -950,13 +970,14 @@ def check_auto_bins() -> None:
         return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-6)
 
     for key, vals in cases.items():
-        g, ref = got[key], auto_bins_reference(vals, auto)
+        g, ref = got[key], auto_bins_reference(vals, job[key]["auto"])
         b = g["bins"]
         same_edges = b["step"] == ref["step"] and len(b["edges"]) == len(ref["edges"]) and all(
             close(x, y) for x, y in zip(b["edges"], ref["edges"]))
         check(same_edges and len(b["labels"]) == ref["n"] + 2 and b["labels"][0].startswith("<")
-              and b["labels"][-1].startswith("≥") and b["closed"] == "left",
-              f"{key}: step ${b['step']}, {ref['n']} bins + 2 end buckets, edges equal the reference "
+              and b["labels"][-1].startswith("≥") and b["closed"] == "left"
+              and len(set(b["labels"])) == len(b["labels"]),
+              f"{key}: step {b['step']}, {ref['n']} bins + 2 end buckets, edges equal the reference, labels distinct "
               f"({b['labels'][0]} … {b['labels'][-1]})")
         spec = {"bins": [-math.inf] + ref["edges"] + [math.inf], "labels": b["labels"], "right": False}
         df = pd.DataFrame({"v": pd.Series([math.nan if x is None else x for x in vals], dtype=float), "pnl": job[key]["pnl"]})
@@ -972,6 +993,13 @@ def check_auto_bins() -> None:
         check(ok and len(g["rows"]) == len(b["labels"]),
               f"{key}: filled bins equal calculate_bin_stats; empty bins kept ({len(filled)} of {len(g['rows'])} filled)")
 
+    nv = got["nice_vol_pts"]["bins"]
+    check(18 <= len(nv["labels"]) - 2 <= 32 and nv["step"] in (0.5, 1, 2, 2.5)
+          and all(float(f"{e:.12g}") == e for e in nv["edges"]),
+          f"vol points: a nice step ({nv['step']}), about 24 bins, edges with no float dust ({nv['labels'][1]})")
+    ts = got["nice_tiny_slope"]["bins"]
+    check(ts["step"] < 0.001 and len(set(ts["labels"])) == len(ts["labels"]),
+          f"a 0.004-scale slope gets a sub-0.001 step and labels with enough decimals to stay distinct ({ts['labels'][1]})")
     f5 = got["five_dollar"]
     check(20 <= len(f5["bins"]["labels"]) - 2 <= 28 and f5["rows"][0]["count"] > 0 and f5["rows"][-1]["count"] > 0,
           f"~$5 premium: about 24 bins, and the outliers past p1/p99 sit in the end buckets "
@@ -1149,6 +1177,156 @@ def check_surface_ranking_ui() -> None:
     check(ranked_fams == assigned and len(surface.FAMILY_GROUPS) == 8,
           f"every ranked family in the real catalog has one of the 8 hues, and no hue names a family that is not there "
           f"(unassigned {sorted(ranked_fams - assigned)}, stale {sorted(assigned - ranked_fams)})")
+
+
+ROWS_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+eval(fs.readFileSync(process.argv[1], 'utf8') + ';globalThis.OBD = OB_DATA;');
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = { valuesCalls: [] };
+global.fetch = async (url, init) => {
+  const j = (b, ok = true) => ({ ok, status: ok ? 200 : 400, json: async () => b });
+  if (url.endsWith('/surface/catalog')) return j(job.catalogBody);
+  if (url.endsWith('/surface/values')) {
+    const body = JSON.parse(init.body);
+    out.valuesCalls.push({ column: body.column, n: body.trades.length, first: body.trades[0] });
+    if (body.column === 'broken') return j({ detail: 'Unknown or unranked surface metric' }, false);
+    const vals = job.values[body.column].slice(0, body.trades.length);
+    return j({ values: vals, report: { no_bar: vals.filter(v => v === null).length } });
+  }
+  if (url.endsWith('/surface/rank')) return j({ rows: job.rankRows, report: { with_bar: 1, no_bar: 0, distinct_entries: 1 } });
+  throw new Error('unexpected ' + url);
+};
+(async () => {
+  const c = factory();
+  c.$nextTick = f => f && f();
+  c.registry = job.registry;
+  c.setTrades(job.payload);
+  await new Promise(r => setTimeout(r, 0));
+  const R = k => c.surfRows.find(r => r.surfColumn === k);
+
+  await c.addSurfRow('iv_30d_atm');
+  const iv = R('iv_30d_atm');
+  out.iv = { key: iv.key, format: iv.format, scale: iv.scale, state: c.sectionState(iv), sub: c.sectionSub(iv),
+             col: OBD.columns['surface__iv_30d_atm'], bins: c.binsFor(iv), step: c.stepText(iv),
+             fit: c.fitText(iv), inSections: c.sectionMetrics().map(m => m.key).includes(iv.key),
+             valued: c.sections[iv.key] && c.sections[iv.key].valued };
+  await c.addSurfRow('iv_30d_atm');
+  out.dupCalls = out.valuesCalls.length;
+
+  c.filters.dateFrom = '2021-06-01'; c.recompute();
+  out.filtered = { valued: c.sections[iv.key].valued, count: c.filteredCount, calls: out.valuesCalls.length,
+                   binsSame: JSON.stringify(c.binsFor(iv)) === JSON.stringify(out.iv.bins) };
+  c.resetAllFilters(); c.recompute();
+
+  await c.addSurfRow('z_iv_30d_atm');
+  out.z = { state: c.sectionState(R('z_iv_30d_atm')), skipped: c.skippedText(R('z_iv_30d_atm')) };
+  await c.addSurfRow('broken');
+  out.broken = { state: c.sectionState(R('broken')), error: R('broken').error };
+
+  out.groups = c.surfOptionGroups().map(g => g.label + ':' + g.options.map(o => (o.added ? '+' : '') + o.value).join(','));
+
+  await c.rankSurface();
+  c.surfRows.filter(r => r.surfColumn !== 'iv_30d_atm').forEach(r => c.removeSurfRow(r));
+  c.removeSurfRow(R('iv_30d_atm'));
+  out.removed = { rows: c.surfRows.length, col: 'surface__iv_30d_atm' in OBD.columns,
+                  present: c.presentColumns.includes('surface__iv_30d_atm'), sections: Object.keys(c.sections).filter(k => k.startsWith('surf_')) };
+  c.surfClickBar(0);
+  await new Promise(r => setTimeout(r, 0));
+  out.clicked = c.surfRows.map(r => r.surfColumn);
+
+  const before = out.valuesCalls.length;
+  c.setTrades(job.payload2);
+  await new Promise(r => setTimeout(r, 0));
+  out.newLog = { calls: out.valuesCalls.length - before, n: out.valuesCalls[out.valuesCalls.length - 1].n,
+                 col: OBD.columns['surface__' + out.clicked[0]] };
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+def check_surface_rows() -> None:
+    """P6c in node with the shipped JS against a stubbed server: adding a row
+    fetches ONE metric for EVERY trade in the log, scales it to display units,
+    bins it with nice steps, and from then on follows page filters without a
+    request; duplicates, errors, coverage-only rows, removal, a bar click and
+    a new log are each exercised."""
+    print("added surface metric rows (shipped JS)")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("surface metric rows (node not installed)")
+        return
+    from app.oo_backtest import surface
+    rng = random.Random(41)
+    n = 60
+    dates = [f"2021-{1 + i // 6:02d}-{1 + i % 6 * 4:02d}" for i in range(n)]
+    cols = {"date_opened": dates, "date_closed": dates, "time_opened": ["15:30:00"] * n,
+            "pnl": [round(rng.gauss(10, 200), 2) for _ in range(n)], "days_in_trade": [1] * n,
+            "day_of_week": [i % 5 for i in range(n)]}
+    payload = {"n": n, "columns": cols, "date_min": dates[0], "date_max": dates[-1], "notes": {},
+               "suggested_name": "t", "market": {"joined": True, "spx_sessions": []}}
+    payload2 = {**payload, "n": 40, "columns": {k: v[:40] for k, v in cols.items()}}
+    values = {"iv_30d_atm": [None if i < 5 else round(rng.uniform(0.11, 0.32), 4) for i in range(n)],
+              "z_iv_30d_atm": [None] * n}
+    catalog = [{"column_name": "iv_30d_atm", "family": "iv", "form": "level", "units": "vol_decimal",
+                "description": "30d ATM implied vol", "formula": "sigma", "min_date": "2020-01-02"},
+               {"column_name": "z_iv_30d_atm", "family": "iv", "form": "z", "units": "z_score",
+                "description": "z of iv", "formula": "z", "min_date": "2023-04-05"},
+               {"column_name": "broken", "family": "skew", "form": "level", "units": "mystery",
+                "description": "", "formula": "", "min_date": "2020-01-02"}]
+    body = {"metrics": catalog, "family_groups": surface.FAMILY_GROUPS, "other_group": surface.OTHER_GROUP,
+            "form_labels": surface.FORM_LABELS, "unit_formats": surface.UNIT_FORMATS,
+            "default_unit_format": surface.DEFAULT_UNIT_FORMAT, "row_auto_bins": surface.ROW_AUTO_BINS}
+    rank_rows = [{"column": "z_iv_30d_atm", "family": "iv", "form": "z", "tenor": None, "wing": None, "n": 50, "bars": 50,
+                  "spearman": 0.3, "spearman_p": 0.01, "spearman_p_bh": 0.02, "pearson": 0.2, "pearson_p": 0.1, "pearson_p_bh": 0.2}]
+    reg = json.loads(json.dumps(REGISTRY))
+    p = subprocess.run(["node", "-e", ROWS_DRIVER, str(JS)],
+                       input=json.dumps({"registry": reg, "payload": payload, "payload2": payload2, "values": values,
+                                         "catalogBody": body, "rankRows": rank_rows}),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"rows driver ran ({p.stderr.strip()[:400]})")
+        return
+    o = json.loads(p.stdout)
+    iv = o["iv"]
+    first = o["valuesCalls"][0]
+    check(first["column"] == "iv_30d_atm" and first["n"] == n and first["first"] == [dates[0], "15:30:00"],
+          f"adding a row fetches that one metric for every trade in the log ({first['n']} of {n}), as [date, time]")
+    want = [None if v is None else v * 100 for v in values["iv_30d_atm"]]
+    check(iv["col"] == want and iv["scale"] == 100 and iv["format"] == {"decimals": 2, "suffix": "vol pts"},
+          "vol_decimal values are scaled to vol points on arrival (0.1406 -> 14.06), formatted to 2 decimals")
+    check(iv["state"] == "ready" and iv["inSections"] and iv["valued"] == 55
+          and "55 of 60 trades with a value" in iv["sub"] and "vol pts bins (auto)" in iv["sub"] and "data from 2020-01-02" in iv["sub"],
+          f"the row is a ready section of the page, rendered by the shared section code ({iv['sub']})")
+    check(iv["bins"]["labels"][0].startswith("<") and iv["bins"]["labels"][-1].startswith("≥")
+          and iv["step"].endswith("vol pts") and f"per {iv['step']}" in iv["fit"],
+          f"auto bins with a nice step and end buckets; step and OLS slope in the metric's units ({iv['step']}; {iv['fit']})")
+    check(o["dupCalls"] == 1, "adding the same metric again makes no request and no second row")
+    f = o["filtered"]
+    check(f["calls"] == 1 and f["valued"] < 55 and f["count"] < n and f["binsSame"],
+          f"a page filter re-bins the row from the filtered trades with no request, and does not move its edges ({f})")
+    check(o["z"]["state"] == "skipped" and "its data starts 2023-04-05" in o["z"]["skipped"],
+          f"a metric whose coverage starts after every trade says so instead of drawing nothing ({o['z']['skipped']})")
+    check(o["broken"]["state"] == "error" and "Unknown or unranked" in o["broken"]["error"],
+          "a failed fetch leaves an error row (removable), not a silent empty section")
+    check(o["groups"] == ["IV · iv:+iv_30d_atm,+z_iv_30d_atm", "Skew · skew:+broken"],
+          f"dropdown: optgroups per family in legend order, added metrics marked ({o['groups']})")
+    r = o["removed"]
+    check(r == {"rows": 0, "col": False, "present": False, "sections": []},
+          "remove drops the row, its client column and its section state")
+    check(o["clicked"] == ["z_iv_30d_atm"], "clicking a ranking bar adds that bar's metric (sorted view index)")
+    nl = o["newLog"]
+    check(nl["calls"] == 1 and nl["n"] == 40,
+          f"a new log refetches each added row for its own trades ({nl['calls']} call, {nl['n']} trades)")
+    cat = pd.read_csv(ROOT / "surface_metrics_catalog.csv")
+    ranked_units = set(cat.loc[~cat["family"].isin(surface.EXCLUDED_FAMILIES), "units"])
+    check(ranked_units <= set(surface.UNIT_FORMATS),
+          f"every unit in the real ranked catalog has a display format ({sorted(ranked_units)}; "
+          f"missing {sorted(ranked_units - set(surface.UNIT_FORMATS))})")
 
 
 DEPLOY_DRIVER = r"""
@@ -1435,6 +1613,7 @@ def main() -> int:
     check_component_filters()
     check_deployment_and_extra_stats()
     check_surface_ranking_ui()
+    check_surface_rows()
     check_dropped_scope()
     check_parsers()
     check_real_mesosim()

@@ -63,7 +63,7 @@ and reported under the chart.
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —
-done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
+done; **P6c** added metric rows — done; **P6c** add-a-metric rows (generic "nice"-step auto bins, units
 formatting); **P6d** per-row filters with row/page scope (row default; page scope shows the
 trades a coverage gap would drop); P6e docs.
 
@@ -116,6 +116,20 @@ trades in [earliest start, common start) that some metric in view would lose. Fa
 labels come with the catalog response — the page JS names no family (the dropped-scope
 guard enforces it). Derived values that read `OB_DATA.idx` must read `idxTick`, or Alpine
 never re-renders them (the headline was blank until that was added).
+
+**Added metric rows (P6c).** A ranking bar click or the family-grouped dropdown adds a
+section row below the ranking card. The row fetches that ONE metric for EVERY trade in the
+log (`POST /surface/values`), stores it as client column `surface__<name>` (never in the
+payload whitelist), scaled to display units by `surface.UNIT_FORMATS` (vol_decimal ×100 →
+vol pts, log_return ×100 → %; unit list sent with the catalog). From then on it is a
+registry-shaped entry in `sectionMetrics()` — binned, filtered and drawn by the built-in
+section code with no request. Bins: `ROW_AUTO_BINS`, Premium's rule with `steps: "nice"`
+(1/2/2.5/5 × 10^k around span/24, edges cleaned to 12 significant digits, label decimals ≥
+step's). Header: column, catalog description, n with a value, step, "data from"; OLS slope
+is stated per bin step. A duplicate add scrolls to the row; a failed fetch leaves an error
+row; a new log refetches every row (a log token discards late responses); remove drops the
+column, bins and charts. The section card is one Jinja macro (`metric_section_card`) shared
+by built-in and added rows. Rows are not saved with a strategy.
 
 ### What `main.index_ohlc` actually looks like
 

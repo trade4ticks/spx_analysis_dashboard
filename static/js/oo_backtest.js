@@ -34,7 +34,8 @@ const OB_PINK = '#e84393';   // negative
 /* Trade columns live OUTSIDE the Alpine proxy. Thousands of values wrapped in
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
-const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {}, rank: null };
+const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {}, rank: null,
+                  logToken: 0 };
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
 const OB_CHARTS = { cum: null, dd: null, deploy: null, rank: null, rankAxis: null, sec: {} };
 const OB_DEFAULT_CAPITAL = 10000;
@@ -411,12 +412,34 @@ function obPercentile(sorted, p) {
   return sorted[lo] + (h - lo) * (sorted[hi] - sorted[lo]);
 }
 
+/* Candidate "nice" steps for a span: 1, 2, 2.5, 5 x 10^k for the decade of
+ * span/target and the one either side, ascending. A zero span (every value in
+ * p1..p99 equal) takes its decade from the value itself. */
+function obNiceSteps(pLo, pHi, target) {
+  const span = pHi - pLo > 0 ? pHi - pLo : (Math.abs(pHi) || 1);
+  const e = Math.floor(Math.log10(span / target));
+  const out = [];
+  for (let k = e - 1; k <= e + 1; k++) for (const m of [1, 2, 2.5, 5]) out.push(obClean(m * Math.pow(10, k)));
+  return out;
+}
+
+/* Round to 12 significant digits: 24 * 0.005 is 0.12000000000000001. */
+function obClean(x) { return Number(x.toPrecision(12)); }
+
+function obDecimals(x) {
+  const s = String(obClean(x));
+  if (s.includes('e-')) return Number(s.split('e-')[1]) + ((s.split('e-')[0].split('.')[1] || '').length);
+  return (s.split('.')[1] || '').length;
+}
+
 /* Data-driven bins for a registry metric with binning 'auto'. The inner edges
  * run lo, lo+step, ..., hi where lo/hi are the pLo/pHi percentiles snapped
  * OUT to the step; each candidate step gives (hi - lo) / step bins and the one
  * nearest targetBins wins (a tie goes to the smaller step). Values below lo
  * and at/above hi land in the two end buckets, "<lo" and "≥hi" (left-closed,
  * so a value exactly at hi is in the top bucket -- hence ≥, not >).
+ * auto.steps is a list, or "nice" (obNiceSteps). Edges are cleaned to 12
+ * significant digits; labels use at least as many decimals as the step.
  * Returns a bins object obBinIndex/obSectionData take, plus `step`, or null
  * when the column has no values. */
 function obAutoBins(values, auto, fmt) {
@@ -424,16 +447,19 @@ function obAutoBins(values, auto, fmt) {
   if (!v.length) return null;
   const pLo = obPercentile(v, auto.pLo), pHi = obPercentile(v, auto.pHi);
   let best = null;
-  for (const step of auto.steps) {
-    const lo = Math.floor(pLo / step) * step;
-    let hi = Math.ceil(pHi / step) * step;
-    if (hi <= lo) hi = lo + step;
+  const steps = auto.steps === 'nice' ? obNiceSteps(pLo, pHi, auto.targetBins) : auto.steps;
+  for (const step of steps) {
+    const lo = obClean(Math.floor(pLo / step) * step);
+    let hi = obClean(Math.ceil(pHi / step) * step);
+    if (hi <= lo) hi = obClean(lo + step);
     const n = Math.round((hi - lo) / step);
     if (!best || Math.abs(n - auto.targetBins) < Math.abs(best.n - auto.targetBins)) best = { step, lo, hi, n };
   }
-  const f = x => (fmt === 'usd' ? obMoney(x) : obFmt(x, fmt));
+  const labelFmt = fmt && typeof fmt === 'object'
+    ? { ...fmt, decimals: Math.max(fmt.decimals ?? 0, obDecimals(best.step)) } : fmt;
+  const f = x => (fmt === 'usd' ? obMoney(x) : obFmt(x, labelFmt));
   const edges = [];
-  for (let k = 0; k <= best.n; k++) edges.push(best.lo + k * best.step);
+  for (let k = 0; k <= best.n; k++) edges.push(obClean(best.lo + k * best.step));
   const labels = [`<${f(best.lo)}`];
   for (let k = 0; k < best.n; k++) labels.push(`${f(edges[k])} to ${f(edges[k + 1])}`);
   labels.push(`≥${f(best.hi)}`);
@@ -494,6 +520,9 @@ function obSnap(v, step, how) {
 
 function obFmt(v, fmt) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  // An added surface row carries {decimals, suffix} from the catalog's units;
+  // the number alone is formatted here (axes), the suffix is used in text.
+  if (fmt && typeof fmt === 'object') return v.toFixed(fmt.decimals ?? 4);
   switch (fmt) {
     case 'usd':   return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
     case 'pct':   return v.toFixed(2) + '%';
@@ -566,13 +595,14 @@ document.addEventListener('alpine:init', () => {
     // Surface metrics ranking. Rank rows live in OB_DATA.rank; `result` is the
     // summary of the last computation, `sig` what it was computed on.
     surf: { catalog: null, catalogBusy: false, catalogError: '', catalogInfo: null,
-            groups: [], other: null, formLabels: {},
+            groups: [], other: null, formLabels: {}, unitFormats: {}, defaultUnitFormat: null, rowAutoBins: null,
             method: 'spearman', form: 'all', hidden: {}, common: false,
             busy: false, error: '', result: null },
     // Bumped on every recompute. The filtered rows live outside the proxy
     // (OB_DATA.idx), so anything derived from them reads this to re-render
     // when they change -- without it the coverage headline stayed blank.
     idxTick: 0,
+    surfRows: [],      // added surface metric sections, registry-shaped (P6c)
     extra: null,       // obExtraStats
     deploy: null,      // {peak, peakDay, offSession, unclosed, days, hasSessions}
 
@@ -655,6 +685,7 @@ document.addEventListener('alpine:init', () => {
     setTrades(payload) {
       OB_DATA.columns = payload.columns;
       OB_DATA.n = payload.n;
+      OB_DATA.logToken++;
       this.presentColumns = Object.keys(payload.columns)
         .filter(c => payload.columns[c].some(v => v !== null && v !== undefined));
       const { columns, ...meta } = payload;
@@ -671,6 +702,7 @@ document.addEventListener('alpine:init', () => {
       this.surf.result = null;
       this.loaded = true;
       this.loadSurfaceCatalog();
+      for (const row of this.surfRows) this.fetchSurfRow(row.key);
       this.initFilters();
       this.$nextTick(() => this.recompute());
     },
@@ -977,6 +1009,9 @@ document.addEventListener('alpine:init', () => {
         this.surf.groups = body.family_groups || [];
         this.surf.other = body.other_group || null;
         this.surf.formLabels = body.form_labels || {};
+        this.surf.unitFormats = body.unit_formats || {};
+        this.surf.defaultUnitFormat = body.default_unit_format || null;
+        this.surf.rowAutoBins = body.row_auto_bins || null;
         this.surf.catalogInfo = { first: body.first_date, last: body.last_date, lookahead: body.lookahead_confirmed };
       } catch (e) {
         console.error('oo-backtest surface catalog', e);
@@ -1101,7 +1136,7 @@ document.addEventListener('alpine:init', () => {
       return `${v.bars.length} bars · ${v.survivorsInView} in view survive Benjamini-Hochberg at q ${OB_BH_Q} (${name}; ` +
              `${v.survivorsAll} of ${v.computedAll} computed) — outlined` +
              (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
-             ' · opacity by n';
+             ' · opacity by n · click a bar to add its section below';
     },
 
     renderRanking() {
@@ -1139,6 +1174,12 @@ document.addEventListener('alpine:init', () => {
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { top: 6, bottom: 6 } },
+          // Click a bar: add that metric's section row below the ranking.
+          onClick: (evt, _els, chart) => {
+            const hit = (chart || OB_CHARTS.rank).getElementsAtEventForMode(evt, 'nearest', { intersect: true }, false);
+            if (hit.length) this.surfClickBar(hit[0].index);
+          },
+          onHover: (evt, els, chart) => { (chart || OB_CHARTS.rank).canvas.style.cursor = els.length ? 'pointer' : 'default'; },
           scales: {
             x: { display: false },
             y: { ...yScale, ticks: { display: false }, afterFit: sc => { sc.width = 0; },
@@ -1169,6 +1210,132 @@ document.addEventListener('alpine:init', () => {
         else OB_CHARTS[key] = new Chart(node.getContext('2d'), c);
       }
     },
+
+
+    /* ── added surface metric rows (P6c) ───────────────────────────────── */
+
+    /* A metric picked from the ranking (bar click or dropdown) becomes a
+     * section row shaped like a registry entry. Its values are fetched ONCE for
+     * every trade in the log, stored as a client column (surface__<name>) and
+     * scaled to display units; from then on the row is binned, filtered and
+     * drawn by the same code as the built-in sections, with no request. A new
+     * log refetches each row's values (the old ones belong to other trades). */
+    builtinSections() { return this.registry.filter(m => m.section); },
+    addedSections() { return this.surfRows; },
+
+    surfUnitFormat(units) {
+      return (this.surf.unitFormats || {})[units] || this.surf.defaultUnitFormat || { scale: 1, decimals: 4, suffix: '' };
+    },
+
+    surfRowFor(column) { return this.surfRows.find(r => r.surfColumn === column) || null; },
+
+    /* The dropdown: families in legend order, each an optgroup of its metrics. */
+    surfOptionGroups() {
+      const cat = this.surf.catalog || [];
+      const out = [];
+      for (const g of this.surfaceGroups()) {
+        for (const f of g.families) {
+          const ms = cat.filter(m => m.family === f).sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
+          out.push({ label: `${g.label} · ${f}`, options: ms.map(m => ({
+            value: m.column_name, added: !!this.surfRowFor(m.column_name),
+            label: `${m.column_name}${m.description ? ' — ' + String(m.description).slice(0, 70) : ''}` })) });
+        }
+      }
+      return out;
+    },
+
+    surfClickBar(index) {
+      const v = this.surfView();
+      if (v && v.bars[index]) this.addSurfRow(v.bars[index].column);
+    },
+
+    async addSurfRow(column) {
+      if (!column || !OB_DATA.columns) return;
+      await this.loadSurfaceCatalog();
+      const existing = this.surfRowFor(column);
+      if (existing) { this.scrollToRow(existing); return; }
+      const meta = (this.surf.catalog || []).find(m => m.column_name === column);
+      if (!meta) { this.surf.error = `Unknown surface metric ${column}`; return; }
+      const u = this.surfUnitFormat(meta.units);
+      const row = {
+        key: `surf_${column}`, label: column, description: meta.description || '', surfColumn: column,
+        column: `surface__${column}`, units: meta.units, type: 'range', binning: 'auto',
+        auto: this.surf.rowAutoBins || { steps: 'nice', targetBins: 24, pLo: 1, pHi: 99 },
+        bins: { edges: null, labels: null, closed: 'left', labelEdge: 'both' }, categories: null,
+        hasScatter: true, section: true, filter: false, winRate: false, pane: null, basis: null, series: [],
+        format: { decimals: u.decimals, suffix: u.suffix }, scale: u.scale, minDate: meta.min_date,
+        family: meta.family, form: meta.form, removable: true, loading: true, error: '', report: null,
+      };
+      this.surfRows = [...this.surfRows, row];
+      await this.fetchSurfRow(row.key);
+      const added = this.surfRows.find(r => r.key === row.key);
+      if (added) this.$nextTick(() => this.scrollToRow(added));
+    },
+
+    async fetchSurfRow(key) {
+      const row = this.surfRows.find(r => r.key === key);
+      if (!row || !OB_DATA.columns) return;
+      const token = OB_DATA.logToken;
+      row.loading = true;
+      row.error = '';
+      const cols = OB_DATA.columns;
+      const trades = cols.date_opened.map((d, i) => [d, (cols.time_opened || [])[i] ?? null]);
+      try {
+        const r = await fetch('/api/oo-backtest/surface/values', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ column: row.surfColumn, trades }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        if (token !== OB_DATA.logToken || !this.surfRows.includes(row)) return;   // another log, or removed meanwhile
+        if (body.values.length !== cols.date_opened.length) {
+          throw new Error(`server returned ${body.values.length} values for ${cols.date_opened.length} trades`);
+        }
+        const vals = body.values.map(v => (v === null || v === undefined ? null : v * row.scale));
+        cols[row.column] = vals;
+        this.presentColumns = this.presentColumns.filter(c => c !== row.column)
+          .concat(vals.some(v => v !== null) ? [row.column] : []);
+        row.report = { withValue: vals.filter(v => v !== null).length, trades: vals.length, noBar: body.report.no_bar };
+        this.computeAutoBins();
+      } catch (e) {
+        console.error('oo-backtest surface values', e);
+        if (token === OB_DATA.logToken) row.error = `Could not fetch ${row.surfColumn}: ${e.message}`;
+      } finally {
+        if (token === OB_DATA.logToken) {
+          row.loading = false;
+          this.$nextTick(() => this.renderSections(OB_DATA.idx));
+        }
+      }
+    },
+
+    removeSurfRow(m) {
+      for (const which of ['avg', 'total', 'win', 'scatter']) {
+        const id = this.canvasId(m, which);
+        if (OB_CHARTS.sec[id]) { OB_CHARTS.sec[id].destroy(); delete OB_CHARTS.sec[id]; }
+      }
+      if (OB_DATA.columns) delete OB_DATA.columns[m.column];
+      this.presentColumns = this.presentColumns.filter(c => c !== m.column);
+      this.surfRows = this.surfRows.filter(r => r.key !== m.key);
+      delete OB_DATA.autoBins[m.key];
+      const { [m.key]: _gone, ...rest } = this.sections;
+      this.sections = rest;
+    },
+
+    scrollToRow(m) {
+      const el = typeof document !== 'undefined' && document.getElementById && document.getElementById('ob-sec-card-' + m.key);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    /* What the skipped placeholder says: an added row has no column in the
+     * log, only a coverage start the log's trades may all predate. */
+    skippedText(m) {
+      if (m.removable) {
+        return `No trade in this log has a value for ${m.label}` + (m.minDate ? ` — its data starts ${m.minDate}` : '');
+      }
+      return 'Skipped — this log has no values in ' + this.metricColumn(m) +
+             (this.meta && this.meta.market && !this.meta.market.joined ? ' (market data not joined)' : '');
+    },
+
+    columnLabel(m) { return m.removable ? m.label : this.metricColumn(m); },
 
     /* ── capital per position ──────────────────────────────────────────── */
 
@@ -1382,7 +1549,7 @@ document.addEventListener('alpine:init', () => {
     /* ── registry-driven views ─────────────────────────────────────────── */
 
     filterMetrics() { return this.registry.filter(m => m.filter); },
-    sectionMetrics() { return this.registry.filter(m => m.section); },
+    sectionMetrics() { return [...this.registry.filter(m => m.section), ...this.surfRows]; },
 
     /* The column a metric reads now: its basis column where it has more than
      * one (the ratios), else its only column. */
@@ -1419,7 +1586,7 @@ document.addEventListener('alpine:init', () => {
     computeAutoBins() {
       OB_DATA.autoBins = {};
       const steps = {};
-      for (const m of this.registry.filter(x => x.binning === 'auto')) {
+      for (const m of [...this.registry, ...this.surfRows].filter(x => x.binning === 'auto')) {
         const b = obAutoBins((OB_DATA.columns || {})[this.metricColumn(m)], m.auto, m.format);
         if (b) { OB_DATA.autoBins[m.key] = b; steps[m.key] = b.step; }
       }
@@ -1445,6 +1612,8 @@ document.addEventListener('alpine:init', () => {
      * Filled by renderSections(); a section recompute never makes a request. */
     sectionState(m) {
       if (!this.loaded) return 'empty';
+      if (m.loading) return 'loading';
+      if (m.error) return 'error';
       if (!this.hasColumn(m)) return 'skipped';
       const s = this.sections[m.key];
       return s && s.valued ? 'ready' : 'nodata';
@@ -1452,21 +1621,44 @@ document.addEventListener('alpine:init', () => {
 
     sectionSub(m) {
       const s = this.sections[m.key];
-      const col = this.metricColumn(m);
+      const col = this.columnLabel(m);
+      if (m.removable && m.report && (!s || !s.valued)) {
+        return `${m.report.withValue.toLocaleString()} of ${m.report.trades.toLocaleString()} trades in the log have a value`;
+      }
       if (!s || !s.valued) return col;
       const of = s.valued === this.filteredCount ? '' : ` of ${this.filteredCount.toLocaleString()}`;
       // An auto-binned metric names its step: two logs with different steps
       // are not bar-for-bar comparable, and this is where that shows.
       const auto = m.binning === 'auto' && this.autoSteps[m.key] !== undefined
-        ? ` · ${obFmt(this.autoSteps[m.key], m.format)} bins (auto)` : '';
-      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}`;
+        ? ` · ${this.stepText(m)} bins (auto)` : '';
+      const cover = m.removable && m.minDate ? ` · data from ${m.minDate}` : '';
+      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}${cover}`;
+    },
+
+    stepText(m) {
+      const step = this.autoSteps[m.key];
+      if (step === undefined) return '';
+      if (m.format && typeof m.format === 'object') {
+        const t = step.toFixed(Math.max(m.format.decimals ?? 0, obDecimals(step)));
+        return m.format.suffix ? `${t} ${m.format.suffix}` : t;
+      }
+      return obFmt(step, m.format);
     },
 
     fitText(m) {
       const f = this.sections[m.key] && this.sections[m.key].fit;
       if (!f) return 'no fit (fewer than 3 points, or one x value)';
       // Cents where the slope is small: premium's is well under $1 per $1.
-      const slope = obMoney(f.slope, Math.abs(f.slope) < 10 ? 2 : 0) + ' per ' + (m.format === 'pct' ? '1%' : m.format === 'ratio' ? '1.0' : m.format === 'usd' ? '$1' : '1 pt');
+      // An added surface row states the slope per ONE BIN STEP: "per 1 unit"
+      // of a metric whose whole range is 0.008 reads as -$22,589.
+      const step = this.autoSteps[m.key];
+      if (m.format && typeof m.format === 'object' && step) {
+        const d = f.slope * step;
+        const slope = obMoney(d, Math.abs(d) < 10 ? 2 : 0) + ' per ' + this.stepText(m);
+        return f.r === null ? `slope ${slope}` : `r ${f.r.toFixed(3)} · R² ${f.r2.toFixed(3)} · slope ${slope}`;
+      }
+      const per = m.format === 'pct' ? '1%' : m.format === 'ratio' ? '1.0' : m.format === 'usd' ? '$1' : '1 pt';
+      const slope = obMoney(f.slope, Math.abs(f.slope) < 10 ? 2 : 0) + ' per ' + per;
       return f.r === null ? `slope ${slope}` : `r ${f.r.toFixed(3)} · R² ${f.r2.toFixed(3)} · slope ${slope}`;
     },
 
