@@ -78,8 +78,19 @@
     .ft-runs { display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; margin-bottom:12px; }
     .ft-run  { flex:0 0 168px; border:1px solid var(--border); border-radius:4px;
                padding:7px 8px; background:var(--surface); cursor:pointer; font-size:10px; }
-    .ft-run.locked  { border-color:var(--muted); }
+    /* Two pointers, two looks, and one card can carry both at once: CURRENT
+       is the blue outline, LOCKED the amber left edge. Sharing the border
+       colour could only ever show one of them. */
     .ft-run.current { border-color:#3498db; }
+    .ft-run.locked  { box-shadow:inset 3px 0 0 #e0b066; }
+    /* The live run: on screen, not yet kept. Dashed says "not in the list". */
+    .ft-run.unsaved { border-style:dashed; cursor:default; }
+    .ft-lock { cursor:pointer; font-size:11px; line-height:1; padding:0 2px;
+               filter:grayscale(1) opacity(.5); }
+    .ft-lock.on { filter:none; }
+    .ft-savebtn { width:100%; margin-top:6px; padding:4px; border-radius:3px;
+                  cursor:pointer; border:1px solid #3a7ab0; background:#2a5a82;
+                  color:var(--text); font-size:10px; font-weight:700; }
     .ft-run .ft-run-t { font-size:10px; font-weight:700; letter-spacing:.4px;
                         margin-bottom:4px; text-transform:uppercase; }
     .ft-run .p { color:var(--muted); font-family:monospace; white-space:nowrap;
@@ -581,72 +592,106 @@
     <!-- ── Main ────────────────────────────────────────────────────────── -->
     <div class="ft-main">
 
-      <!-- 1. Run history. Click a card to lock it. -->
-      <div class="ft-runs" id="ft-runs" x-show="runs.length">
-        <template x-for="(r, i) in runs" :key="'run-'+i">
-          <div class="ft-run" :class="{locked: lockedIdx===i, current: currentIdx===i}"
-               @click="lockRun(i)">
+      <!-- 1. Run history. SAVED cards, then the live run so it can be looked
+           at before it is kept. Two INDEPENDENT pointers, two affordances:
+           clicking the body makes a card CURRENT (blue outline), clicking the
+           padlock makes it LOCKED (amber left edge). The same card can be
+           both. -->
+      <div class="ft-runs" id="ft-runs" x-show="stripCards.length">
+        <template x-for="c in stripCards" :key="'run-'+c.i">
+          <div class="ft-run"
+               :class="{locked:  c.saved && lockedIdx === c.i,
+                        current: currentIdx === c.i,
+                        unsaved: !c.saved}"
+               @click="c.saved && selectRun(c.i)"
+               :title="c.saved
+                 ? 'Click to make this card CURRENT — restores its rail settings and its selected cells'
+                 : 'The run on screen. Not kept until you save it.'">
             <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
               <span class="ft-run-t" style="margin:0;flex:1"
-                    :style="lockedIdx===i ? 'color:var(--muted)' : (currentIdx===i ? 'color:#3498db' : 'color:var(--dim)')"
-                    x-text="lockedIdx===i ? 'LOCKED' : (currentIdx===i ? 'CURRENT' : 'run ' + (i+1))"></span>
-              <!-- Window on the card: a TRAIN lock and a TEST run are not
-                   comparable, and nothing else on screen would say so. -->
+                    :style="currentIdx === c.i ? 'color:#3498db' : 'color:var(--dim)'"
+                    x-text="currentIdx === c.i ? 'CURRENT'
+                                               : (c.saved ? 'saved ' + (c.i + 1) : 'unsaved')"></span>
+              {#- Window on the card: a TRAIN lock and a TEST run are not
+                  comparable, and nothing else on screen would say so. -#}
               <span class="ft-note" style="font-weight:700"
-                    :style="(r.window==='test') ? 'color:#e84393' : 'color:#3498db'"
-                    x-text="(r.window||'train').toUpperCase()"></span>
-              <span @click.stop="deleteRun(i)" title="Remove this run"
+                    :style="(c.r.window === 'test') ? 'color:#e84393' : 'color:#3498db'"
+                    x-text="(c.r.window || 'train').toUpperCase()"></span>
+              {#- LOCKED needs its own target: one click cannot set two
+                  independent pointers, which is why clicking a card used to
+                  do nothing but lock it. -#}
+              <span class="ft-lock" x-show="c.saved" :class="{on: lockedIdx === c.i}"
+                    @click.stop="toggleLock(c.i)"
+                    :title="lockedIdx === c.i
+                      ? 'Locked — click to unlock'
+                      : 'Lock this card as the comparison row'"
+                    x-text="lockedIdx === c.i ? '🔒' : '🔓'"></span>
+              <span x-show="c.saved" @click.stop="deleteRun(c.i)" title="Remove this card"
                     style="cursor:pointer;color:var(--dim);font-size:12px;line-height:1;padding:0 2px">✕</span>
             </div>
             {#- A baseline card must be unmistakable: its trades were not
                 drawn from the zone the metric names describe. -#}
-            <div class="p" x-show="r.randomize" style="font-weight:700"
-                 :style="'color:' + (BASELINE_KINDS[r.baseline_kind||'entry']?.colour || '#3498db')"
+            <div class="p" x-show="c.r.randomize" style="font-weight:700"
+                 :style="'color:' + (BASELINE_KINDS[c.r.baseline_kind||'entry']?.colour || '#3498db')"
                  title="Randomly chosen tickers, matched to the zone on trade count and date distribution. Not the zone's own entries."
-                 x-text="BASELINE_KINDS[r.baseline_kind||'entry']?.card || 'RANDOM ENTRIES'"></div>
-            <div class="p" x-show="r.randomize"
+                 x-text="BASELINE_KINDS[c.r.baseline_kind||'entry']?.card || 'RANDOM ENTRIES'"></div>
+            <div class="p" x-show="c.r.randomize"
                  title="The draw this baseline came from. A fixed seed means re-running gives the same baseline; ↻ Re-sample changes it."
-                 x-text="'seed ' + (r.seed ?? 'default') + ' · ' + (r.baseline?.dates ?? 0) + ' dates'"></div>
+                 x-text="'seed ' + (c.r.seed ?? 'default') + ' · ' + (c.r.baseline?.dates ?? 0) + ' dates'"></div>
             {#- The drawn holding-period distribution is the defining
                 parameter of a random-exit baseline, the way the rule list is
                 for a policy run, so it belongs on the card. -#}
-            <div class="p" x-show="r.baseline?.hold"
+            <div class="p" x-show="c.r.baseline?.hold"
                  title="Holding period drawn per trade from your policy's own distribution, snapped to the max_days periods that exist in the catalog."
-                 x-text="'hold ~' + (r.baseline?.hold?.avg_sessions ?? 0) + ' sess drawn'"></div>
+                 x-text="'hold ~' + (c.r.baseline?.hold?.avg_sessions ?? 0) + ' sess drawn'"></div>
             {#- A portfolio card names its signals; a zone card names its
                 metric pair. Same card, and the difference is the first thing
                 on it, because "which trade set is this" is the question every
                 other number on the card depends on. -#}
-            <template x-if="r.mode === 'portfolio'">
+            <template x-if="c.r.mode === 'portfolio'">
               <div>
                 <div class="p" style="font-weight:700;color:#1abc9c"
-                     x-text="'PORTFOLIO — ' + (r.signals || []).length + ' signals'"></div>
-                <template x-for="sg in (r.signals || [])" :key="'rs-'+i+'-'+sg.id">
+                     x-text="'PORTFOLIO — ' + (c.r.signals || []).length + ' signals'"></div>
+                <template x-for="sg in (c.r.signals || [])" :key="'rs-'+c.i+'-'+sg.id">
                   <div class="p" :title="sg.primary_metric + ' × ' + sg.secondary_metric"
                        x-text="'· ' + sg.name"></div>
                 </template>
                 <div class="p" title="One trade per ticker + trade_date, at normal size, however many signals fired it.">deduped ticker+date</div>
               </div>
             </template>
-            <template x-if="r.mode !== 'portfolio'">
+            <template x-if="c.r.mode !== 'portfolio'">
               <div>
-                <div class="p" x-text="r.primary_metric"></div>
-                <div class="p" x-text="r.secondary_metric || '(single)'"></div>
+                <div class="p" x-text="c.r.primary_metric"></div>
+                <div class="p" x-text="c.r.secondary_metric || '(single)'"></div>
               </div>
             </template>
-            <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
-            <div class="p" x-show="r.max_strike"
+            <div class="p" x-text="'anchor: ' + c.r.entry_anchor"></div>
+            <div class="p" x-show="c.r.max_strike"
                  title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
-                 x-text="'max strike $' + r.max_strike"></div>
-            <template x-for="k in (r.rules || [])" :key="'rk-'+k"><div class="p" x-text="k"></div></template>
+                 x-text="'max strike $' + c.r.max_strike"></div>
+            <template x-for="k in (c.r.rules || [])" :key="'rk-'+c.i+'-'+k"><div class="p" x-text="k"></div></template>
             <!-- Provenance that silently changes what the numbers mean. -->
-            <div class="p warn" x-show="r.horizon_auto_added"
+            <div class="p warn" x-show="c.r.horizon_auto_added"
                  title="No selected rule fired for these trades — the 20-day horizon backstop did. That is your stops and targets failing to fire, not a time policy working."
                  x-text="'+ backstop auto-added'"></div>
-            <div class="p warn" x-show="r.excludes_unresolved"
+            <div class="p warn" x-show="c.r.excludes_unresolved"
                  title="Rows with path_status <> 'ok' were dropped: their horizon extends past available data, so their exit is genuinely unknown.">unresolved excluded</div>
-            <div class="p" x-text="'hold ' + (r.train?.avg_hold ?? 0).toFixed(2) + ' sess'"></div>
-            <div class="p" x-text="'n ' + (r.train?.n ?? 0) + ' / ' + (r.test?.n ?? 0)"></div>
+            <div class="p" x-text="'hold ' + (c.r.train?.avg_hold ?? 0).toFixed(2) + ' sess'"></div>
+            <div class="p" x-text="'n ' + (c.r.train?.n ?? 0) + ' / ' + (c.r.test?.n ?? 0)"></div>
+            {#- The zone is what makes a card worth keeping, so the card says
+                how big it is. A card saved with none cannot be locked into a
+                comparison, and says so rather than producing an empty row. -#}
+            <div class="p" x-show="c.saved && c.r.mode !== 'portfolio'"
+                 :style="(c.r.cells || []).length ? 'color:var(--muted)' : 'color:#e0b066'"
+                 title="The heatmap cells saved with this card. Selecting it as CURRENT restores them."
+                 x-text="(c.r.cells || []).length
+                           ? ((c.r.cells || []).length + ' cells saved')
+                           : 'no cells saved'"></div>
+            {#- Explicit keep. A run no longer becomes a card just because it
+                ran, so the strip stays the short list of deliberate choices. -#}
+            <button x-show="!c.saved" class="ft-savebtn" @click.stop="saveRun()"
+                    title="Keep this run in the strip, with its rail settings and its selected cells">
+              + Save to strip</button>
           </div>
         </template>
       </div>
@@ -669,6 +714,15 @@
             <span :class="{on: gridView==='change'}"  @click="setGridView('change')">Change</span>
           </div>
           <span class="ft-note" x-text="policyLabel()"></span>
+          {#- The write target, stated where the clicking happens. Selection
+              edits the CURRENT run's zone, and only Edited draws that grid:
+              clicking in Locked used to write to the edited row while showing
+              the locked one, and Change is two grids subtracted, with no
+              single zone to edit. -#}
+          <span class="ft-note" x-show="!canSelectCells" style="color:#e0b066"
+                x-text="gridView === 'change'
+                  ? 'Change view — cells are inert here: a difference of two grids has no single zone to edit.'
+                  : 'Locked view — cells are inert here. Switch to Edited to change the zone.'"></span>
           <!-- Periodic reminder, not a warning: bright grey, on the caption
                line, where it is read in context rather than dismissed. -->
           <span class="ft-tt">train/test · bins frozen at
@@ -677,7 +731,7 @@
         </div>
         <div style="overflow-x:auto">
           {{ m.heatmap_grid('gridRows', 'gridMeta', 'ft', 'full',
-                            cls_expr="'hm-cell-selectable' + (isCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
+                            cls_expr="(canSelectCells ? 'hm-cell-selectable' : '') + (isCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
                             click_expr='toggleCell(ix, iy)') | indent(10) | safe }}
         </div>
       </div>
@@ -692,7 +746,28 @@
         comparison.
       </div>
 
-      <!-- 2. Stat rows. One row until a run is locked, then three. -->
+      {#- A locked card with no zone produces no Locked and no Change row.
+          Saying so beats two rows silently missing -- and beats the old
+          fallback, which filled the Locked row with the run's WHOLE-UNIVERSE
+          numbers and made Change a zone-minus-universe subtraction. -#}
+      <div x-show="lockedZoneNote"
+           style="margin-bottom:8px;padding:5px 9px;border-radius:3px;font-size:11px;
+                  background:rgba(224,176,102,.10);border:1px solid rgba(224,176,102,.35);color:#e0b066"
+           x-text="lockedZoneNote"></div>
+
+      {#- Comparing two DIFFERENT zones is the point of per-card zones. Two
+          different metric pairs or bin counts is not: the same [ix, iy]
+          addresses different bins on each side, so neither the Change row nor
+          the Change heatmap is like-for-like. Warned, not blocked. -#}
+      <div x-show="lockedPairMismatch"
+           style="margin-bottom:8px;padding:5px 9px;border-radius:3px;font-size:11px;
+                  background:rgba(232,67,147,.10);border:1px solid rgba(232,67,147,.35);color:#e84393">
+        Locked and current runs differ in <b x-text="lockedPairMismatch"></b> —
+        their cells address different bins, so the Change row and the Change
+        heatmap are not like-for-like.
+      </div>
+
+      <!-- 2. Stat rows. One row until a card is locked, then three. -->
       <template x-for="row in statRows()" :key="'sr-'+row.key">
         <div class="ft-statrow">
           <div class="ft-statlbl">

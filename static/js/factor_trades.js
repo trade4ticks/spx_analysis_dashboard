@@ -124,8 +124,22 @@ document.addEventListener('alpine:init', () => {
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
     loading: false, error: '',
-    runs: [], currentIdx: -1, lockedIdx: -1,
+    // SAVED cards only. A run no longer lands here just because it ran:
+    // every parameter tweak used to spawn one, and the strip filled up with
+    // things to delete. saveRun() is the only writer, so the strip is the
+    // short list of things deliberately kept.
+    runs: [],
+    // Two INDEPENDENT pointers into `runs`. Either can name any card and the
+    // same card can be both. currentIdx === -1 means the current run is the
+    // live unsaved one -- still shown in the strip as a card, because the
+    // decision to keep it is made by looking at it.
+    currentIdx: -1, lockedIdx: -1,
     runData: null, lockedRun: null, zoneData: null, lockedZone: null,
+    // The only two zone payloads held at once, by design: zoneData is
+    // CURRENT's and lockedZone is LOCKED's. Cards store config and cells --
+    // both tiny -- and never a zone, so memory is bounded however many are
+    // saved and a switch is one round trip that cannot serve anything stale.
+    dollarStats: null, lockedDollarStats: null,
     // Page-level window. TRAIN by default: the workflow is to iterate on
     // train and treat switching to test as a decision, not a default view.
     window: 'train',
@@ -381,6 +395,7 @@ document.addEventListener('alpine:init', () => {
       this.selMode = m;
       this.runData = null; this.zoneData = null; this.secDetail = null;
       this.lockedRun = null; this.lockedZone = null; this.lockedIdx = -1;
+      this.currentIdx = -1; this.dollarStats = null; this.lockedDollarStats = null;
       this.suiteData = null; this.gridData = null; this.gridError = '';
       this.heatmapData = null; this._hmRange = null;
       this.error = '';
@@ -418,6 +433,9 @@ document.addEventListener('alpine:init', () => {
       this.selectedCells = [];
       this.selectedSignalIds = [];
       this.zoneData = null; this.lockedZone = null;
+      // The rail no longer matches the card CURRENT names, so it detaches --
+      // same rule as editing a cell.
+      this.currentIdx = -1;
       this.error = '';
     },
     ruleKeys() { return Object.values(this.selected).filter(Boolean); },
@@ -438,10 +456,22 @@ document.addEventListener('alpine:init', () => {
                    ? s.signals.map(x => x.id) : this.selectedSignalIds.slice() };
       }
       return {
-        primary_metric:   s.primary_metric   ?? this.primaryMetric,
-        secondary_metric: s.secondary_metric ?? (this.mode === '2f' ? this.secondaryMetric : null),
+        primary_metric:   s.primary_metric ?? this.primaryMetric,
+        // Trust the CARD's own mode when there is one. `?? page state` sent
+        // the rail's secondary metric for a locked 1f card, whose
+        // secondary_metric is legitimately null.
+        secondary_metric: s.mode
+          ? (s.mode === '2f' ? s.secondary_metric : null)
+          : (this.mode === '2f' ? this.secondaryMetric : null),
         n_bins:           s.n_bins ?? 20,
-        cells:            this.selectedCells,
+        // The field this function's header promised and did not deliver: it
+        // read page state unconditionally, so a locked card was scored over
+        // whatever cells happened to be selected on the rail. A saved card
+        // carries its own zone and is now scored over that. Only the live
+        // run falls through -- and runData is stripped of `cells` on restore
+        // precisely so it keeps falling through, rather than pinning itself
+        // to a snapshot the user is editing away from.
+        cells:            s.cells ?? this.selectedCells,
       };
     },
 
@@ -1958,8 +1988,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
           exit_reasons: d.exit_reasons,
           label: 'baseline — ' + (this.BASELINE_KINDS[kind]?.label || kind),
         };
-        this.runs.push(card);
-        this.currentIdx = this.runs.length - 1;
+        this.currentIdx = -1;
         this.runData = card;
         this.zoneData = d;
         this.secDetail = d;
@@ -2011,8 +2040,9 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         this.secSelectedMetric = d.secondary_metric || '';
         // FactorCharts.hmCellBg reads heatmapData + _hmRange for the gradient.
         this._refreshGrid();
-        this.runs.push(d);
-        this.currentIdx = this.runs.length - 1;
+        // A run is no longer a card. It shows in the strip as the live
+        // unsaved one until Save keeps it.
+        this.currentIdx = -1;
         if (!samePair) { this.selectedCells = []; this.zoneData = null; }
         this._refreshGrid();
         this.$nextTick(() => this._scrollRunsRight());
@@ -2055,60 +2085,215 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         this.zoneData = d;
         this.secDetail = d;
         this.heatmapData = null; this._hmRange = null;
-        this.runs.push(d);
-        this.currentIdx = this.runs.length - 1;
+        this.currentIdx = -1;
         this.$nextTick(() => { this._scrollRunsRight(); this.renderCharts(); });
       } catch (e) { this.error = String(e); }
       finally { this.loading = false; }
     },
 
     _scrollRunsRight() {
-      // New runs append, so the strip must anchor RIGHT or Current scrolls
+      // Saved cards append, so the strip must anchor RIGHT or a card scrolls
       // out of view exactly when it becomes the thing you want to see.
       const el = document.getElementById('ft-runs');
       if (el) el.scrollLeft = el.scrollWidth;
     },
 
-    deleteRun(i) {
-      this.runs.splice(i, 1);
-      // Indices shift; a stale lockedIdx would silently point at a different
-      // run than the one that was locked.
-      if (this.lockedIdx === i) { this.lockedIdx = -1; this.lockedRun = null; this.lockedZone = null; }
-      else if (this.lockedIdx > i) this.lockedIdx -= 1;
-      if (this.currentIdx === i) this.currentIdx = Math.min(i, this.runs.length - 1);
-      else if (this.currentIdx > i) this.currentIdx -= 1;
+    // ── Saved cards ──────────────────────────────────────────────────────
+    // A card is a SNAPSHOT: the run payload the strip and the Locked heatmap
+    // read, plus everything needed to put the RAIL and the heatmap SELECTION
+    // back exactly as they were. Session-only, and unrelated to saved
+    // signals -- that is a server-side store with its own save path.
+    //
+    // Zone payloads are deliberately not part of it. Config and cells are
+    // tiny and kept forever; the zone is refetched on every switch.
+    _cfgSnapshot() {
+      return {
+        selMode:           this.selMode,
+        mode:              this.mode,
+        primaryMetric:     this.primaryMetric,
+        secondaryMetric:   this.secondaryMetric,
+        entryAnchor:       this.entryAnchor,
+        maxStrike:         this.maxStrike,
+        window:            this.window,
+        // The rail's family -> rule_key MAP, not the flat rule_keys list the
+        // payload carries. The list says which rules ran; only the map puts
+        // the family dropdowns back where they were.
+        selected:          { ...this.selected },
+        selectedSignalIds: [...this.selectedSignalIds],
+        // Sizing is a client-side control and appears in no payload, so it
+        // would be lost on restore if it were not snapshotted here.
+        perTrade:          this.perTrade,
+        dailyCap:          this.dailyCap,
+      };
+    },
+
+    _applyCfg(cfg) {
+      if (!cfg) return;
+      this.selMode           = cfg.selMode ?? this.selMode;
+      this.mode              = cfg.mode ?? this.mode;
+      this.primaryMetric     = cfg.primaryMetric ?? this.primaryMetric;
+      this.secondaryMetric   = cfg.secondaryMetric ?? this.secondaryMetric;
+      this.entryAnchor       = cfg.entryAnchor ?? this.entryAnchor;
+      this.maxStrike         = cfg.maxStrike ?? this.maxStrike;
+      this.window            = cfg.window ?? this.window;
+      this.selected          = { ...(cfg.selected || {}) };
+      this.selectedSignalIds = [...(cfg.selectedSignalIds || [])];
+      this.perTrade          = cfg.perTrade ?? this.perTrade;
+      this.dailyCap          = cfg.dailyCap ?? this.dailyCap;
+      // FactorCharts reads this by object identity, so it is replaced rather
+      // than mutated in place.
+      this.equityDollarParams.ft = { perTrade: this.perTrade, dailyCap: this.dailyCap };
+    },
+
+    // Saveable only while the current run is the live one. Saving a run that
+    // is already a card would duplicate it in a strip whose whole point is
+    // that it stays short.
+    get canSaveRun() { return !!this.runData && this.currentIdx === -1; },
+
+    saveRun() {
+      if (!this.canSaveRun) return;
+      this.runs.push({
+        ...this.runData,
+        cfg: this._cfgSnapshot(),
+        // The zone, attached CLIENT-SIDE because /run cannot know it: the
+        // cells are picked afterwards, by clicking the grid /run returned.
+        cells: this.selectedCells.map(c => [c[0], c[1]]),
+      });
+      this.currentIdx = this.runs.length - 1;
       this.$nextTick(() => this._scrollRunsRight());
     },
 
-    async lockRun(i) {
-      this.lockedIdx = (this.lockedIdx === i) ? -1 : i;
-      this.lockedRun = this.lockedIdx >= 0 ? this.runs[this.lockedIdx] : null;
-      this.lockedZone = null;
+    // Saved cards, then the live run as a trailing card when it is not one
+    // of them.
+    get stripCards() {
+      const out = this.runs.map((r, i) => ({ r, i, saved: true }));
+      if (this.runData && this.currentIdx === -1) {
+        out.push({ r: this.runData, i: -1, saved: false });
+      }
+      return out;
+    },
+
+    deleteRun(i) {
+      if (i < 0) return;
+      this.runs.splice(i, 1);
+      // Indices shift; a stale pointer would silently name a different card
+      // than the one that was locked or being viewed.
+      if (this.lockedIdx === i) {
+        this.lockedIdx = -1; this.lockedRun = null;
+        this.lockedZone = null; this.lockedDollarStats = null;
+      } else if (this.lockedIdx > i) this.lockedIdx -= 1;
+      // Deleting the card CURRENT points at does not throw the run away: it
+      // becomes the live unsaved run, still on screen and still saveable.
+      if (this.currentIdx === i) this.currentIdx = -1;
+      else if (this.currentIdx > i) this.currentIdx -= 1;
       this._refreshGrid();
-      if (!this.lockedRun || !this.hasSelection) return;
-      // Fetch the locked run's OWN zone series, using ITS parameters and ITS
-      // window -- not the rail's current state. A locked TRAIN run compared
-      // against a TEST run would otherwise cross populations with nothing on
-      // screen saying so.
+      this.$nextTick(() => this._scrollRunsRight());
+    },
+
+    // ── CURRENT ──────────────────────────────────────────────────────────
+    // Restores the rail AND the cells the card was saved with, then refetches
+    // its zone. Going back to a configuration used to mean rebuilding the
+    // rail from memory and re-running; this is the whole reason a card is
+    // worth keeping.
+    async selectRun(i) {
+      const card = this.runs[i];
+      if (!card || this.currentIdx === i) return;
+      this.loading = true; this.error = '';
       try {
-        const r = this.lockedRun;
-        const resp = await fetch('/api/factor-trades/zone', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...this.selectionBody(r),
-            entry_anchor: r.entry_anchor, rule_keys: r.rules,
-            max_strike: r.max_strike,
-            window: r.window || 'train',
-            // Deterministic seed: locking a baseline refetches the identical
-            // sample, so the LOCKED column is the draw that was on screen
-            // when it was locked, not a fresh one.
-            randomize: !!r.randomize, seed: r.seed ?? null,
-            baseline_kind: r.baseline_kind || 'entry',
-          }),
-        });
-        const d = await resp.json();
-        if (resp.ok && !d.error) { this.lockedZone = d; this.renderCharts(); }
-      } catch (e) { console.error('[factor-trades] locked zone fetch failed', e); }
+        this._applyCfg(card.cfg);
+        this.selectedCells = (card.cells || []).map(c => [c[0], c[1]]);
+        // `cells` and `cfg` are stripped from runData ON PURPOSE. The current
+        // run's zone IS the page selection, so selectionBody has to fall
+        // through to selectedCells for it -- otherwise the first cell click
+        // after restoring a card would refetch the card's SAVED zone instead
+        // of the edited one.
+        const { cells, cfg, ...payload } = card;
+        this.runData           = payload;
+        this.currentIdx        = i;
+        this.metric            = payload.primary_metric;
+        this.secSelectedMetric = payload.secondary_metric || '';
+        this.zoneData = null; this.secDetail = null; this.dollarStats = null;
+        this._refreshGrid();
+        if (this.hasSelection) await this.loadZone();
+        this.$nextTick(() => this.renderCharts());
+      } catch (e) { this.error = String(e); }
+      finally { this.loading = false; }
+    },
+
+    // ── LOCKED ───────────────────────────────────────────────────────────
+    // Independent of CURRENT. The locked zone is fetched from the CARD -- its
+    // policy, its window, its cells -- so it cannot drift when the page
+    // selection is edited underneath it. That is why there is no watcher on
+    // selectedCells here: with the zone owned by the card, there is nothing
+    // left for one to catch.
+    async toggleLock(i) {
+      const card = this.runs[i];
+      if (!card) return;
+      this.lockedIdx  = (this.lockedIdx === i) ? -1 : i;
+      this.lockedRun  = this.lockedIdx >= 0 ? card : null;
+      this.lockedZone = null; this.lockedDollarStats = null;
+      // Locked and Change both draw the locked grid, so unlocking while
+      // either is showing leaves a blank heatmap. Fall back to the view that
+      // still has data.
+      if (!this.lockedRun && this.gridView !== 'edited') this.gridView = 'edited';
+      this._refreshGrid();
+      if (!this.lockedRun) { this.renderCharts(); return; }
+      // A card saved with nothing selected has no zone to score. Refusing
+      // here is what keeps statRows from falling back to the run's
+      // whole-universe numbers under a row labelled "Locked".
+      if (!this._cardHasZone(this.lockedRun)) { this.renderCharts(); return; }
+      try {
+        this.lockedZone = await this._fetchZone(this.lockedRun);
+      } catch (e) {
+        console.error('[factor-trades] locked zone fetch failed', e);
+      }
+      this.renderCharts();
+    },
+
+    _cardHasZone(card) {
+      return (card?.mode === 'portfolio')
+        ? (card.signals || []).length > 0
+        : (card?.cells || []).length > 0;
+    },
+
+    // Why the Locked and Change rows are absent, stated rather than left as
+    // two silently missing rows.
+    get lockedZoneNote() {
+      if (!this.lockedRun) return '';
+      if (this.lockedZone) {
+        // Locked side is fine; the CURRENT side is the one with no zone.
+        return this.zoneData ? ''
+          : 'The current run has no zone selected, so the stat row above is '
+          + 'its whole universe and there is no Change row. Select cells to '
+          + 'compare it against the locked card.';
+      }
+      const isPort = this.lockedRun.mode === 'portfolio';
+      if (this._cardHasZone(this.lockedRun)) {
+        return 'The locked card\u2019s zone could not be loaded, so there is '
+             + 'nothing to compare against.';
+      }
+      const what = isPort ? 'signals' : 'cells';
+      return 'The locked card was saved with no ' + what + ' selected, so it '
+           + 'has no zone. Select ' + what + ' on that card and save it again.';
+    },
+
+    // Locked and current being DIFFERENT zones is the point -- seeing whether
+    // the geography moved under another policy is why cards carry cells. A
+    // different metric pair or bin count is a different matter: the same
+    // [ix, iy] addresses different bins on each side, so the Change row and
+    // the Change heatmap are not like-for-like. Warn, do not block.
+    get lockedPairMismatch() {
+      const L = this.lockedRun, C = this.runData;
+      if (!L || !C) return '';
+      if (L.mode === 'portfolio' || C.mode === 'portfolio') {
+        return (L.mode === C.mode) ? '' : 'portfolio vs zone';
+      }
+      const bits = [];
+      if ((L.primary_metric   || '') !== (C.primary_metric   || '')) bits.push('primary metric');
+      if ((L.secondary_metric || '') !== (C.secondary_metric || '')) bits.push('secondary metric');
+      if ((L.n_bins ?? 20)       !== (C.n_bins ?? 20))               bits.push('bin count');
+      if ((L.entry_anchor || '') !== (C.entry_anchor || ''))         bits.push('entry anchor');
+      return bits.join(', ');
     },
 
     // ── Heatmap ──────────────────────────────────────────────────────────
@@ -2152,40 +2337,63 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     isCellSelected(ix, iy) {
       return this.selectedCells.some(c => c[0] === ix && c[1] === iy);
     },
+    // THE WRITE TARGET, now that cards carry zones. The heatmap edits the
+    // CURRENT run's zone, and only the Edited view draws the current run's
+    // grid -- clicking in Locked used to write to the edited row while
+    // showing the locked one, and Change has no single target at all.
+    get canSelectCells() { return this.gridView === 'edited'; },
     toggleCell(ix, iy) {
+      if (!this.canSelectCells) return;
       const i = this.selectedCells.findIndex(c => c[0] === ix && c[1] === iy);
       if (i >= 0) this.selectedCells.splice(i, 1);
       else this.selectedCells.push([ix, iy]);
+      // Editing the zone diverges from the saved card, so CURRENT DETACHES
+      // rather than silently rewriting something that was deliberately kept.
+      // The card stays in the strip; the live run reappears beside it and can
+      // be saved in turn.
+      this.currentIdx = -1;
       this.loadZone();
+    },
+
+    // ONE zone fetch, for the current run and the locked card alike. `src`
+    // decides everything -- its policy, its population, its window, its
+    // baseline draw and, through selectionBody, its cells. Passing a saved
+    // card here is what makes the Locked column that card's own zone instead
+    // of a reading of whatever the rail happens to hold.
+    async _fetchZone(src) {
+      const body = {
+        ...this.selectionBody(src),
+        entry_anchor: src.entry_anchor,
+        rule_keys:    src.rules,
+        // Must match the run's population or the zone is a different trade set.
+        max_strike:   src.max_strike ?? this.maxStrike,
+        // The CARD's window, not the page's. A TRAIN card locked against a
+        // TEST run must keep reporting train; the banner says they cross.
+        window:       src.window || this.window,
+        // A baseline stays a baseline when its zone is refetched -- clicking
+        // a cell or switching window must not silently turn it back into a
+        // real-entry run under the same card.
+        randomize:     !!src.randomize,
+        seed:          src.seed ?? null,
+        baseline_kind: src.baseline_kind || 'entry',
+      };
+      const r = await fetch('/api/factor-trades/zone', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+      return d;
     },
 
     async loadZone() {
       if (!this.runData || !this.hasSelection) { this.zoneData = null; return; }
       try {
-        const body = {
-          ...this.selectionBody(this.runData),
-          entry_anchor: this.runData.entry_anchor,
-          rule_keys: this.runData.rules,
-          // Must match the run's population or the zone is a different trade set.
-          max_strike: this.runData.max_strike ?? this.maxStrike,
-          window: this.window,
-          // A baseline run stays a baseline when the zone is refetched --
-          // clicking a cell or switching window must not silently turn it
-          // back into a real-entry run under the same card.
-          randomize: !!this.runData.randomize,
-          seed: this.runData.seed ?? null,
-          baseline_kind: this.runData.baseline_kind || 'entry',
-        };
-        const r = await fetch('/api/factor-trades/zone', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const d = await r.json();
-        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
-        this.zoneData = d;
+        const d = await this._fetchZone(this.runData);
+        this.zoneData  = d;
         this.secDetail = d;   // FactorCharts reads secDetail for defaults
         this.$nextTick(() => this.renderCharts());
-      } catch (e) { this.error = String(e); }
+      } catch (e) { this.error = String(e.message || e); }
     },
 
     // Sizing from the rail feeds the shared dollar-capped equity path, so the
@@ -2554,8 +2762,13 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       const edited = mk('edited',
                         bMark(this.runData, this.lockedRun ? 'Edited' : 'Current'),
                         src[this.window], this.dollarStats, this.window);
-      if (!this.lockedRun) return [edited].filter(Boolean);
-      const lockedSrc = this.lockedZone || this.lockedRun;
+      // NO FALLBACK to lockedRun. Its train/test are WHOLE-UNIVERSE stats
+      // over every trade under that policy, not the card's zone -- putting
+      // them in a row labelled "Locked" made the Change row a
+      // zone-minus-universe subtraction with nothing on screen saying so.
+      // Absent instead, with lockedZoneNote stating why.
+      if (!this.lockedRun || !this.lockedZone) return [edited].filter(Boolean);
+      const lockedSrc = this.lockedZone;
       const locked = mk('locked', bMark(this.lockedRun, 'Locked'),
                         lockedSrc[this.window], this.lockedDollarStats, this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
@@ -2563,7 +2776,11 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       const dd = (k) => (E?.[k] != null && L?.[k] != null) ? (E[k] - L[k]) : null;
       const cE = calmarRawOf(E), cL = calmarRawOf(L);
       const st = src[this.window], lt = lockedSrc[this.window];
-      const diff = (locked && edited) ? {
+      // BOTH sides must be zones. `src` above falls back to runData when
+      // nothing is selected, which is a fair reading of "Current" on its own
+      // (the whole universe under this policy) but makes a difference against
+      // a locked ZONE meaningless. No zone on the current side, no Change row.
+      const diff = (locked && edited && this.zoneData) ? {
         key: 'change',
         // Exactly one side random makes this row the signal-vs-random delta
         // -- the actual output of the baseline -- rather than a policy delta.
