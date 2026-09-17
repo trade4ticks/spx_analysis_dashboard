@@ -275,6 +275,12 @@ def _token_sync() -> str:
             if again and again.get("access_token") != fresh.get("access_token"):
                 log.info("refresh failed but the file moved on; using it")
                 return again["access_token"]
+            # WITH THE TRACEBACK. The message goes to the pane, which is
+            # right, but a message alone cannot distinguish "Schwab refused
+            # the refresh" from "this code crashed while formatting the
+            # refusal" — and those want completely different responses. That
+            # is exactly what happened on 2026-09-17.
+            log.exception("Schwab token refresh failed")
             _last_error = f"token refresh failed: {exc}"
             raise BrokerError(_last_error) from exc
 
@@ -297,7 +303,17 @@ def _do_refresh(tokens: dict) -> str:
                       data={"grant_type": "refresh_token",
                             "refresh_token": tokens["refresh_token"]})
     if r.status_code >= 400:
-        raise BrokerError(f"{r.status_code} {r.reason}: {r.text[:180]}")
+        # `reason_phrase`, NOT `reason`. httpx spells it the first way and has
+        # no attribute of the second name; requests spells it the second. This
+        # line said `r.reason` from the day it was written (bacd27f) and only
+        # ran on 2026-09-17, when a refresh was actually refused: the
+        # AttributeError was then caught upstream and reported as the reason
+        # the refresh failed, which hid Schwab's own answer — the only thing
+        # that says whether the token needs re-authorising or the request was
+        # malformed. THE BODY IS THE PART THAT MATTERS, so it is first and
+        # the phrase is decoration.
+        raise BrokerError(f"{r.status_code} {r.text[:180]} "
+                          f"({r.reason_phrase})")
     new = r.json()
     new["expires_at"] = time.time() + int(new.get("expires_in", 1800))
     # Written back to the SHARED file, because the portfolio dashboard reads

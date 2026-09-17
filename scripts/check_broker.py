@@ -33,6 +33,12 @@ WHAT IS BEING PROTECTED, in order of how bad it would be:
   * CANCEL IS NOT GATED ON ARMING. A safety switch that traps an order is
     not a safety switch.
 
+  * THE TOKEN REFRESH, both ways. It runs only when a refresh is REFUSED,
+    which is why a requests-style `r.reason` on an httpx response survived
+    from the first commit to 2026-09-17 and then took the pane down with an
+    AttributeError where Schwab's own answer should have been. The case
+    drives a fake httpx whose response has httpx's attributes AND NO OTHERS.
+
   * THE SWITCHES SIT ABOVE THE ADAPTER. Since the second broker made an
     interface necessary, arming and the guards are checked once in
     live/broker.py and an adapter is reached only after they pass. The cases
@@ -935,6 +941,156 @@ def case_match_placement():
 
 
 
+
+# ── the token refresh ───────────────────────────────────────────────────────
+#
+# THE PATH THAT TOOK THE PANE DOWN ON 2026-09-17, and the reason it reached
+# production: it only runs when a refresh is actually REFUSED, and nothing
+# here had ever driven it. `_do_refresh` read `r.reason` on an httpx response,
+# which spells it `reason_phrase` and has no attribute of that name, so the
+# 400 turned into an AttributeError; the handler upstream caught it and
+# reported it as the reason the refresh failed. Schwab's own answer — the only
+# thing that says whether the token needs re-authorising — never reached the
+# screen.
+#
+# So the case drives BOTH outcomes through a FAKE httpx whose response carries
+# httpx's attributes AND NO OTHERS. Reading anything else raises, which is
+# what reproduces the fault rather than asserting around it.
+class _StrictResponse:
+    """An httpx.Response as far as this code is concerned. Nothing more.
+
+    `__getattr__` refuses every other name, so a requests-ism (`.reason`,
+    `.ok`, `.raise_for_status()`) fails here exactly as it failed on the box.
+    """
+
+    _ALLOWED = {"status_code", "text", "content", "headers", "reason_phrase", "json"}
+
+    def __init__(self, status, payload, phrase="Bad Request"):
+        object.__setattr__(self, "status_code", status)
+        object.__setattr__(self, "text", payload if isinstance(payload, str) else json.dumps(payload))
+        object.__setattr__(self, "content", self.text.encode())
+        object.__setattr__(self, "headers", {})
+        object.__setattr__(self, "reason_phrase", phrase)
+        object.__setattr__(self, "_payload", payload)
+
+    def json(self):
+        if isinstance(self._payload, str):
+            raise ValueError("not json")
+        return self._payload
+
+    def __getattr__(self, name):
+        if name in self._ALLOWED:
+            raise AttributeError(name)
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r} — httpx "
+            f"does not have it either. This is the 2026-09-17 fault: the error "
+            f"path read a requests-style attribute off an httpx response.")
+
+
+class _FakeHttpx:
+    """Stands in for the httpx module; records the refresh request."""
+
+    def __init__(self, response):
+        self.response = response
+        self.posts = []
+
+    def post(self, url, **kw):
+        self.posts.append({"url": url, **kw})
+        return self.response
+
+
+def _token_env(tmp, tokens):
+    """Point the adapter at a throwaway token file holding `tokens`."""
+    Path(tmp).write_text(json.dumps(tokens), encoding="utf-8")
+    config.SCHWAB_TOKEN_FILE = str(tmp)
+    config.SCHWAB_API_KEY = config.SCHWAB_API_KEY or "KEY"
+    config.SCHWAB_API_SECRET = config.SCHWAB_API_SECRET or "SECRET"
+
+
+def case_token_refresh():
+    import tempfile
+    real_httpx, real_file = schwab._httpx, config.SCHWAB_TOKEN_FILE
+    real_key, real_secret = config.SCHWAB_API_KEY, config.SCHWAB_API_SECRET
+    tmpdir = tempfile.mkdtemp(prefix="obtok")
+    tmp = Path(tmpdir) / "schwab_tokens.json"
+    expired = {"access_token": "OLD", "refresh_token": "R1",
+               "expires_at": time.time() - 1}
+    try:
+        # ── 1. A REFUSED REFRESH SURFACES AS A MESSAGE, not an AttributeError.
+        _token_env(tmp, expired)
+        body = {"error": "unsupported_token_type",
+                "error_description": "400 Bad Request: refresh token invalid"}
+        fake = _FakeHttpx(_StrictResponse(400, body))
+        schwab._httpx = lambda: fake
+        try:
+            schwab._token_sync()
+            check(False, "a refused refresh returned a token")
+        except broker.BrokerError as exc:
+            msg = str(exc)
+            check("attribute" not in msg.lower(),
+                  f"the refusal surfaced as a crash in the error path, not as "
+                  f"Schwab's answer: {msg}")
+            check("400" in msg and "refresh token invalid" in msg,
+                  f"the message does not carry Schwab's own answer, which is the "
+                  f"only thing that says whether the token needs re-authorising: {msg}")
+        except Exception as exc:                            # noqa: BLE001
+            check(False, f"a refused refresh raised {type(exc).__name__}: {exc} — "
+                         f"the pane can only show a BrokerError")
+
+        # The refresh really was attempted, with the grant the API wants.
+        check(len(fake.posts) == 1
+              and fake.posts[0]["data"]["grant_type"] == "refresh_token"
+              and fake.posts[0]["data"]["refresh_token"] == "R1",
+              f"the refresh request was not the one Schwab expects: {fake.posts}")
+
+        # ── 2. AND IT REACHES THE PANE. health() carries last_error, which is
+        #      the string the pane puts under "ORDER STATE MAY BE STALE".
+        h = broker.health()
+        check("token refresh failed" in (h.get("last_error") or ""),
+              f"the refusal did not reach health().last_error: {h.get('last_error')}")
+
+        # ── 3. THE SUCCESS PATH still works and is atomic: the file holds the
+        #      NEW pair, because the portfolio dashboard reads this same file
+        #      and the old refresh token is dead the moment this one lands.
+        _token_env(tmp, expired)
+        fresh = {"access_token": "NEW", "refresh_token": "R2", "expires_in": 1800}
+        schwab._httpx = lambda: _FakeHttpx(_StrictResponse(200, fresh, "OK"))
+        got = schwab._token_sync()
+        on_disk = json.loads(tmp.read_text(encoding="utf-8"))
+        check(got == "NEW", f"the refreshed access token was not returned: {got!r}")
+        check(on_disk["access_token"] == "NEW" and on_disk["refresh_token"] == "R2",
+              f"the rotated pair was not written back for the other process: {on_disk}")
+        check(on_disk.get("expires_at", 0) > time.time() + 1000,
+              "expires_at was not stamped, so every call would refresh again")
+
+        # ── 4. A LIVE TOKEN IS NOT REFRESHED. Two processes share this file and
+        #      Schwab rotates the refresh token on every refresh, so a needless
+        #      one is how the other process ends up holding a dead token.
+        _token_env(tmp, {"access_token": "LIVE", "refresh_token": "R9",
+                         "expires_at": time.time() + 3600})
+        spy = _FakeHttpx(_StrictResponse(500, "should not be called"))
+        schwab._httpx = lambda: spy
+        check(schwab._token_sync() == "LIVE" and spy.posts == [],
+              "a token with an hour left was refreshed anyway")
+
+        # ── 5. NO TOKEN FILE AT ALL: a message naming the file and what to do,
+        #      not a stack trace.
+        tmp.unlink()
+        try:
+            schwab._token_sync()
+            check(False, "a missing token file returned a token")
+        except broker.BrokerError as exc:
+            check("authorise" in str(exc).lower(),
+                  f"the missing-token message does not say how to fix it: {exc}")
+    finally:
+        schwab._httpx = real_httpx
+        config.SCHWAB_TOKEN_FILE = real_file
+        config.SCHWAB_API_KEY, config.SCHWAB_API_SECRET = real_key, real_secret
+        schwab._last_error = None
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 # ── the switches sit ABOVE the adapter ──────────────────────────────────────
 #
 # THE SAFETY PROPERTY OF THE REFACTOR, and the reason a second broker is safe
@@ -1204,6 +1360,7 @@ CASES = [
     ("the order body", case_order_body),
     ("the switches sit above the adapter", case_policy_above_adapter),
     ("the broker interface", case_interface),
+    ("the token refresh", case_token_refresh),
 ]
 
 
