@@ -12,7 +12,7 @@ Schwab stamps `tag` itself and a client cannot set one (a body carrying a tag
 is rejected outright: 400 tagged, 201 with the identical body untagged,
 tested 2026-09-03 by scripts/probe_schwab_tag.py). API orders come back
 `TA_<account-derived>`, thinkorswim's come back `API_TOS:AT_LADDER_AS`, and
-`broker._norm_order` turns that prefix into `from_api`. The stamp is
+`schwab._norm_order` turns that prefix into `from_api`. The stamp is
 per-account, so it cannot say WHICH of ours an order is — but the fallback
 only runs with a single candidate, and "is this ours at all" is the question
 it was missing.

@@ -429,12 +429,15 @@
            refusal explained after the fact is worse than a number on screen
            beforehand. -->
       <span class="lv-sub" x-show="brokerHealth && brokerHealth.limits" x-cloak
-            :title="'Schwab allows 120 calls a minute in total. '
+            :title="'This broker allows '
+                    + (brokerHealth ? brokerHealth.limits.per_min : 0)
+                    + ' calls a minute in total. '
                     + (brokerHealth ? brokerHealth.limits.reserve : 0)
                     + ' are held back so a cancel or a flatten always has '
                     + 'quota. 429s seen: '
                     + (brokerHealth ? brokerHealth.limits.n_429 : 0)"
-            x-text="'schwab ' + (brokerHealth ? brokerHealth.limits.used : 0)
+            x-text="(brokerHealth ? brokerHealth.broker : '') + ' '
+                    + (brokerHealth ? brokerHealth.limits.used : 0)
                     + '/' + (brokerHealth ? brokerHealth.limits.per_min : 0)
                     + '/min'"></span>
       <span class="lv-sub" x-text="statusLine()"></span>

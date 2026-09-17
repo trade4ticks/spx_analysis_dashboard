@@ -32,6 +32,13 @@ WHAT IS BEING PROTECTED, in order of how bad it would be:
 
   * CANCEL IS NOT GATED ON ARMING. A safety switch that traps an order is
     not a safety switch.
+
+  * THE SWITCHES SIT ABOVE THE ADAPTER. Since the second broker made an
+    interface necessary, arming and the guards are checked once in
+    live/broker.py and an adapter is reached only after they pass. The cases
+    below drive a FAKE adapter and assert it was NOT CALLED AT ALL when a
+    switch or a guard refuses -- a broker that is never reached cannot send
+    anything, and the next adapter inherits that without being trusted to.
 """
 from __future__ import annotations
 
@@ -44,7 +51,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from live import broker, config                             # noqa: E402
+from live import broker, brokers, config                    # noqa: E402
+from live.brokers import base, schwab                       # noqa: E402
 
 # READ AT IMPORT, before any case assigns it. Asserting the default after a
 # test has set it is asserting nothing — a module shipping the flag as True
@@ -52,10 +60,10 @@ from live import broker, config                             # noqa: E402
 RUNTIME_AT_IMPORT = broker._runtime_enabled
 
 # THE REAL TRANSPORT, captured before any case stubs it out. Earlier cases
-# replace broker._acall with a recorder, so a case that means to exercise the
+# replace schwab._acall with a recorder, so a case that means to exercise the
 # real one has to hold its own reference — without this the classification
 # test drove the recorder and every assertion passed vacuously.
-REAL_ACALL = broker._acall
+REAL_ACALL = schwab._acall
 
 FAILS: list[str] = []
 
@@ -132,7 +140,7 @@ def case_order_source():
     refuse to reprice an order it did not place, so a wrong answer here moves
     a stranger's order.
     """
-    n = broker._norm_order
+    n = schwab._norm_order
 
     mine = n(order("A", "FDX", "BUY", 100, 318.5, tag="TA_examplestamp1774"))
     check(mine["from_api"] is True,
@@ -176,7 +184,7 @@ def case_fills():
     simply stop appearing, with nothing raised and nothing on screen to say
     so. That is the failure this case exists to make loud.
     """
-    n = broker._norm_order
+    n = schwab._norm_order
 
     # A single order filled in three pieces at two prices, which is the case
     # worth seeing against the tape.
@@ -280,8 +288,8 @@ def case_recent_is_newest():
                          newest_first),
                         ("oldest-first", oldest_first)):
         rec = Recorder(_acct(orders=rows))
-        broker._acall = rec
-        broker._account_hash = "H"
+        schwab._acall = rec
+        schwab._account_hash = "H"
         got = asyncio.run(broker.read_orders(["FDX"]))["recent"]
         check(len(got) == 12,
               f"{label}: {len(got)} recent orders, expected 12")
@@ -324,7 +332,7 @@ def case_order_states():
         "PENDING_ACKNOWLEDGEMENT", "PENDING_RECALL", "UNKNOWN",
     }
     unclassified = sorted(
-        documented - broker.WORKING_STATES - broker.TERMINAL_STATES)
+        documented - schwab.WORKING_STATES - schwab.TERMINAL_STATES)
     check(not unclassified,
           f"these documented statuses are in neither WORKING_STATES nor "
           f"TERMINAL_STATES: {unclassified}. An unclassified status falls "
@@ -332,7 +340,7 @@ def case_order_states():
           f"cannot be cancelled from the pane and does not block it — "
           f"silently.")
 
-    overlap = sorted(broker.WORKING_STATES & broker.TERMINAL_STATES)
+    overlap = sorted(schwab.WORKING_STATES & schwab.TERMINAL_STATES)
     check(not overlap,
           f"these statuses are both live and terminal: {overlap}")
 
@@ -340,7 +348,7 @@ def case_order_states():
     # each was landing in `recent` where nothing could reach it.
     for st in ("PENDING_ACKNOWLEDGEMENT", "AWAITING_RELEASE_TIME",
                "PENDING_RECALL", "UNKNOWN"):
-        check(st in broker.WORKING_STATES,
+        check(st in schwab.WORKING_STATES,
               f"{st} is not treated as live. It is an order Schwab still "
               f"has: it would draw no marker, be unreachable by cancel or "
               f"reprice, and leave the pane free to send another on top.")
@@ -348,7 +356,7 @@ def case_order_states():
     # And the terminal five stay terminal, or every filled order in the
     # window comes back as a working one.
     for st in ("FILLED", "CANCELED", "REJECTED", "EXPIRED", "REPLACED"):
-        check(st not in broker.WORKING_STATES,
+        check(st not in schwab.WORKING_STATES,
               f"{st} is treated as live; it is over.")
 
     # The normaliser has to agree with the sets, not carry its own opinion.
@@ -362,7 +370,7 @@ def case_order_states():
 
 def _norm_status(status):
     o = order("S1", "FDX", "BUY", 100, 318.50, status=status)
-    return broker._norm_order(o)
+    return schwab._norm_order(o)
 
 
 # ── the guards ──────────────────────────────────────────────────────────────
@@ -514,8 +522,8 @@ def case_runtime_toggle():
 
 def case_switches():
     rec = Recorder()
-    broker._acall = rec
-    broker._account_hash = "H"
+    schwab._acall = rec
+    schwab._account_hash = "H"
     args = dict(symbol="FDX", side="BUY", qty=100, price=318.50,
                 reference=318.50, position_qty=0)
 
@@ -592,8 +600,8 @@ def case_flatten_order():
                          orders=[order("O1", "FDX", "BUY", 100, 317.5),
                                  order("O2", "FDX", "BUY", 100, 317.0),
                                  order("O9", "NVDA", "BUY", 5, 900.0)]))
-    broker._acall = rec
-    broker._account_hash = "H"
+    schwab._acall = rec
+    schwab._account_hash = "H"
     _arm_runtime()
 
     # FLATTEN OBEYS THE RUNTIME FLAG TOO. It sends a market order, so a
@@ -640,14 +648,14 @@ def case_flatten_order():
 
     # A short closes by buying to cover, and a flat name does nothing.
     rec2 = Recorder(_acct(positions=[pos("FDX", short_q=200, avg=318.0)]))
-    broker._acall = rec2
+    schwab._acall = rec2
     asyncio.run(broker.flatten(symbol="FDX", armed=True))
     close = [c for c in rec2.calls if c["method"] == "POST"][-1]["body"]
     check(close["orderLegCollection"][0]["instruction"] == "BUY_TO_COVER",
           f"a short was not covered: {close}")
 
     rec3 = Recorder(_acct())
-    broker._acall = rec3
+    schwab._acall = rec3
     out = asyncio.run(broker.flatten(symbol="FDX", armed=True))
     check(out.get("flat") and not [c for c in rec3.calls if c["method"] == "POST"],
           f"a flat name still sent a market order: {out}")
@@ -661,8 +669,8 @@ def case_state():
                 order("O2", "FDX", "BUY", 100, 317.0, status="FILLED"),
                 order("O3", "FDX", "SELL", 100, 319.0, status="CANCELED"),
                 order("O4", "FDX", "BUY", 100, 316.0, status="PENDING_ACTIVATION")]))
-    broker._acall = rec
-    broker._account_hash = "H"
+    schwab._acall = rec
+    schwab._account_hash = "H"
     st = asyncio.run(broker.state(["FDX"]))
 
     ids = sorted(o["order_id"] for o in st["working"])
@@ -682,17 +690,17 @@ def case_state():
 
     # A short reads negative, so the guards and the display agree on sign.
     rec2 = Recorder(_acct(positions=[pos("FDX", short_q=200)]))
-    broker._acall = rec2
+    schwab._acall = rec2
     st = asyncio.run(broker.state(["FDX"]))
     check(st["positions"][0]["qty"] == -200,
           f"a 200-share short read as {st['positions'][0]['qty']}")
 
     # Every non-terminal Schwab status has to survive as working, or an order
     # silently disappears from the screen while resting at the broker.
-    for status in sorted(broker.WORKING_STATES):
+    for status in sorted(schwab.WORKING_STATES):
         rec3 = Recorder(_acct(orders=[order("O", "FDX", "BUY", 1, 1.0,
                                             status=status)]))
-        broker._acall = rec3
+        schwab._acall = rec3
         st = asyncio.run(broker.state(["FDX"]))
         check(len(st["working"]) == 1,
               f"status {status} was dropped from the working list")
@@ -700,7 +708,7 @@ def case_state():
 
 # ── the rate limiter ────────────────────────────────────────────────────────
 def case_limiter():
-    lim = broker.RateLimiter(per_min=10, reserve=3)
+    lim = schwab.RateLimiter(per_min=10, reserve=3)
 
     # Ordinary traffic stops at the reserve.
     for i in range(7):
@@ -717,7 +725,7 @@ def case_limiter():
           "priority spent past the total ceiling")
 
     # 429 blocks everything, priority included, and says for how long.
-    lim2 = broker.RateLimiter(per_min=100, reserve=10)
+    lim2 = schwab.RateLimiter(per_min=100, reserve=10)
     lim2.note_429("2")
     why = lim2.take(priority=True)
     check(why and "429" in why,
@@ -725,14 +733,14 @@ def case_limiter():
     check(lim2.state()["n_429"] == 1, "the 429 was not counted")
     # A missing or junk Retry-After must not crash or become forever.
     for hdr in (None, "", "soon", "99999"):
-        lim3 = broker.RateLimiter(100, 10)
+        lim3 = schwab.RateLimiter(100, 10)
         lim3.note_429(hdr)
         wait = lim3.state()["blocked_for_s"]
         check(0 < wait <= 60,
               f"Retry-After {hdr!r} produced a {wait}s hold-off")
 
     # The window rolls: a call from over a minute ago is not spent quota.
-    lim4 = broker.RateLimiter(2, 0)
+    lim4 = schwab.RateLimiter(2, 0)
     lim4.calls.append(time.time() - 61)
     lim4.calls.append(time.time() - 61)
     check(lim4.take() is None,
@@ -741,7 +749,7 @@ def case_limiter():
 
 # ── the order body ──────────────────────────────────────────────────────────
 def case_order_body():
-    b = broker._equity_order("buy", 100, "fdx", 318.5200000000001)
+    b = schwab._equity_order("buy", 100, "fdx", 318.5200000000001)
     check(b["price"] == "318.52",
           f"a float limit was sent unrounded as {b['price']!r} — Schwab "
           f"refuses a sub-penny equity limit")
@@ -752,7 +760,7 @@ def case_order_body():
     check(b["duration"] == "DAY" and b["session"] == "NORMAL",
           f"an unexpected duration or session: {b}")
 
-    m = broker._equity_order("SELL", 50, "FDX", None)
+    m = schwab._equity_order("SELL", 50, "FDX", None)
     check(m["orderType"] == "MARKET" and "price" not in m,
           f"a market order carries a price: {m}")
 
@@ -801,11 +809,11 @@ def case_indeterminacy():
             return FakeResp(self.behaviour)
 
     def drive(behaviour):
-        broker._conn = FakeClient(behaviour)
-        broker._httpx = lambda: type("H", (), {})()
-        broker._client = lambda _h: broker._conn
-        broker._token = _fake_token
-        broker._account_hash = "H"
+        schwab._conn = FakeClient(behaviour)
+        schwab._httpx = lambda: type("H", (), {})()
+        schwab._client = lambda _h: schwab._conn
+        schwab._token = _fake_token
+        schwab._account_hash = "H"
         try:
             asyncio.run(REAL_ACALL("POST", "/accounts/H/orders",
                                    body={"x": 1}, priority=True))
@@ -813,7 +821,7 @@ def case_indeterminacy():
         except broker.BrokerError as exc:
             return exc
         finally:
-            broker._conn = None
+            schwab._conn = None
 
     for behaviour, want_unknown, label in (
             ("timeout", True, "a timeout"),
@@ -904,8 +912,11 @@ def case_match_placement():
     # and it is the reason the ambiguity above is acceptable rather than a bug.
     # It is no longer provisional: the tag probe ran on 2026-09-03 and the way
     # out is closed, so the words now have to say that too.
-    src = (ROOT / "live" / "broker.py").read_text(encoding="utf-8")
-    body = src[src.index("def match_placement"):src.index("def _entered_epoch")]
+    # IN THE ADAPTER, because the caveat is Schwab's: its API gives a
+    # placement no client-supplied handle, which is what forces matching by
+    # shape. base.match_placement is the shared mechanism; this is the reason.
+    src = (ROOT / "live" / "brokers" / "schwab.py").read_text(encoding="utf-8")
+    body = src[src.index("async def reconcile"):src.index("def _equity_order")]
     for phrase in ("NOT GUARANTEED UNIQUE", "probe_schwab_tag",
                    "ADJACENT PRICES", "NOT SETTABLE"):
         check(phrase in body,
@@ -915,12 +926,227 @@ def case_match_placement():
 
     # AND THE ORDER BODY STAYS CLEAN. A tag there is not a label, it is a
     # rejected order: Schwab 400s the whole request over the field.
-    order_src = src[src.index("def _equity_order"):src.index("async def place")]
+    order_src = src[src.index("def _equity_order"):src.index("async def place")]  # adapter
     check('"tag"' not in order_src and "'tag'" not in order_src,
           "the order body carries a `tag` again. Schwab REJECTS an order "
           "that carries one — 400 with the tagged body, 201 with the "
           "identical body without it, tested 2026-09-03. This does not "
           "mislabel orders, it stops them leaving.")
+
+
+
+# ── the switches sit ABOVE the adapter ──────────────────────────────────────
+#
+# THE SAFETY PROPERTY OF THE REFACTOR, and the reason a second broker is safe
+# to add. Every check runs in live/broker.py before any adapter is reached, so
+# a new adapter cannot trade while disarmed or past the guards by forgetting
+# to ask. These cases drive a FAKE adapter and assert on WHETHER IT WAS
+# CALLED AT ALL -- an adapter that is never reached cannot send anything,
+# which is a stronger statement than "the call raised".
+class FakeBroker(base.Broker):
+    """Records what the façade asks of it. Sends nothing anywhere."""
+
+    name = "fake"
+
+    def __init__(self):
+        self.calls = []
+
+    async def read_orders(self, symbols=None, priority=False):
+        self.calls.append(("read_orders", symbols, priority))
+        return {"ok": True, "as_of": time.time(), "rt_ms": 1.0,
+                "working": [], "recent": [], "limits": None,
+                "stale_after_s": config.STALE_AFTER_S}
+
+    async def read_positions(self, symbols=None, priority=False):
+        self.calls.append(("read_positions", symbols, priority))
+        return {"ok": True, "as_of": time.time(), "rt_ms": 1.0,
+                "positions": [], "account_type": "MARGIN", "is_day_trader": False,
+                "round_trips": 0, "limits": None,
+                "stale_after_s": config.STALE_AFTER_S}
+
+    async def place(self, *, symbol, side, qty, price):
+        self.calls.append(("place", symbol, side, qty, price))
+        return {"ok": True, "order_id": "F1", "status": 201, "rt_ms": 1.0}
+
+    async def replace(self, *, order_id, symbol, side, qty, price):
+        self.calls.append(("replace", order_id, symbol, side, qty, price))
+        return {"ok": True, "order_id": order_id, "status": 200, "rt_ms": 1.0}
+
+    async def cancel(self, *, order_id):
+        self.calls.append(("cancel", order_id))
+        return {"ok": True, "order_id": order_id, "status": 200, "rt_ms": 1.0}
+
+    async def flatten(self, *, symbol):
+        self.calls.append(("flatten", symbol))
+        return {"ok": True, "cancelled": [], "rt_ms": 1.0, "flat": True}
+
+    def health(self):
+        return {"broker": "fake", "its_own_fact": 42}
+
+    def problems(self):
+        return ["fake broker"]
+
+
+def _with_fake():
+    """Install the fake adapter and return it (call _restore_real after)."""
+    fake = FakeBroker()
+    brokers._active = fake
+    return fake
+
+
+def _restore_real():
+    brokers.reset()
+
+
+def case_policy_above_adapter():
+    fake = _with_fake()
+    try:
+        ok = dict(symbol="AAPL", side="BUY", qty=10, price=100.0,
+                  reference=100.0, position_qty=0.0)
+
+        # 1. DISARMED: not "the adapter refused", but never asked.
+        config.TRADING_ENABLED = True
+        broker.set_trading(False)
+        try:
+            asyncio.run(broker.place(armed=True, **ok))
+            check(False, "a placement left while the runtime flag was off")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [],
+              "the adapter was called with trading switched off — the switches "
+              "must be checked ABOVE it, or every new broker has to remember to")
+
+        # 2. ARMED runtime, but the pane did not carry its arm flag.
+        _arm_runtime()
+        try:
+            asyncio.run(broker.place(armed=False, **ok))
+            check(False, "a placement left without the pane's arm flag")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [], "the adapter was called for an unarmed pane")
+
+        # 3. ARMED, but the guards refuse it (over the share limit).
+        try:
+            asyncio.run(broker.place(armed=True,
+                                     **{**ok, "qty": config.MAX_ORDER_SHARES + 1}))
+            check(False, "a placement over the share limit left")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [], "the adapter was called for an order the guards refused")
+
+        # 4. ARMED and within the guards: NOW it is reached, and with the
+        #    order alone — no arming or guard inputs leak into the adapter.
+        r = asyncio.run(broker.place(armed=True, **ok))
+        check(r["ok"] and fake.calls == [("place", "AAPL", "BUY", 10, 100.0)],
+              f"an armed, guarded placement did not reach the adapter cleanly: {fake.calls}")
+
+        # 5. REPLACE takes the same two checks — a nudge is an order, and a
+        #    fat-fingered price arrives on the reprice.
+        fake.calls.clear()
+        try:
+            asyncio.run(broker.replace(order_id="X", armed=True,
+                                       **{**ok, "price": 10.0}))
+            check(False, "a reprice 90% from the last print left")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [], "the adapter was called for a reprice the guards refused")
+        asyncio.run(broker.replace(order_id="X", armed=True, **ok))
+        check(fake.calls == [("replace", "X", "AAPL", "BUY", 10, 100.0)],
+              "an armed, guarded reprice did not reach the adapter")
+
+        # 6. CANCEL is NOT gated on arming — deliberately, and the fake proves
+        #    it reaches the broker while disarmed.
+        fake.calls.clear()
+        broker.set_trading(False)
+        r = asyncio.run(broker.cancel(order_id="Z9"))
+        check(r["ok"] and fake.calls == [("cancel", "Z9")],
+              "cancel did not reach the adapter while disarmed — a safety switch "
+              "that traps an order is not a safety switch")
+
+        # 7. FLATTEN needs trading allowed (it sends a market order), and is
+        #    refused above the adapter when it is not.
+        fake.calls.clear()
+        try:
+            asyncio.run(broker.flatten(symbol="AAPL", armed=True))
+            check(False, "a flatten left while trading was switched off")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [], "the adapter was called to flatten while disarmed")
+        _arm_runtime()
+        asyncio.run(broker.flatten(symbol="AAPL", armed=True))
+        check(fake.calls == [("flatten", "AAPL")],
+              "an allowed flatten did not reach the adapter")
+    finally:
+        broker.set_trading(False)
+        _restore_real()
+
+
+# ── the façade is the only thing above the adapters ─────────────────────────
+def case_interface():
+    # Schwab implements every method the interface declares: an abstract
+    # method left out would raise here rather than at 09:31 on the morning it
+    # is called.
+    try:
+        adapter = schwab.SchwabBroker()
+        check(isinstance(adapter, base.Broker), "SchwabBroker is not a base.Broker")
+    except TypeError as exc:
+        check(False, f"SchwabBroker does not implement the interface: {exc}")
+        return
+
+    for name in ("read_orders", "read_positions", "state", "place", "replace",
+                 "cancel", "flatten", "reconcile", "health", "problems", "aclose"):
+        check(callable(getattr(adapter, name, None)),
+              f"the interface is missing {name}, which the façade calls")
+
+    # NO ADAPTER MAY CARRY POLICY. The switches and the guards are the
+    # façade's; an adapter that consulted them would make the real gate
+    # ambiguous, and one that re-implemented them would drift from it. This
+    # scans EVERY adapter, so the DAS one is held to it the day it lands.
+    import glob
+    for path in glob.glob(str(ROOT / "live" / "brokers" / "*.py")):
+        if path.endswith("base.py") or path.endswith("__init__.py"):
+            continue
+        src = Path(path).read_text(encoding="utf-8")
+        for banned in ("_armed_check(", "check_guards(", "trading_allowed(",
+                       "_runtime_enabled", "set_trading(", "armed=", "armed:"):
+            check(banned not in src,
+                  f"{Path(path).name} consults the trading policy ({banned}). "
+                  f"Arming and the guards are checked once, in live/broker.py, "
+                  f"above every adapter.")
+
+    # The endpoints and the pane must reach a broker only through the façade.
+    main_src = (ROOT / "live" / "main.py").read_text(encoding="utf-8")
+    check("brokers.schwab" not in main_src and "from live.brokers" not in main_src,
+          "live/main.py imports an adapter directly — the endpoints talk to "
+          "live/broker.py, which is what makes the broker swappable")
+
+    # An unknown LIVE_BROKER raises rather than silently falling back: a box
+    # pointed at another broker must not keep trading through this one.
+    was, brokers._active = brokers._active, None
+    old = config.BROKER
+    try:
+        config.BROKER = "not_a_broker"
+        try:
+            brokers.active()
+            check(False, "an unknown LIVE_BROKER fell back to a working broker")
+        except broker.BrokerError as exc:
+            check("not_a_broker" in str(exc), "the refusal does not name the value")
+    finally:
+        config.BROKER = old
+        brokers._active = was
+
+    # health() is the union: the adapter's own facts AND the switches, which
+    # an adapter never reports on.
+    fake = _with_fake()
+    try:
+        h = broker.health()
+        check(h.get("its_own_fact") == 42, "the adapter's facts are missing from health()")
+        check(h.get("broker") == "fake", "health() does not say which broker it is")
+        check("trading" in h and "trading_enabled" in h and "guards" in h,
+              "health() lost the switches or the guards, which the pane reads")
+        check(broker.problems() == ["fake broker"], "problems() does not reach the adapter")
+    finally:
+        _restore_real()
 
 
 # ── the two reads are separate ──────────────────────────────────────────────
@@ -934,8 +1160,8 @@ def case_split_reads():
     """
     rec = Recorder(_acct(positions=[pos("FDX", long_q=300)],
                          orders=[order("O1", "FDX", "BUY", 100, 317.5)]))
-    broker._acall = rec
-    broker._account_hash = "H"
+    schwab._acall = rec
+    schwab._account_hash = "H"
 
     asyncio.run(broker.read_orders(["FDX"]))
     check(len(rec.calls) == 1 and rec.calls[0]["path"].endswith("/orders"),
@@ -976,11 +1202,13 @@ CASES = [
     ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
+    ("the switches sit above the adapter", case_policy_above_adapter),
+    ("the broker interface", case_interface),
 ]
 
 
 def main() -> int:
-    real_acall, real_hash = broker._acall, broker._account_hash
+    real_acall, real_hash = schwab._acall, schwab._account_hash
     real_enabled = config.TRADING_ENABLED
     real_token, real_runtime = config.CONTROL_TOKEN, broker._runtime_enabled
     try:
@@ -994,7 +1222,7 @@ def main() -> int:
                 for m in FAILS[before:]:
                     print(f"  FAIL {name}: {m}")
     finally:
-        broker._acall, broker._account_hash = real_acall, real_hash
+        schwab._acall, schwab._account_hash = real_acall, real_hash
         config.TRADING_ENABLED = real_enabled
         config.CONTROL_TOKEN, broker._runtime_enabled = real_token, real_runtime
 

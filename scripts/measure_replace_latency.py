@@ -44,19 +44,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from live import broker                                     # noqa: E402
+from live.brokers import schwab
 
 POLL_S = 0.15
 GIVE_UP_S = 15.0
 
 
 async def run(symbol: str, price: float, side: str, moves: int) -> int:
-    hv = await broker.account_hash()
+    hv = await schwab.account_hash()
     order_id = None
     try:
         # ── 1. a resting order to move ───────────────────────────────────
-        body = broker._equity_order(side, 1, symbol, price)
+        body = schwab._equity_order(side, 1, symbol, price)
         t0 = time.perf_counter()
-        data, status, ms = await broker._acall(
+        data, status, ms = await schwab._acall(
             "POST", f"/accounts/{hv}/orders", body=body, priority=True)
         order_id = (data or {}).get("order_id") if isinstance(data, dict) else None
         print(f"placed {symbol} {side} 1 @ {price:.2f} -> {status} in "
@@ -76,9 +77,9 @@ async def run(symbol: str, price: float, side: str, moves: int) -> int:
         for i in range(moves):
             px = round(px + 0.01, 2)
             t_send = time.perf_counter()
-            _, st, put_ms = await broker._acall(
+            _, st, put_ms = await schwab._acall(
                 "PUT", f"/accounts/{hv}/orders/{order_id}",
-                body=broker._equity_order(side, 1, symbol, px), priority=True)
+                body=schwab._equity_order(side, 1, symbol, px), priority=True)
             puts.append(put_ms)
             # A REPLACE MAKES A NEW ORDER. Schwab gives no link from the old
             # id to the new one, so the poll below matches on the PRICE and

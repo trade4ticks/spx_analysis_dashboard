@@ -256,6 +256,13 @@ RECONNECT_MAX_S = 30.0
 TRADING_ENABLED = os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower() \
     in ("1", "true", "yes", "on")
 
+# WHICH BROKER orders leave through. One per process: the adapter is resolved
+# once (live/brokers/__init__.py) and everything above it — the pane, the
+# endpoints, the switches, the guards — is broker-agnostic. An unknown value
+# raises rather than falling back, so a box meant for another broker cannot
+# quietly keep trading through this one.
+BROKER = os.environ.get("LIVE_BROKER", "schwab").strip().lower()
+
 # The shared secret that lets a caller ENABLE trading over HTTP. Disabling
 # never needs it — a control that fails closed at the worst moment is worse
 # than one that anybody can use to stop trading.

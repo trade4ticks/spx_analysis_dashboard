@@ -60,6 +60,31 @@ the parser and so contribute nothing (gate-checked against the v3.1 fixture). Tr
 opening or closing off an SPX session (e.g. 2026-04-08) are counted from the next session
 and reported under the chart.
 
+## Live trading: the broker interface (2026-09-17)
+
+A second broker (DAS Trader, CMD API) is coming, so Schwab moved behind an
+interface. **`live/broker.py` is the façade** everything talks to — the pane,
+`live/main.py`'s `/broker/*` endpoints, the checks. It owns the POLICY: the four
+switches, the guards, and that a flatten needs trading allowed. **Adapters live in
+`live/brokers/`**: `base.py` (the `Broker` ABC + `BrokerError`/`BrokerIndeterminate`
++ the shared shape-matching `match_placement`), `schwab.py` (all Schwab protocol,
+moved verbatim), `__init__.py` (selection by `LIVE_BROKER`, default `schwab`,
+unknown value raises rather than falling back).
+
+**The safety property:** arming and the guards are checked ONCE in the façade,
+above the adapter, so a new adapter cannot trade while disarmed or past the limits
+by forgetting to ask. `check_broker.py` drives a FakeBroker and asserts the adapter
+was NOT CALLED AT ALL when a switch or guard refuses, and scans every
+`live/brokers/*.py` for policy tokens (`armed=`, `check_guards(`,
+`trading_allowed(`, `_runtime_enabled`) so the DAS adapter is held to it too.
+Exceptions kept deliberately: `cancel` is never gated on arming; `flatten` needs
+trading allowed but not the pane's arm flag.
+
+Adapter internals are now `schwab.*` — the checks and probes monkeypatch
+`schwab._acall` / `schwab._account_hash`, not `broker.*`. Rate limits belong to the
+adapter (a broker-API fact); the rule they serve — getting flat must never be
+refused for quota — stays in the façade's `priority` flags.
+
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —

@@ -14,11 +14,11 @@
 # stamping thinkorswim's orders, not thinkorswim setting a field.
 #
 # The stamp is per-account and not per-order, so it separates THIS APP's
-# orders from thinkorswim's and nothing finer. `broker._norm_order` carries
+# orders from thinkorswim's and nothing finer. `schwab._norm_order` carries
 # it as `from_api` for that purpose, and `broker.match_placement` records
 # why reconciliation stays heuristic permanently.
 #
-# THE ORDER BODY IN `broker._equity_order` MUST NOT CARRY A TAG. This
+# THE ORDER BODY IN `schwab._equity_order` MUST NOT CARRY A TAG. This
 # script is kept so the finding can be re-tested rather than re-argued —
 # if Schwab ever accepts one, the run below is how you would find out.
 #
@@ -78,12 +78,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from live import broker                                     # noqa: E402
+from live.brokers import schwab
 
 TAG = "PBL_LIVE_PROBE"
 
 
 async def run(symbol: str, price: float, side: str, use_tag: bool) -> int:
-    hv = await broker.account_hash()
+    hv = await schwab.account_hash()
     body = {
         "session": "NORMAL",
         "duration": "DAY",
@@ -110,7 +111,7 @@ async def run(symbol: str, price: float, side: str, use_tag: bool) -> int:
     order_id = None
     try:
         try:
-            data, status, ms = await broker._acall(
+            data, status, ms = await schwab._acall(
                 "POST", f"/accounts/{hv}/orders", body=body, priority=True)
         except broker.BrokerIndeterminate:
             # MUST COME FIRST: it subclasses BrokerError, and reporting a
@@ -159,7 +160,7 @@ async def run(symbol: str, price: float, side: str, use_tag: bool) -> int:
         # The RAW record. The normaliser now carries `tag` through, but this
         # reads Schwab's own response so the answer cannot come from our own
         # parsing of it — which is the point of a probe.
-        raw, _, _ = await broker._acall(
+        raw, _, _ = await schwab._acall(
             "GET", f"/accounts/{hv}/orders",
             params={"fromEnteredTime": _fmt(sent_at - 60),
                     "toEnteredTime": _fmt(time.time() + 60)},

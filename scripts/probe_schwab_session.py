@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from live import broker                                     # noqa: E402
+from live.brokers import schwab
 
 # Schwab documents these four. All are sent; the ones that are refused are
 # the finding, and so is any that needs a field this body does not carry.
@@ -59,10 +60,10 @@ ROUTING_FIELDS = ["requestedDestination", "destinationLinkName", "session",
 async def place(hv: str, symbol: str, side: str, price: float,
                 session: str) -> tuple[str | None, dict | None, str | None]:
     """One order with this session. Returns (order_id, raw record, error)."""
-    body = broker._equity_order(side, 1, symbol, price)
+    body = schwab._equity_order(side, 1, symbol, price)
     body["session"] = session
     try:
-        data, status, ms = await broker._acall(
+        data, status, ms = await schwab._acall(
             "POST", f"/accounts/{hv}/orders", body=body, priority=True)
     except broker.BrokerIndeterminate:
         print(f"  {session:9} TIMED OUT — whether it reached Schwab is "
@@ -81,7 +82,7 @@ async def place(hv: str, symbol: str, side: str, price: float,
     raw = None
     for _ in range(12):
         await asyncio.sleep(0.5)
-        rows, _, _ = await broker._acall(
+        rows, _, _ = await schwab._acall(
             "GET", f"/accounts/{hv}/orders",
             params={"fromEnteredTime": _fmt(time.time() - 300),
                     "toEnteredTime": _fmt(time.time() + 60)}, priority=True)
@@ -95,7 +96,7 @@ async def place(hv: str, symbol: str, side: str, price: float,
 
 
 async def run(symbol: str, price: float, side: str) -> int:
-    hv = await broker.account_hash()
+    hv = await schwab.account_hash()
     placed: list[str] = []
     records: dict[str, dict] = {}
     errors: dict[str, str] = {}
