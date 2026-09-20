@@ -1120,12 +1120,13 @@ class FakeBroker(base.Broker):
                 "round_trips": 0, "limits": None,
                 "stale_after_s": config.STALE_AFTER_S}
 
-    async def place(self, *, symbol, side, qty, price):
-        self.calls.append(("place", symbol, side, qty, price))
+    async def place(self, *, symbol, side, qty, price, route=None):
+        self.calls.append(("place", symbol, side, qty, price, route))
         return {"ok": True, "order_id": "F1", "status": 201, "rt_ms": 1.0}
 
-    async def replace(self, *, order_id, symbol, side, qty, price):
-        self.calls.append(("replace", order_id, symbol, side, qty, price))
+    async def replace(self, *, order_id, symbol, side, qty, price, route=None):
+        self.calls.append(("replace", order_id, symbol, side, qty, price,
+                           route))
         return {"ok": True, "order_id": order_id, "status": 200, "rt_ms": 1.0}
 
     async def cancel(self, *, order_id):
@@ -1181,6 +1182,34 @@ def case_policy_above_adapter():
             pass
         check(fake.calls == [], "the adapter was called for an unarmed pane")
 
+        # 3a. THE ROUTE REACHES THE ADAPTER UNCHANGED. It is not policy --
+        #     which venue an order goes to is a trading choice, and the
+        #     guards bound size, ending position, notional and distance,
+        #     none of which move with the venue. What matters is that the
+        #     façade does not quietly drop it.
+        fake.calls.clear()
+        asyncio.run(broker.place(armed=True, route="ARCA", **ok))
+        check(fake.calls and fake.calls[-1][-1] == "ARCA",
+              f"the route did not reach the adapter: {fake.calls[-1:]!r}")
+        fake.calls.clear()
+        asyncio.run(broker.replace(order_id="X", armed=True, route="NSDQ",
+                                   **ok))
+        check(fake.calls and fake.calls[-1][-1] == "NSDQ",
+              f"the route did not reach the adapter on a replace: "
+              f"{fake.calls[-1:]!r}")
+
+        # 3b. AND A ROUTE DOES NOT BUY A WAY PAST THE GUARDS. Naming a venue
+        #     is not an escalation: the switches and the limits are checked
+        #     before the adapter either way.
+        fake.calls.clear()
+        try:
+            asyncio.run(broker.place(armed=False, route="ARCA", **ok))
+            check(False, "an unarmed placement left because it named a route")
+        except broker.BrokerError:
+            pass
+        check(fake.calls == [],
+              "the adapter was called for an unarmed pane that named a route")
+
         # 3. ARMED, but the guards refuse it (over the share limit).
         try:
             asyncio.run(broker.place(armed=True,
@@ -1193,7 +1222,8 @@ def case_policy_above_adapter():
         # 4. ARMED and within the guards: NOW it is reached, and with the
         #    order alone — no arming or guard inputs leak into the adapter.
         r = asyncio.run(broker.place(armed=True, **ok))
-        check(r["ok"] and fake.calls == [("place", "AAPL", "BUY", 10, 100.0)],
+        check(r["ok"] and fake.calls == [("place", "AAPL", "BUY", 10, 100.0,
+                                          None)],
               f"an armed, guarded placement did not reach the adapter cleanly: {fake.calls}")
 
         # 5. REPLACE takes the same two checks — a nudge is an order, and a
@@ -1207,7 +1237,7 @@ def case_policy_above_adapter():
             pass
         check(fake.calls == [], "the adapter was called for a reprice the guards refused")
         asyncio.run(broker.replace(order_id="X", armed=True, **ok))
-        check(fake.calls == [("replace", "X", "AAPL", "BUY", 10, 100.0)],
+        check(fake.calls == [("replace", "X", "AAPL", "BUY", 10, 100.0, None)],
               "an armed, guarded reprice did not reach the adapter")
 
         # 6. CANCEL is NOT gated on arming — deliberately, and the fake proves
@@ -1253,6 +1283,41 @@ def case_interface():
                  "cancel", "flatten", "reconcile", "health", "problems", "aclose"):
         check(callable(getattr(adapter, name, None)),
               f"the interface is missing {name}, which the façade calls")
+
+    # EVERY ADAPTER, not just the one this box is pointed at. An adapter
+    # that cannot be constructed, or that is missing a method, must fail
+    # here rather than at 09:31 on the morning it is selected. Constructing
+    # one must also not connect to anything -- that is why this can run on a
+    # laptop with no DAS and no network.
+    import importlib
+    for key in sorted(brokers._ADAPTERS):
+        try:
+            a = brokers._ADAPTERS[key]()
+        except Exception as exc:                            # noqa: BLE001
+            check(False, f"the {key} adapter could not be constructed: "
+                         f"{type(exc).__name__}: {exc}")
+            continue
+        check(isinstance(a, base.Broker), f"{key} is not a base.Broker")
+        check(a.name == key,
+              f"the {key} adapter calls itself {a.name!r}; the key in "
+              f"_ADAPTERS is what LIVE_BROKER is set to and what health() "
+              f"reports, so they have to agree")
+        # ROUTE IS ON THE INTERFACE, so every adapter has to accept it --
+        # one that does not would raise TypeError the first time a venue is
+        # picked on the page, which is a click on a live trading control.
+        import inspect
+        for meth in ("place", "replace"):
+            params = inspect.signature(getattr(a, meth)).parameters
+            check("route" in params,
+                  f"{key}.{meth}() does not take `route`. The façade passes "
+                  f"it for every broker; an adapter with no venue selection "
+                  f"accepts it, ignores it, and says so in health().")
+        # And every adapter states whether it routes at all, so the page can
+        # ask one question rather than knowing which broker it is talking to.
+        r = a.health().get("routing")
+        check(isinstance(r, dict) and "supported" in r,
+              f"{key}.health() does not carry `routing`, so the page cannot "
+              f"tell whether to offer a venue control")
 
     # NO ADAPTER MAY CARRY POLICY. The switches and the guards are the
     # façade's; an adapter that consulted them would make the real gate

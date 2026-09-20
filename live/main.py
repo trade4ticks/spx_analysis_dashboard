@@ -250,6 +250,14 @@ async def broker_positions(symbols: str = ""):
 
 @app.post("/broker/order")
 async def broker_order(req: Request):
+    """Place one order.
+
+    `route` IS PER ORDER, and optional: it names the venue for this order
+    and nothing else, with None meaning whatever the broker's default is.
+    Which routes exist, and whether the broker routes at all, comes back
+    from /broker/health under `routing` — this endpoint does not check the
+    value, because only the adapter knows what its venues are called.
+    """
     b = await req.json()
     try:
         return await broker.place(
@@ -259,7 +267,9 @@ async def broker_order(req: Request):
             price=(float(b["price"]) if b.get("price") is not None else None),
             armed=bool(b.get("armed")),
             reference=(float(b["reference"]) if b.get("reference") else None),
-            position_qty=float(b.get("position_qty") or 0))
+            position_qty=float(b.get("position_qty") or 0),
+            route=(str(b["route"]).strip().upper() or None
+                   if b.get("route") else None))
     except Exception as exc:                                # noqa: BLE001
         return _broker_fail(exc)
 
@@ -276,7 +286,9 @@ async def broker_replace(req: Request):
             price=float(b.get("price")),
             armed=bool(b.get("armed")),
             reference=(float(b["reference"]) if b.get("reference") else None),
-            position_qty=float(b.get("position_qty") or 0))
+            position_qty=float(b.get("position_qty") or 0),
+            route=(str(b["route"]).strip().upper() or None
+                   if b.get("route") else None))
     except Exception as exc:                                # noqa: BLE001
         return _broker_fail(exc)
 

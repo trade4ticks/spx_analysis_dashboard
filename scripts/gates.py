@@ -166,6 +166,11 @@ GATES = [
     # The one module where being wrong costs money rather than time.
     _s("check_broker.py",
        note="three switches, flatten cancels first, guards bound the end"),
+    # The second broker: a socket instead of an API, so the failures are
+    # different ones. Pure Python against a fake socket — no node, no DAS, no
+    # network — so it runs anywhere, the VPS included.
+    _s("check_das.py", vps=True,
+       note="an unknown status draws; the token is the match; no market data"),
 
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),

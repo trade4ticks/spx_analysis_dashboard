@@ -328,6 +328,17 @@ window.lvPane = function (id, send) {
     // right thing at any zoom.
     ladderCents: 1,
     ladderStops: [1, 2, 5],
+    /* THE VENUE FOR THE NEXT ORDER, per pane and per order.
+     *
+     * Empty means the broker's own default (SMAT on DAS, which is its smart
+     * router). Not persisted and not a setting: routing control is the
+     * reason for trading through DAS at all, and a venue chosen once in a
+     * config file and changed by restarting the service is not control.
+     *
+     * The list comes from the BROKER — DAS is asked which routes are
+     * enabled — and the control is not drawn at all when the broker does
+     * not route, so a Schwab pane is unchanged. */
+    route: '',
     // What the BROKER says, replaced wholesale on every read. Never merged
     // with a local guess: a confident wrong list of working orders is the
     // failure that costs money.
@@ -1227,7 +1238,10 @@ window.lvPane = function (id, send) {
       const y = Y(px);
       const mkt = this.isMarketable(d.order.side, px);
       const buy = String(d.order.side || '').toUpperCase().startsWith('BUY');
-      const warn = mkt !== false;
+      // DEFINITE CROSSES ONLY, the same rule as askFirst: hatching a drop
+      // because the book is quiet marks most of a session in the names this
+      // page exists for, and a warning that is always on is decoration.
+      const warn = mkt === true;
       const col = warn ? LV_MKT_HATCH
                        : (buy ? 'rgba(120,200,255,0.95)'
                               : 'rgba(240,130,180,0.95)');
@@ -1766,8 +1780,7 @@ window.lvPane = function (id, send) {
       if (!d) return '';
       const px = Number(d.price);
       const mkt = this.isMarketable(d.order.side, px);
-      const tag = mkt === true ? '  ⚠ FILLS NOW'
-                : mkt === null ? '  ⚠ no NBBO' : '';
+      const tag = mkt === true ? '  ⚠ FILLS NOW' : '';
       return `${d.order.side} ${(d.order.qty || 0) - (d.order.filled || 0)}`
            + ` → ${px.toFixed(2)}${tag}`;
     },
@@ -2078,31 +2091,35 @@ window.lvPane = function (id, send) {
      * strategy it is never the intended order, and nothing between the click
      * and the fill said so — the first news of it was the fill.
      *
-     * Sets `confirm` and returns true when the caller must stop. UNKNOWN
-     * ASKS TOO: with no NBBO the answer is "cannot tell", and treating that
-     * as "not marketable" would put the silent fill back exactly where the
-     * quote feed is worst. The two cases are worded differently so the
-     * banner never claims to know something it does not.
+     * ONLY A DEFINITE CROSS ASKS. Sets `confirm` and returns true when the
+     * price is KNOWN to be at or through the touch; `null` — no current
+     * NBBO — sends without asking.
+     *
+     * THAT USED TO ASK TOO, and it was wrong here (changed 2026-09-20).
+     * The reasoning was that unknown is not safe, so the question should be
+     * asked anyway. In practice the names worth trading on this page are
+     * quiet ones: a book that has not printed a quote in thirty seconds is
+     * the SETUP, not a warning sign, so the banner fired on almost every
+     * click in exactly the names it was least useful for — and a
+     * confirmation that fires constantly is one that gets clicked through
+     * without being read, which costs more than it saves.
+     *
+     * The feed is not the thing being doubted, either: live trade prints
+     * arrive on this page continuously, so a dead feed has no prints at
+     * all, and if quotes lag while prints keep coming the prints already say
+     * where the market is trading — which is what this guard was protecting.
+     *
+     * `isMarketable` still answers null rather than false for a stale or
+     * missing quote: a definite "this will rest" off a quote nobody has seen
+     * for five minutes would be a wrong warning rather than a missing one,
+     * and it is the wrong one that moves money.
      */
     askFirst(side, price, order) {
-      const m = this.isMarketable(side, price);
-      if (m === false) return false;
+      if (this.isMarketable(side, price) !== true) return false;
       const t = this.touch();
-      // How stale the last quote was, when there WAS one and it was simply
-      // too old to use. Distinguishes "thin session" from "no feed".
-      let staleS = null;
-      if (!t && this.quotes.length) {
-        for (let i = this.quotes.length - 1; i >= 0; i--) {
-          const q = this.quotes[i];
-          if (q && q.bp && q.ap) {
-            staleS = Math.max(0, (Date.now() - q.t) / 1000);
-            break;
-          }
-        }
-      }
       this.confirm = {
         kind: 'place', side: String(side).toUpperCase(), price: Number(price),
-        qty: Number(this.qty), unknown: m === null, staleS,
+        qty: Number(this.qty),
         bid: t ? t.bid : null, ask: t ? t.ask : null, order: order || null,
       };
       return true;
@@ -2118,18 +2135,9 @@ window.lvPane = function (id, send) {
         ? `Moving this ${c.side} to ${c.price.toFixed(2)}`
         : `${c.side} ${c.qty} @ ${c.price.toFixed(2)}`;
       const ask = move ? 'Move it anyway?' : 'Send it anyway?';
-      if (c.unknown) {
-        // The two reasons are different advice. "No quote at all" says the
-        // feed is not carrying this name; "the last one is minutes old" says
-        // the session is thin, which is the after-hours case and the one
-        // where the real spread is probably wider than anything on screen.
-        const stale = c.staleS != null
-          ? `the last NBBO for ${this.symbol} is ${Math.round(c.staleS)}s old`
-          : `there is no current NBBO for ${this.symbol}`;
-        return `${what} — ${stale}, so whether it would fill immediately `
-             + `CANNOT be determined. In a thin session the real spread is `
-             + `usually wider than the last one seen. ${ask}`;
-      }
+      // ONE CASE ONLY. The banner is raised for a price that is KNOWN to
+      // cross a CURRENT touch, so it can always name the edge — there is no
+      // longer a version of this sentence that says "cannot be determined".
       const edge = c.side === 'BUY' ? `the ask (${c.ask.toFixed(2)})`
                                     : `the bid (${c.bid.toFixed(2)})`;
       const verb = move ? 'puts it at or through' : 'is at or through';
@@ -2172,6 +2180,7 @@ window.lvPane = function (id, send) {
         symbol: this.symbol, side, qty,
         price: Number(price), armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
+        route: this.route || null,
       });
       if (j.indeterminate) {
         // NOT AN ERROR AND NOT A SUCCESS. Never retried.
@@ -2243,6 +2252,12 @@ window.lvPane = function (id, send) {
         order_id: o.order_id, symbol: this.symbol, side: o.side,
         qty, price, armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
+        // THE RESTING ORDER'S OWN VENUE, not the pane's current pick. DAS's
+        // REPLACE carries no route and cannot move an order between venues;
+        // sending the pane's choice would ask the server to do something it
+        // will refuse, in the middle of a nudge. Changing venue means
+        // cancelling and placing again, deliberately.
+        route: o.route || null,
       });
       const confirm = Math.round(performance.now() - t0);
       this.traceMark(`PUT returned in ${confirm}ms ok=${j.ok} `
@@ -3116,6 +3131,58 @@ document.addEventListener('alpine:init', () => {
 
     tradingEnabled() {
       return !!(this.brokerHealth && this.brokerHealth.trading_enabled);
+    },
+
+    /* ROUTING, AS THE BROKER DESCRIBES IT. Every adapter answers this in
+     * /broker/health, so the page never names a venue or a broker itself:
+     * Schwab says it does not route and no control is drawn; DAS says it
+     * does and hands over the routes IT reports as enabled, which is why
+     * the list cannot go stale against the account's entitlements. */
+    routing() {
+      return (this.brokerHealth && this.brokerHealth.routing) || null;
+    },
+    routes() {
+      const r = this.routing();
+      return (r && r.supported && r.choices) ? r.choices : [];
+    },
+    defaultRoute() {
+      const r = this.routing();
+      return (r && r.default) || '';
+    },
+
+    /* THE LINK, SAID QUIETLY. A pushed feed gives no other outward sign that
+     * it has died: the orders simply stop changing. This is the age of the
+     * last line DAS sent — heartbeat included — so it climbs the moment the
+     * socket goes, and it is a number in the site bar rather than a banner
+     * because DAS Trader is open on the same screen showing the same orders.
+     * Null for a broker that has no socket. */
+    linkState() {
+      const h = this.brokerHealth;
+      return (h && h.socket) || null;
+    },
+    linkText() {
+      const s = this.linkState();
+      if (!s) return '';
+      if (!s.connected) return 'DAS link down';
+      if (!s.logged_in) return 'DAS not logged in';
+      return `DAS ${s.age_s == null ? '—' : s.age_s + 's'}`;
+    },
+    linkWhy() {
+      const s = this.linkState();
+      if (!s) return '';
+      const where = s.host ? ` at ${s.host}` : '';
+      if (!s.connected) {
+        return `Not connected to DAS${where}. DAS Trader Pro has to be `
+             + `running and logged in on that machine. The orders shown are `
+             + `the last ones it pushed.`
+             + (s.last_error ? ` Last error: ${s.last_error}` : '');
+      }
+      return `How long ago DAS last sent anything — every push, and the `
+           + `ECHO heartbeat every ${s.heartbeat_s}s. State here is PUSHED, `
+           + `not polled, so this is the only thing that tells a quiet book `
+           + `from a dead socket. ${s.orders_held} orders and `
+           + `${s.positions_held} positions held; ${s.drops} drops since `
+           + `start.`;
     },
 
     statusLine() {

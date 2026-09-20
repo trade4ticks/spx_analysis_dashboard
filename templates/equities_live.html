@@ -231,6 +231,15 @@
     }
     .lv-arm.on { background:#e84393; border-color:#e84393; color:#fff; }
     .lv-inp.qty { width:56px; text-align:right; font-weight:600; }
+    /* The venue, where the broker has one. Narrow on purpose: it sits in
+       the same bar as the size and the row, and it is a choice made often
+       rather than a setting that wants space. */
+    .lv-inp.route {
+      width:80px; font-weight:600; font-variant-numeric:tabular-nums;
+    }
+    /* The link age, when it is not healthy. Same pink as every other "this
+       is not what you think it is" on the page. */
+    .lv-sub.dn { color:#e84393; }
     /* Tight, so six of them cost less width than the working-order list they
        displaced — the size being sent matters more than a list of what is
        already resting, and the resting list is now over the chart. */
@@ -438,8 +447,21 @@
                     + (brokerHealth ? brokerHealth.limits.n_429 : 0)"
             x-text="(brokerHealth ? brokerHealth.broker : '') + ' '
                     + (brokerHealth ? brokerHealth.limits.used : 0)
-                    + '/' + (brokerHealth ? brokerHealth.limits.per_min : 0)
-                    + '/min'"></span>
+                    + '/' + (brokerHealth && brokerHealth.limits.label
+                             ? brokerHealth.limits.label
+                             : (brokerHealth ? brokerHealth.limits.per_min : 0)
+                               + '/min')"></span>
+
+      <!-- THE LINK, for a broker whose state is PUSHED rather than polled.
+           There is no failed request to notice when a socket dies — the
+           orders just stop changing — so the age of the last line DAS sent
+           is the only outward sign, and it belongs on screen. Quiet, not a
+           banner: DAS Trader is open beside this page showing the same
+           orders, and this must not interrupt anything. -->
+      <span class="lv-sub" x-show="linkState()" x-cloak
+            :class="{ dn: linkState() && (!linkState().connected
+                                          || linkState().quiet) }"
+            :title="linkWhy()" x-text="linkText()"></span>
       <span class="lv-sub" x-text="statusLine()"></span>
     </div>
 
@@ -615,6 +637,32 @@
                         @click="pane.qty = q" x-text="q"></button>
               </template>
             </span>
+
+            <!-- ONLY WHERE IT MEANS SOMETHING. The broker says whether it
+                 routes; Schwab says it does not and this is not drawn, so
+                 the pane is unchanged there. On DAS the list is the routes
+                 DAS ITSELF reports as enabled, and the choice rides on the
+                 order rather than sitting in a config file that needs a
+                 restart to change. -->
+            <template x-if="routes().length">
+              <span class="lv-sub"
+                    :title="routing() ? routing().why : ''">route</span>
+            </template>
+            <template x-if="routes().length">
+              <select class="lv-inp route" x-model="pane.route"
+                      :title="'The venue for the next order from this pane. '
+                              + 'A resting order keeps the route it was '
+                              + 'placed on — a nudge reprices it there, and '
+                              + 'moving venue means cancelling and placing '
+                              + 'again.'">
+                <option value="" x-text="defaultRoute()
+                                         ? defaultRoute() + ' (default)'
+                                         : 'default'"></option>
+                <template x-for="r in routes()" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </template>
 
             <span class="lv-sub">row</span>
             <button class="lv-btn" @click="pane.ladderStep(-1)">−</button>

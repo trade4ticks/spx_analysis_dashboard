@@ -421,23 +421,55 @@ function drawn(ladderOn) {
     stalePassive: stale.isMarketable('BUY', 318.20),
   };
 
-  // The banner has to say WHICH kind of not-knowing this is.
+  // NOT KNOWING DOES NOT ASK. A five-minute-old NBBO and no NBBO at all
+  // both send: the names worth trading here are quiet ones, and a
+  // confirmation that fires on nearly every click is one that gets clicked
+  // through without being read.
   const c1 = pane();
   c1.quotes = [q(300, 318.49, 318.51)];
   c1.armed = true;
   c1.rowTooFine = () => false;
-  c1.place = async () => {};
+  let sent1 = null;
+  c1.place = async (side, price) => { sent1 = { side, price }; };
   c1.clickLadder('buy', 318.20);
-  out.staleBannerHeld = !!c1.confirm;
-  out.staleBanner = c1.confirmText();
+  out.staleHeld = !!c1.confirm;
+  out.staleSent = sent1;
+
+  // Even a price that WOULD cross the stale touch: nothing current says it
+  // does, and a warning built on a quote nobody has seen for five minutes
+  // is a guess about a market that has moved.
+  const c1b = pane();
+  c1b.quotes = [q(300, 318.49, 318.51)];
+  c1b.armed = true;
+  c1b.rowTooFine = () => false;
+  let sent1b = null;
+  c1b.place = async (side, price) => { sent1b = { side, price }; };
+  c1b.clickLadder('buy', 318.52);
+  out.staleCrossHeld = !!c1b.confirm;
+  out.staleCrossSent = sent1b;
 
   const c2 = pane();
   c2.quotes = [];
   c2.armed = true;
   c2.rowTooFine = () => false;
-  c2.place = async () => {};
+  let sent2 = null;
+  c2.place = async (side, price) => { sent2 = { side, price }; };
   c2.clickLadder('buy', 318.20);
-  out.noQuoteBanner = c2.confirmText();
+  out.noQuoteHeld = !!c2.confirm;
+  out.noQuoteSent = sent2;
+
+  // AND THE ONE THAT STILL ASKS, which is the whole remaining point of the
+  // guard: a CURRENT NBBO that the price genuinely crosses.
+  const c3 = pane();
+  c3.quotes = [q(1, 318.49, 318.51)];
+  c3.armed = true;
+  c3.rowTooFine = () => false;
+  let sent3 = null;
+  c3.place = async (side, price) => { sent3 = { side, price }; };
+  c3.clickLadder('buy', 318.52);
+  out.freshCrossHeld = !!c3.confirm;
+  out.freshCrossSent = sent3;
+  out.freshCrossText = c3.confirmText();
 }
 
 // ── dragging a working order to a new price ──────────────────────────────
@@ -1120,13 +1152,16 @@ def main() -> int:
                  f"touch counts as marketable: an order AT the offer lifts "
                  f"it.")
 
-    # UNKNOWN IS NOT SAFE. With no quote the answer must be null, so the
-    # caller asks, rather than false, which would send silently.
+    # UNKNOWN STAYS UNKNOWN. With no quote the answer must be null, never
+    # false. The CALLER no longer asks about a null (see the stale-NBBO
+    # block below), but a definite "this will rest" off a quote nobody has
+    # seen is a wrong warning rather than a missing one -- and it is the
+    # wrong one that moves money. Null also keeps the ladder hatching and the
+    # drag label honest, since both now mark only what is known to cross.
     if out["mktNoQuote"] is not None:
         fail(f"with no NBBO the marketable test returned "
-             f"{out['mktNoQuote']!r} instead of null. False here means a "
-             f"marketable order goes out unquestioned exactly when the quote "
-             f"feed is worst.")
+             f"{out['mktNoQuote']!r} instead of null. Anything definite here "
+             f"is a claim about a touch nobody has seen.")
 
     if out["passiveSent"] is None:
         fail("a PASSIVE click did not send. The guard must not stand between "
@@ -1445,9 +1480,9 @@ def main() -> int:
         fail("a buy through the ask on a fresh quote was not marketable")
     if m["stale"] is not None:
         fail(f"against a five-minute-old quote the marketable test answered "
-             f"{m['stale']!r}. It has to be null - 'cannot say' - so the "
-             f"click is asked about. Any definite answer here is a guess "
-             f"about a market nobody has seen for five minutes.")
+             f"{m['stale']!r}. It has to be null - 'cannot say' - so nothing "
+             f"is warned about. Any definite answer here is a guess about a "
+             f"market nobody has seen for five minutes.")
     if m["stalePassive"] is not None:
         fail(f"a PASSIVE-looking price answered {m['stalePassive']!r} off a "
              f"stale quote. This is the dangerous direction: a definite "
@@ -1456,20 +1491,44 @@ def main() -> int:
         fail(f"with the offer gone, a buy answered {m['oneSided']!r} instead "
              f"of 'cannot say'")
 
-    if not out["staleBannerHeld"]:
-        fail("a click against a stale NBBO was not held for confirmation")
-    sb = out["staleBanner"] or ""
-    if "300s old" not in sb.replace("  ", " "):
-        fail(f"the banner does not say how old the NBBO is: {sb!r}. 'No "
-             f"NBBO' and 'an NBBO from five minutes ago' are different "
-             f"things to be told.")
-    if "thin session" not in sb:
-        fail(f"the banner does not say the real spread is probably wider: "
-             f"{sb!r}")
-    nb = out["noQuoteBanner"] or ""
-    if "no current NBBO" not in nb:
-        fail(f"with no quotes at all the banner should say so, not quote an "
-             f"age: {nb!r}")
+    # NOT KNOWING DOES NOT ASK (changed 2026-09-20). This used to raise the
+    # banner whenever the answer was null, on the reasoning that unknown is
+    # not safe. In the names this page exists for -- deliberately quiet
+    # books, where a thirty-second-old quote is the SETUP rather than a
+    # warning -- it fired on nearly every click, and a confirmation that
+    # always fires is one that gets clicked through without being read.
+    #
+    # The feed is not what is being doubted: trade prints arrive on this page
+    # continuously, so a dead feed has no prints at all, and if quotes lag
+    # while prints keep coming, the prints already say where the market is.
+    if out["staleHeld"] or out["noQuoteHeld"] or out["staleCrossHeld"]:
+        fail("a click was held for confirmation because the NBBO was stale "
+             "or missing. That question fires constantly in a quiet book and "
+             "interrupts exactly the names this page is for.")
+    for label, got in (("a passive click against a stale NBBO",
+                        out["staleSent"]),
+                       ("a crossing click against a stale NBBO",
+                        out["staleCrossSent"]),
+                       ("a click with no NBBO at all", out["noQuoteSent"])):
+        if got is None:
+            fail(f"{label} did not send. With nothing current to say "
+                 f"otherwise, the click is the order.")
+
+    # THE WARNING THAT REMAINS, and the reason the guard is still here: a
+    # CURRENT touch that the price genuinely crosses. This one is rare, so it
+    # is still worth reading.
+    if out["freshCrossSent"] is not None:
+        fail(f"THE ONE THAT COST MONEY. A click through a CURRENT ask sent "
+             f"immediately: {out['freshCrossSent']}.")
+    if not out["freshCrossHeld"]:
+        fail("a click through a current ask was not held for confirmation")
+    ft = out["freshCrossText"] or ""
+    if "318.51" not in ft or "FILL IMMEDIATELY" not in ft:
+        fail(f"the banner does not name the edge and the consequence: "
+             f"{ft!r}")
+    if "CANNOT be determined" in ft:
+        fail(f"the banner still carries the cannot-tell wording, which is "
+             f"now unreachable: {ft!r}")
 
     # -- the order handle --------------------------------------------------
     h = out["handle"]

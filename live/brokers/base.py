@@ -60,9 +60,40 @@ THE NORMALISED SHAPES (the pane's contract; `check_broker.py` asserts them):
                        problems?: [str]}
   health()         -> dict of this broker's own facts (credentials, session,
                       limits). The façade adds the trading switches; an
-                      adapter never reports on them.
+                      adapter never reports on them. It also carries
+                      `routing` (below), which is how the page knows whether
+                      to offer a venue control at all.
   problems()       -> [str] reasons this broker could not trade right now,
                       in words a person can act on ("authorise in ...").
+
+ROUTING IS ON THE INTERFACE, and it is a per-order argument rather than a
+setting. `place` and `replace` take `route`, where None means "this adapter's
+default". A broker with no venue selection IGNORES it (Schwab has none in its
+API); a broker that routes uses it. Which of the two you are talking to is
+not something the page should have to know, so every adapter states it:
+
+  health()["routing"] = {"supported": bool,      # is route honoured at all
+                         "default": str|None,    # what None means here
+                         "choices": [str],       # offered in the UI
+                         "why": str}             # one line, for a tooltip
+
+An adapter that cannot route must report `supported: False` rather than
+accept a route and drop it silently. A venue that was chosen and quietly
+not used is worse than no control: routing is the reason to prefer one
+broker over another, so a lie about it is a lie about where the order went.
+
+WHAT IT WOULD TAKE TO ADD PostOnly, NotRouteOut OR TIF. Each is one more
+keyword here, defaulted to None, plus a line in the façade's passthrough, a
+field in the endpoint body, and a control on the pane -- five touch points
+per flag, and the signature changes again each time. If more than one of
+them is wanted at once, the honest move is to replace the keywords with a
+small frozen options object defined in this module, so a new flag is one
+field with a default and no signature change anywhere. That is deliberately
+NOT done for a single argument: an options bag with one field in it hides
+`route` from the façade, which is the layer that has to be able to see and
+guard what an order carries. See `das.build_neworder`, which already builds
+PostOnly, NotRouteOut, TIF, Display, Minume and Pref -- the protocol half of
+all four is written and gate-covered; only the wiring above it is missing.
 """
 from __future__ import annotations
 
@@ -191,21 +222,33 @@ class Broker(ABC):
     # ── changing the record ─────────────────────────────────────────────
     @abstractmethod
     async def place(self, *, symbol: str, side: str, qty: int,
-                    price: float | None) -> dict:
+                    price: float | None, route: str | None = None) -> dict:
         """Send one order. `price` None means market.
 
         Arming and the guards have already passed. Raise BrokerError if the
         broker refuses it, BrokerIndeterminate if the outcome is unknown.
+
+        `route` is the venue for THIS order, None meaning the adapter's
+        default. An adapter with no venue selection ignores it and reports
+        `routing.supported = False` from health(); it must not pretend.
         """
 
     @abstractmethod
     async def replace(self, *, order_id: str, symbol: str, side: str,
-                      qty: int, price: float) -> dict:
+                      qty: int, price: float,
+                      route: str | None = None) -> dict:
         """Reprice a working order, in ONE call where the API allows it.
 
         This is the ladder nudge: a cancel-then-place round trip loses the
         queue position and leaves a window with no order at all, so an
         adapter should use a native replace and say so here if it cannot.
+
+        `route` is carried for the same reason it is on `place`, and with
+        the same meaning. Where the wire protocol's replace cannot move an
+        order between venues (DAS's cannot -- REPLACE takes no route), an
+        adapter may only honour a route that MATCHES the resting order and
+        must refuse one that does not, rather than repricing it somewhere
+        the caller did not ask for.
         """
 
     @abstractmethod

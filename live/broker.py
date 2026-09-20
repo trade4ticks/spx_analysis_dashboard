@@ -276,8 +276,15 @@ async def reconcile(*, symbol: str, side: str, qty: float,
 # ── orders ──────────────────────────────────────────────────────────────────
 async def place(*, symbol: str, side: str, qty: int, price: float | None,
                 armed: bool, reference: float | None,
-                position_qty: float) -> dict:
-    """Arm, guard, then send. In that order, for every broker."""
+                position_qty: float, route: str | None = None) -> dict:
+    """Arm, guard, then send. In that order, for every broker.
+
+    `route` PASSES STRAIGHT THROUGH and is not policy. Which venue an order
+    goes to is a trading choice made per order on the page, not a safety
+    limit — the guards bound size, ending position, notional and distance,
+    and none of those change with the venue. The adapter decides what an
+    unknown route means, because only it knows which ones exist.
+    """
     why = _armed_check(armed)
     if why:
         raise BrokerError(why)
@@ -285,12 +292,13 @@ async def place(*, symbol: str, side: str, qty: int, price: float | None,
                        reference=reference, position_qty=position_qty)
     if why:
         raise BrokerError(f"refused by the guards: {why}")
-    return await _broker().place(symbol=symbol, side=side, qty=qty, price=price)
+    return await _broker().place(symbol=symbol, side=side, qty=qty,
+                                 price=price, route=route)
 
 
 async def replace(*, order_id: str, symbol: str, side: str, qty: int,
                   price: float, armed: bool, reference: float | None,
-                  position_qty: float) -> dict:
+                  position_qty: float, route: str | None = None) -> dict:
     """Reprice. Same two checks as a placement — a nudge is an order.
 
     The guards run on the REPRICED order, not the original: repricing is
@@ -305,7 +313,7 @@ async def replace(*, order_id: str, symbol: str, side: str, qty: int,
     if why:
         raise BrokerError(f"refused by the guards: {why}")
     return await _broker().replace(order_id=order_id, symbol=symbol, side=side,
-                                   qty=qty, price=price)
+                                   qty=qty, price=price, route=route)
 
 
 async def cancel(*, order_id: str) -> dict:
@@ -353,6 +361,14 @@ def health() -> dict:
         "max_notional": config.MAX_NOTIONAL,
         "max_limit_distance_pct": config.MAX_LIMIT_DISTANCE_PCT,
     }
+    # THE SHAPE IS GUARANTEED HERE so the page can ask one question —
+    # "does this broker route?" — of whichever adapter is loaded. An
+    # adapter that says nothing is one that does not route, which is the
+    # answer that offers no control rather than a control that does nothing.
+    h.setdefault("routing", {
+        "supported": False, "default": None, "choices": [],
+        "why": "this broker's API has no venue selection.",
+    })
     return h
 
 

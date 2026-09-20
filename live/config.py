@@ -297,6 +297,75 @@ REFRESH_MARGIN_S = int(os.environ.get("SCHWAB_REFRESH_MARGIN_S", "60"))
 SCHWAB_CALLS_PER_MIN = int(os.environ.get("SCHWAB_CALLS_PER_MIN", "120"))
 SCHWAB_CALL_RESERVE = int(os.environ.get("SCHWAB_CALL_RESERVE", "30"))
 
+# ── DAS Trader (the CMD API) ────────────────────────────────────────────────
+#
+# A PERSISTENT TCP SOCKET, not an HTTP API, and that shapes everything in
+# live/brokers/das.py. DAS Trader Pro runs on the Windows machine; this
+# service reaches it over Tailscale, so the host is that machine's Tailscale
+# address and it CHANGES when trading from a different box. Hence config,
+# never a constant.
+#
+# DAS MUST BE RUNNING AND LOGGED IN for the socket to exist at all. Closing
+# the platform drops the connection, and the adapter says so in health()
+# rather than letting it look like a quiet failure.
+DAS_HOST = os.environ.get("LIVE_DAS_HOST", "").strip()
+DAS_PORT = int(os.environ.get("LIVE_DAS_PORT", "9910"))
+
+# LOGIN Trader Password Account 0 — the first line after connecting.
+DAS_TRADER = os.environ.get("LIVE_DAS_TRADER", "")
+DAS_PASSWORD = os.environ.get("LIVE_DAS_PASSWORD", "")
+DAS_ACCOUNT = os.environ.get("LIVE_DAS_ACCOUNT", "")
+
+# THE DEFAULT VENUE, used when an order names none. SMAT is DAS's smart
+# router and the only route that supports every order type (the manual is
+# explicit: LIMIT, MARKET and STOP require SMAT). The page picks a route per
+# order; this is only what "no choice" means.
+DAS_ROUTE = os.environ.get("LIVE_DAS_ROUTE", "SMAT").strip().upper()
+
+# WHICH ROUTES THE PAGE OFFERS. Left empty on purpose: the adapter asks DAS
+# itself with `GET RouteStatus` on login and offers the ENABLED ones, so the
+# list is the broker's answer rather than a guess that goes stale when Cobra
+# changes what is entitled. This is the fallback for a DAS build that does
+# not answer that command.
+DAS_ROUTES = [r.strip().upper() for r in
+              os.environ.get("LIVE_DAS_ROUTES", "SMAT").split(",") if r.strip()]
+
+# HOW OFTEN LIVENESS IS PROVEN. The CMD API pushes order and position
+# updates, so there is no poll whose success would stand in for "the socket
+# is alive" — on a quiet name nothing arrives for minutes. ECHO is a cheap
+# command the server answers immediately and it is not one of the rate-limited
+# order commands, so it is the heartbeat: every reply (any line at all)
+# stamps `confirmed_at`, which is what `as_of` reports.
+DAS_HEARTBEAT_S = float(os.environ.get("LIVE_DAS_HEARTBEAT_S", "3"))
+
+# How long to wait for the push that confirms a command we just sent. An
+# order that has not been acknowledged in this long is UNKNOWN, not failed.
+DAS_ACK_S = float(os.environ.get("LIVE_DAS_ACK_S", "3"))
+DAS_CONNECT_TIMEOUT_S = float(os.environ.get("LIVE_DAS_CONNECT_TIMEOUT_S", "5"))
+# The initial #POS/#Order/#Trade dump after login. Until it has arrived this
+# process has never seen the record, and an empty list would be a fabrication
+# rather than a stale answer — so reads refuse until it lands.
+DAS_SNAPSHOT_S = float(os.environ.get("LIVE_DAS_SNAPSHOT_S", "6"))
+
+# DAS stamps orders and trades HH:MM:SS with no date and no zone — the
+# platform's local time, which is the Windows machine's, not this box's. The
+# normalised `entered` field is ISO with an offset, so the zone has to come
+# from somewhere; it comes from here.
+DAS_TZ = os.environ.get("LIVE_DAS_TZ", "America/New_York")
+
+# THE PUBLISHED LIMITS (manual, "Limitations"), adjustable by arrangement
+# with DAS. Nothing here comes close to them at one person's clicking speed —
+# they exist so that the one call that must never be refused for quota is not
+# the one that gets flat. Each bucket keeps a reserve only cancel, flatten
+# and reconcile may spend.
+DAS_ORDERS_PER_SEC = int(os.environ.get("LIVE_DAS_ORDERS_PER_SEC", "50"))
+DAS_ORDER_RESERVE = int(os.environ.get("LIVE_DAS_ORDER_RESERVE", "5"))
+DAS_CANCELS_PER_MIN = int(os.environ.get("LIVE_DAS_CANCELS_PER_MIN", "100"))
+DAS_CANCEL_RESERVE = int(os.environ.get("LIVE_DAS_CANCEL_RESERVE", "25"))
+DAS_REPLACES_PER_MIN = int(os.environ.get("LIVE_DAS_REPLACES_PER_MIN", "100"))
+DAS_REPLACE_RESERVE = int(os.environ.get("LIVE_DAS_REPLACE_RESERVE", "0"))
+
+
 # ── the fat-finger guards ───────────────────────────────────────────────────
 #
 # One mistyped quantity at eight-second holds is expensive, and a mistyped
@@ -342,4 +411,15 @@ def problems() -> list[str]:
                    ".env.")
     if MAX_SYMBOLS < 1:
         out.append("LIVE_MAX_SYMBOLS must be at least 1.")
+    # Only for the broker actually selected: a box pointed at Schwab should
+    # not be told about DAS settings it has no reason to have.
+    if BROKER == "das":
+        if not DAS_HOST:
+            out.append("LIVE_DAS_HOST is not set — the DAS CMD API is a "
+                       "socket on the machine running DAS Trader Pro, "
+                       "reachable here over Tailscale.")
+        if not (DAS_TRADER and DAS_PASSWORD and DAS_ACCOUNT):
+            out.append("LIVE_DAS_TRADER / LIVE_DAS_PASSWORD / "
+                       "LIVE_DAS_ACCOUNT are not all set, so the socket "
+                       "cannot log in and no order can be placed.")
     return out

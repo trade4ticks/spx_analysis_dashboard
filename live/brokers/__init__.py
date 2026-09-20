@@ -27,9 +27,15 @@ def _schwab() -> Broker:
     return SchwabBroker()
 
 
+def _das() -> Broker:
+    from live.brokers.das import DasBroker
+    return DasBroker()
+
+
 # key -> factory. The key is what LIVE_BROKER is set to.
 _ADAPTERS = {
     "schwab": _schwab,
+    "das": _das,
 }
 
 _active: Broker | None = None

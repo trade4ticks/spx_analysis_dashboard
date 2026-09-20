@@ -114,6 +114,66 @@ The proper fix is a single owner for the refresh.
 
 ---
 
+## DAS Trader (the CMD API) — the second broker
+
+**One is live at a time**, chosen by `LIVE_BROKER` (`schwab` | `das`,
+default `schwab`). An unknown value raises rather than falling back, so a
+box meant for one broker cannot quietly keep trading through the other.
+Switching brokers needs a restart: the adapter is resolved once per process.
+
+### It is a socket on the Windows machine, reached over Tailscale
+
+DAS Trader Pro runs on the trading machine and listens on its CMD API port.
+The VPS connects to it over Tailscale:
+
+```
+root@Trading:~# telnet 100.96.29.108 9910
+Connected to 100.96.29.108.
+#Welcome to DAS Command API
+#Please login to continue.
+```
+
+**DAS has to be running and logged in for the socket to exist**, and the
+address is that machine's — it changes when trading from a different box,
+which is why it is configuration and not a constant.
+
+### `.env` on the VPS
+
+| key | what it is |
+|---|---|
+| `LIVE_BROKER` | `das` to trade through DAS; anything else keeps Schwab |
+| `LIVE_DAS_HOST` | the Tailscale address of the machine running DAS |
+| `LIVE_DAS_PORT` | CMD API port, default `9910` |
+| `LIVE_DAS_TRADER` / `LIVE_DAS_PASSWORD` / `LIVE_DAS_ACCOUNT` | the `LOGIN` line |
+| `LIVE_DAS_ROUTE` | default venue, `SMAT` (DAS's smart router) |
+| `LIVE_DAS_ROUTES` | fallback venue list; normally unused — the adapter asks DAS with `GET RouteStatus` and offers what it reports as enabled |
+| `LIVE_DAS_TZ` | the zone DAS stamps its times in, default `America/New_York` |
+| `LIVE_DAS_HEARTBEAT_S` / `LIVE_DAS_ACK_S` / `LIVE_DAS_SNAPSHOT_S` | liveness proof, acknowledgement wait, first-record wait |
+
+The CMD API has to be enabled for the user in DAS itself:
+**Menu → Setup → Other Configuration**, and the port is configured there
+too. Entering an order always requires the CMD API to be logged in, whatever
+"Disable Logon Check" is set to.
+
+### What it looks like on the page
+
+The site bar carries `DAS <n>s` — how long ago DAS last sent anything, the
+ECHO heartbeat included. **That number is the only outward sign a pushed
+feed gives.** It goes pink and reads `DAS link down` when the platform is
+closed; the order list stays on screen, because DAS Trader is open beside
+this page showing the same orders and a divergence is visible immediately.
+The trade bar grows a **route** dropdown, per pane and per order, only when
+the broker says it routes — a Schwab pane is unchanged.
+
+### Rate limits
+
+DAS's published defaults, adjustable by arrangement with them: NEWORDER
+50/second, CANCEL 100/minute, REPLACE 100/minute. Each is its own bucket
+with a reserve only cancel, flatten and reconcile may spend, so getting flat
+is never the command refused for quota.
+
+---
+
 ## Cloudflare's 100-second origin limit (HTTP 524)
 
 **Symptom.** A long request "fails in the browser" while the application

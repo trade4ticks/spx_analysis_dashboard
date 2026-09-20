@@ -789,8 +789,19 @@ def _equity_order(side: str, qty: int, symbol: str,
 
 
 async def place(*, symbol: str, side: str, qty: int,
-                price: float | None) -> dict:
-    """Send one order. Arming and the guards have already passed upstream."""
+                price: float | None, route: str | None = None) -> dict:
+    """Send one order. Arming and the guards have already passed upstream.
+
+    `route` IS ACCEPTED AND IGNORED, and that is reported rather than
+    hidden: the Trader API exposes no venue selection at all — an equity
+    order body has session, duration, strategy, type, price and legs, and
+    nothing that names an exchange. So health() says `routing.supported =
+    False`, the page offers no venue control while Schwab is the broker,
+    and a route arriving here anyway (a stale page, a hand-typed request)
+    is logged and dropped rather than being allowed to look honoured.
+    """
+    if route:
+        log.info("Schwab has no venue selection; route %r ignored", route)
     hv = await account_hash()
     data, status, ms = await _acall("POST", f"/accounts/{hv}/orders",
                                     body=_equity_order(side, qty, symbol,
@@ -803,12 +814,16 @@ async def place(*, symbol: str, side: str, qty: int,
 
 
 async def replace(*, order_id: str, symbol: str, side: str, qty: int,
-                  price: float) -> dict:
+                  price: float, route: str | None = None) -> dict:
     """Reprice. A replace is one call, and it is how the ladder nudge moves.
 
     ONE CALL, not cancel-then-place: the round trip would lose the queue
     position and leave a window with no order resting at all.
+
+    `route` is ignored here for the reason given on `place`.
     """
+    if route:
+        log.info("Schwab has no venue selection; route %r ignored", route)
     hv = await account_hash()
     data, status, ms = await _acall(
         "PUT", f"/accounts/{hv}/orders/{order_id}",
@@ -894,6 +909,13 @@ def health() -> dict:
                                  and config.SCHWAB_API_SECRET),
         "last_error": _last_error,
         "limits": LIMITER.state(),
+        # NO VENUE SELECTION IN THIS API. Stated, so the page can leave the
+        # route control out rather than offering one that does nothing.
+        "routing": {
+            "supported": False, "default": None, "choices": [],
+            "why": "the Schwab Trader API takes no route on an equity order "
+                   "— the venue is Schwab's to choose.",
+        },
     }
 
 
@@ -933,12 +955,13 @@ class SchwabBroker(base.Broker):
         # reason this method exists (see state()).
         return await state(symbols, priority)
 
-    async def place(self, *, symbol, side, qty, price):
-        return await place(symbol=symbol, side=side, qty=qty, price=price)
+    async def place(self, *, symbol, side, qty, price, route=None):
+        return await place(symbol=symbol, side=side, qty=qty, price=price,
+                           route=route)
 
-    async def replace(self, *, order_id, symbol, side, qty, price):
+    async def replace(self, *, order_id, symbol, side, qty, price, route=None):
         return await replace(order_id=order_id, symbol=symbol, side=side,
-                             qty=qty, price=price)
+                             qty=qty, price=price, route=route)
 
     async def cancel(self, *, order_id):
         return await cancel(order_id=order_id)

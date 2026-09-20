@@ -85,6 +85,83 @@ Adapter internals are now `schwab.*` — the checks and probes monkeypatch
 adapter (a broker-API fact); the rule they serve — getting flat must never be
 refused for quota — stays in the façade's `priority` flags.
 
+### DAS Trader, the second adapter (2026-09-20)
+
+`live/brokers/das.py`, selected with `LIVE_BROKER=das`. Schwab is untouched
+and still the default. **It is a socket, not an API**, and that is the whole
+difference: one persistent TCP connection to DAS Trader Pro on the Windows
+machine (Tailscale address in `LIVE_DAS_HOST`, port 9910), plain-text lines,
+CRLF. DAS must be running and logged in for the socket to exist.
+
+**State is PUSHED** (`%ORDER`, `%OrderAct`, `%TRADE`, `%POS`), so a read is a
+cache lookup, not a call — microseconds against Schwab's ~850 ms. Nothing
+polls, which means no request's success stands in for freshness: `as_of` is
+**when the socket was last proven alive**, and an `ECHO` heartbeat every
+`LIVE_DAS_HEARTBEAT_S` (3s) produces that proof on a quiet name. A snapshot
+(`#POS`/`#POSEND`, `#Order`/`#OrderEnd`) REPLACES the cache; the end markers
+are tested before the start markers, because `#POSEND` starts with `#POS`.
+
+**The token is a real client order id**, so `reconcile` is overridden and
+matches on it exactly — `ambiguous` is unreachable, unlike Schwab's shape
+match. The token→placement map is this process's; if the service restarted
+between the placement and the reconcile it falls back to
+`base.match_placement` and says `matched_on: "shape"`. Tokens are C ints,
+minted high in the positive half so they cannot collide with the montage's.
+
+**The acknowledgement is claimed before the command is written.** Over a
+local socket the `%ORDER` can arrive inside the `await` that sends the
+NEWORDER; registering after would lose it and report a resting order as
+UNKNOWN. Gate-covered by pushing the reply synchronously from the write.
+
+**`TimeOut` and `Send_Rej` are `BrokerIndeterminate`** and never retried; a
+`%ORDER` status of `Rejected`, and `CancelRej`/`ReplaceRej`, are determinate
+`BrokerError`. Working statuses: `Hold`, `Sending`, `Accepted`, `Partial`,
+`Triggered`; terminal: `Closed`, `Canceled`, `Rejected`, `Executed`; an
+unrecognised status resolves to **working**, as the interface requires.
+
+**A quiet or dropped link still answers**, from the cache, with `as_of`
+frozen so the age climbs — DAS Trader is on screen showing the same orders,
+so blocking the pane would interrupt more than it protects. The one refusal
+is a read taken before the first snapshot has EVER arrived: an empty list
+there is a fabrication, not a stale answer.
+
+**Deliberately absent:** no market data (`SB`, Level 1/2, time & sales,
+charts) — the tape is Polygon's and there is no depth of book in this API;
+`check_das.py` fails if a subscription command appears. `%POS Unrealized` is
+not used (the manual says it is a snapshot from when the position was sent);
+`day_pl` carries `Realized` and the pane computes open P&L from the tape.
+
+**Routing is on the interface** (`place`/`replace` take `route`) because
+venue control is the reason for the move to Cobra. `None` means the
+adapter's default; Schwab accepts it, ignores it and reports
+`routing.supported = False` from `health()`, so the page draws no control
+there. The venue list comes from DAS itself (`GET RouteStatus`). DAS's
+`REPLACE` carries no route, so a reprice onto a different venue is
+**refused**, not silently ignored — changing venue means cancel and place.
+`das.build_neworder` already builds `PostOnly`, `NotRouteOut`, `TIF`,
+`Display`, `Minume` and `Pref`; wiring any of them up is interface, façade,
+endpoint and control, and the protocol half is written and gate-covered.
+
+Gate: `scripts/check_das.py`, 19 cases against a fake socket (no network, no
+DAS). Runs on the VPS too — pure Python.
+
+### The marketable-click guard: only a definite cross asks (2026-09-20)
+
+`askFirst` used to raise the confirmation whenever `isMarketable` returned
+null — no current NBBO — on the reasoning that unknown is not safe. Removed:
+the names traded here are deliberately quiet, so a thirty-second-old quote
+is the setup rather than a warning sign, and the banner fired on nearly
+every click in exactly those names. A confirmation that always fires is one
+that gets clicked through without being read. Live trade prints arrive
+continuously, so a dead feed has no prints at all, and lagging quotes beside
+arriving prints still say where the market is.
+
+**What stays:** the warning for a price that crosses a CURRENT touch, and
+`isMarketable` answering null rather than false for a stale or missing quote
+(a definite "this will rest" off an unseen touch is a wrong warning, and the
+wrong one is what moves money). The ladder hatching and the drag label now
+mark only what is known to cross, for the same reason.
+
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —
