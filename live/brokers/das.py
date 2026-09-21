@@ -690,6 +690,15 @@ class DasLink:
         self.routes: dict[str, bool] = {}
         self.order_server: str | None = None
 
+        # WHAT ARRIVED, for the next time something like the #OrderServer
+        # confusion happens. `_heads_seen` is what has been logged once;
+        # `unhandled` counts line kinds nothing claimed, and rides in health()
+        # so the box can answer "what is DAS actually sending" without a
+        # packet capture or a second telnet session.
+        self._heads_seen: set[str] = set()
+        self.unhandled: dict[str, int] = {}
+        self._logged_lines = 0
+
         # Tokens this process minted, and what each was for. This is what
         # makes reconcile exact; see `reconcile`.
         self.minted: dict[int, dict] = {}
@@ -770,6 +779,9 @@ class DasLink:
         self.confirmed_at = time.time()
         self.n_connects += 1
         self.order_snapshot = self.pos_snapshot = False
+        # THE BANNER, EVERY CONNECT. The login dump is where a parsing fault
+        # shows itself, and it is gone by the time anyone thinks to look.
+        self._logged_lines = 0
         self.task = asyncio.create_task(self._read_loop())
         loop = asyncio.get_running_loop()
         self._login_wait = loop.create_future()
@@ -841,6 +853,16 @@ class DasLink:
                 self.confirmed_at = time.time()
                 line = raw.decode("utf-8", "replace").strip()
                 if line:
+                    # RAW, AT CONNECT. The first DAS_LOG_LINES lines of each
+                    # connection go to the journal verbatim -- the login
+                    # banner is exactly what was wanted and missing when the
+                    # snapshot silently never arrived. After that the volume
+                    # is the tape's, so it drops to DEBUG.
+                    if self._logged_lines < config.DAS_LOG_LINES:
+                        self._logged_lines += 1
+                        log.info("DAS <- %s", line[:300])
+                    else:
+                        log.debug("DAS <- %s", line[:300])
                     try:
                         self._dispatch(line)
                     except Exception:                       # noqa: BLE001
@@ -898,28 +920,54 @@ class DasLink:
         than only in the read loop: a push and a heartbeat reply are the same
         evidence, and `as_of` is built on this one number.
 
-        THE END MARKERS ARE CHECKED FIRST, and that is not a style choice:
-        `#POSEND` starts with `#POS`, `#OrderEnd` with `#Order` and
-        `#TradeEnd` with `#Trade`. Testing the prefixes in the other order
-        would treat the end of every snapshot as the start of a new one, and
-        the record would be wiped exactly when it had just been filled.
+        DISPATCH IS ON THE EXACT FIRST TOKEN, never on a prefix.
+
+        This was `startswith`, with the end markers tested first because
+        `#POSEND` starts with `#POS`, `#OrderEnd` with `#Order` and `#TradeEnd`
+        with `#Trade`. That ordering was right and still insufficient: it
+        handles the end markers it knows about and nothing else. `#OrderServer`
+        ALSO starts with `#Order`, so a routine order-server status line was
+        read as the start of a fresh order snapshot. It cleared
+        `order_snapshot`, so `_ready` refused every read for the rest of the
+        session, and it opened a staging buffer that no `#OrderEnd` ever
+        closed, so every order pushed afterwards was filed into a dict nobody
+        reads. Orders placed from the pane went to DAS and worked; the pane
+        never showed one. (Found 2026-09-21; the login banner itself was
+        always parsed correctly.)
+
+        A prefix test cannot be made safe by ordering, because the next
+        `#Order*` line DAS adds breaks it again. The head is therefore matched
+        WHOLE: `#OrderServer` and `#Order` are different tokens and stay that
+        way, and a name nobody here knows falls through to `unhandled`, where
+        it is counted and logged once rather than mistaken for something else.
         """
         self.confirmed_at = time.time()
         up = line.upper()
+        # `#OrderServer: Connected` -- the colon belongs to the punctuation,
+        # not the name.
+        head = (up.split(None, 1)[0] if up.split() else up).rstrip(":")
+        if head not in self._heads_seen:
+            self._heads_seen.add(head)
+            # THE FIRST OF EACH KIND, ONCE. This is what makes the next
+            # surprise diagnosable from the journal instead of from a guess:
+            # an `#OrderServer` line would have appeared here the first time
+            # it arrived, next to the snapshot markers it was being confused
+            # with.
+            log.info("DAS <- first %s line: %s", head, line[:200])
 
-        if up.startswith("#POSEND"):
+        if head == "#POSEND":
             if self._staging_pos is not None:
                 self.positions = self._staging_pos
                 self._staging_pos = None
             self.pos_snapshot = True
             return
-        if up.startswith("#ORDEREND"):
+        if head == "#ORDEREND":
             if self._staging_orders is not None:
                 self.orders = self._staging_orders
                 self._staging_orders = None
             self.order_snapshot = True
             return
-        if up.startswith("#TRADEEND"):
+        if head == "#TRADEEND":
             if self._staging_fills is not None:
                 self.fills = self._staging_fills
                 self._staging_fills = None
@@ -928,42 +976,42 @@ class DasLink:
         # A snapshot REPLACES what is held rather than merging into it. An
         # order that filled or was cancelled elsewhere has to disappear, and
         # a merge is how a phantom order stays on the screen.
-        if up.startswith("#POS"):
+        if head == "#POS":
             self._staging_pos = {}
             self.pos_snapshot = False
             return
-        if up.startswith("#ORDER"):
+        if head == "#ORDER":
             self._staging_orders = {}
             self.order_snapshot = False
             return
-        if up.startswith("#TRADE"):
+        if head == "#TRADE":
             self._staging_fills = {}
             return
 
-        if up.startswith("%POS"):
+        if head == "%POS":
             p = parse_pos(line)
             if p and p["symbol"]:
                 (self._staging_pos if self._staging_pos is not None
                  else self.positions)[p["symbol"]] = p
             return
-        if up.startswith("%ORDERACT"):
+        if head == "%ORDERACT":
             self._on_order_act(line)
             return
-        if up.startswith("%ORDER"):
+        if head == "%ORDER":
             self._on_order(line)
             return
-        if up.startswith("%TRADE"):
+        if head == "%TRADE":
             self._on_trade(line)
             return
 
-        if up.startswith("$ROUTESTATUS"):
+        if head == "$ROUTESTATUS":
             parts = line.split()
             if len(parts) >= 3:
                 self.routes[parts[1].upper()] = \
                     parts[2].strip().upper() == "ENABLED"
             return
 
-        if up.startswith("#ORDERSERVER") or up.startswith("#QUOTESERVER"):
+        if head in ("#ORDERSERVER", "#QUOTESERVER"):
             # The socket can be perfectly alive while the order server behind
             # it is not, which is a different failure and worth naming.
             self.order_server = line
@@ -971,9 +1019,14 @@ class DasLink:
                 log.warning("DAS: %s", line)
             return
 
-        if up.startswith("#LOGIN") or "LOGIN" in up[:20]:
+        if head == "#LOGIN" or "LOGIN" in up[:20]:
             self._on_login(line, up)
             return
+
+        # NOTHING MATCHED. Counted by head and left alone: the next line DAS
+        # adds should show up in health() as a name nobody handled, not get
+        # folded into whichever branch its prefix happens to resemble.
+        self.unhandled[head] = self.unhandled.get(head, 0) + 1
 
     def _on_login(self, line: str, up: str) -> None:
         """Settle the login wait.
@@ -1207,6 +1260,12 @@ class DasLink:
             "drops": self.n_drops,
             "order_server": self.order_server,
             "last_error": self.last_error,
+            # WHAT ARRIVED THAT NOTHING CLAIMED, by line kind. Empty is the
+            # normal answer; a name in here is DAS saying something this
+            # adapter has never been taught, which is worth seeing on the
+            # health page rather than discovering the next time a snapshot
+            # quietly never arrives.
+            "unhandled": dict(self.unhandled),
         }
 
 

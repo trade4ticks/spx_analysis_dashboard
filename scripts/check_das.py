@@ -1042,6 +1042,143 @@ def case_route_list():
         use(link)
 
 
+
+# ── the login banner, and what comes after it ───────────────────────────────
+#
+# CAPTURED FROM THE REAL PLATFORM by telnet on 2026-09-21, pasted verbatim.
+# Everything about this sequence had been guessed from the manual until then,
+# and three of the guesses were candidates for why the pane never showed an
+# order: the ack is SUCCESSED and not SUCCESS, an account with no orders sends
+# only the header and the END marker with no %ORDER lines at all, and
+# #SLOrder / #SLOrderEnd sit in the same dump. All three turned out to be
+# handled. The fault was a line that arrives AFTER the banner.
+LOGIN_BANNER = [
+    "#LOGIN SUCCESSED",
+    "#POS symb type qty avgcost initqty initprice Realized CreatTime Unrealized",
+    "#POSEND",
+    "#Order id token symb b/s mkt/lmt qty lvqty cxlqty price route status "
+    "time origoid account trader orderSrc TIF Pref",
+    "#OrderEnd",
+    "#Trade id symb b/s qty price route time orderid Liq EcnFee PL",
+    "#TradeEnd",
+    "#SLOrder id symb shares openshares exeshares exeprice status route time "
+    "lmtPrice token notes",
+    "#SLOrderEnd",
+]
+
+
+def case_login_banner():
+    """The real banner is recognised, and an EMPTY account still counts.
+
+    The dump for an account holding nothing is headers and END markers with
+    no rows between them. If arrival depended on seeing a row, it would never
+    come -- and the snapshot guard would then refuse every read for the whole
+    session, which is exactly what the pane showed.
+    """
+    link = use(live_link(record=False))
+    check(not link.order_snapshot and not link.pos_snapshot,
+          "the link began believing it had a record")
+    for ln in LOGIN_BANNER:
+        link._dispatch(ln)
+    check(link.order_snapshot,
+          "the order snapshot was not recognised from the real login banner — "
+          "headers and an END marker with no rows IS the answer for an empty "
+          "account")
+    check(link.pos_snapshot, "the position snapshot was not recognised")
+    check(link.orders == {} and link.positions == {},
+          f"an empty dump invented a record: {link.orders} {link.positions}")
+
+    # SUCCESSED, not SUCCESS: the ack settles the login wait either way.
+    link2 = use(live_link(record=False))
+    fut = asyncio.new_event_loop().create_future()
+    link2._login_wait = fut
+    link2._dispatch("#LOGIN SUCCESSED")
+    check(fut.done() and fut.result() is True,
+          "#LOGIN SUCCESSED did not settle the login wait")
+
+
+def case_order_server_line():
+    """`#OrderServer` IS NOT THE START OF AN ORDER SNAPSHOT.
+
+    THE 2026-09-21 FAULT, in one line. Dispatch matched prefixes, so
+    `#OrderServer Connected` -- a routine status push -- was read as the
+    header of a fresh order dump. It cleared `order_snapshot`, so `_ready`
+    refused every read for the rest of the session and the pane stayed empty,
+    and it opened a staging buffer that no `#OrderEnd` ever closed, so every
+    order pushed afterwards was filed where nothing reads. Orders reached DAS
+    and worked; none of them ever appeared.
+    """
+    link = use(live_link(record=False))
+    for ln in LOGIN_BANNER:
+        link._dispatch(ln)
+
+    for status in ("#OrderServer Connected", "#OrderServer: OK",
+                   "#QuoteServer Connected"):
+        link._dispatch(status)
+        check(link.order_snapshot,
+              f"{status!r} cleared the order snapshot — it is a status line, "
+              f"not the header of a new dump, and the read guard never "
+              f"recovers because a snapshot only arrives at login")
+        check(link._staging_orders is None,
+              f"{status!r} opened a staging buffer nothing will close; every "
+              f"order pushed after it goes somewhere nobody reads")
+
+    # AND THE ORDER ARRIVES. The end-to-end symptom was not a flag, it was an
+    # order that worked at DAS and never drew, so the case ends where the pane
+    # does: read_orders returning it.
+    link._dispatch(ORDER_18)
+    out = asyncio.run(das.read_orders())
+    ids = [o["order_id"] for o in out["working"] + out["recent"]]
+    check("1" in ids, f"the order did not reach the pane's read: {ids}")
+
+    # Unknown heads are COUNTED, not guessed at. #SLOrder is the standing
+    # example: it is in the banner, this adapter does not model short locates,
+    # and it must not be mistaken for anything else.
+    check(link.unhandled.get("#SLORDER") == 1
+          and link.unhandled.get("#SLORDEREND") == 1,
+          f"short-locate lines were not counted as unhandled: {link.unhandled}")
+    check("#ORDER" not in link.unhandled and "#ORDERSERVER" not in link.unhandled,
+          f"a line that WAS handled is also counted unhandled: {link.unhandled}")
+    check("unhandled" in link.state(),
+          "the link's state does not carry what arrived unhandled, which is "
+          "how the next surprise gets diagnosed from the box")
+
+
+def case_head_matching():
+    """The head is matched WHOLE. A prefix test cannot be made safe by order.
+
+    Ordering the checks fixed `#OrderEnd` vs `#Order` and nothing else: the
+    next `#Order*` line DAS adds breaks it again, which is precisely what
+    `#OrderServer` did.
+    """
+    cases = [
+        # line                        starts a dump?   ends one?
+        ("#Order id token symb",      "start_orders",  None),
+        ("#OrderEnd",                 None,            "end_orders"),
+        ("#OrderServer Connected",    None,            None),
+        ("#OrderStatus whatever",     None,            None),   # invented
+        ("#POS symb type qty",        "start_pos",     None),
+        ("#POSEND",                   None,            "end_pos"),
+        ("#POSITIONLIMIT 3",          None,            None),   # invented
+    ]
+    for line, starts, ends in cases:
+        link = use(live_link(record=False))
+        link.order_snapshot = link.pos_snapshot = True
+        link._dispatch(line)
+        if starts == "start_orders":
+            check(not link.order_snapshot and link._staging_orders == {},
+                  f"{line!r} did not open an order dump")
+        elif starts == "start_pos":
+            check(not link.pos_snapshot and link._staging_pos == {},
+                  f"{line!r} did not open a position dump")
+        else:
+            check(link.order_snapshot and link.pos_snapshot,
+                  f"{line!r} was mistaken for the start of a dump — it shares "
+                  f"a prefix with one, which is not the same as being one")
+            check(link._staging_orders is None and link._staging_pos is None,
+                  f"{line!r} opened a staging buffer")
+
+
 def case_interface():
     """It is a Broker, and it answers the façade's questions."""
     try:
@@ -1076,6 +1213,9 @@ def case_interface():
 
 CASES = [
     ("order statuses", case_statuses),
+    ("the real login banner", case_login_banner),
+    ("#OrderServer is not a snapshot", case_order_server_line),
+    ("the head is matched whole", case_head_matching),
     ("the route list is the montage", case_route_list),
     ("the %ORDER layouts", case_order_layout),
     ("%OrderAct notes and token", case_order_act),

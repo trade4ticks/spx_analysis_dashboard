@@ -351,6 +351,17 @@ DAS_ROUTES = [r.strip().upper() for r in
               os.environ.get("LIVE_DAS_ROUTES", _DAS_MONTAGE_ROUTES).split(",")
               if r.strip()]
 
+# HOW MANY INBOUND LINES ARE LOGGED VERBATIM AFTER EACH CONNECT.
+#
+# The login dump — #LOGIN, the position/order/trade headers and their END
+# markers — is where a parsing fault announces itself, and it has scrolled past
+# by the time anyone knows to look. On 2026-09-21 an `#OrderServer` status line
+# was being read as the start of a fresh order snapshot, and the journal held
+# only the resulting warning: nothing about what had actually arrived. Sixty
+# lines covers the banner and the first moments after it; past that the volume
+# is the tape's and logging drops to DEBUG.
+DAS_LOG_LINES = int(os.environ.get("LIVE_DAS_LOG_LINES", "60"))
+
 # HOW OFTEN LIVENESS IS PROVEN. The CMD API pushes order and position
 # updates, so there is no poll whose success would stand in for "the socket
 # is alive" — on a quiet name nothing arrives for minutes. ECHO is a cheap

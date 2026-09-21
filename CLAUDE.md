@@ -80,6 +80,22 @@ was NOT CALLED AT ALL when a switch or guard refuses, and scans every
 Exceptions kept deliberately: `cancel` is never gated on arming; `flatten` needs
 trading allowed but not the pane's arm flag.
 
+**DAS dispatch matches the EXACT first token**, never a prefix. `#OrderServer`
+(a routine status push) shares its prefix with `#Order`, so a prefix test read it as
+the header of a fresh order snapshot: it cleared `order_snapshot` — so `_ready`
+refused every read for the session, the pane stayed empty, and `/broker/state`
+answered "its order list has not arrived yet (6s)" forever (that 6s is
+`DAS_SNAPSHOT_S`, the configured wait, not an age) — and it opened a staging
+buffer no `#OrderEnd` ever closed, so orders pushed afterwards went where nothing
+reads. Orders reached DAS and worked; none ever drew. Ordering the checks fixes
+only the END markers; the next `#Order*` line breaks it again. Unrecognised heads
+are counted in `LINK.unhandled` and surface in `health().socket.unhandled`
+(`#SLOrder` is the standing example). The real login banner is captured verbatim in
+`check_das.LOGIN_BANNER` — an account with NO orders sends only headers and END
+markers, and that is a complete snapshot. The first `LIVE_DAS_LOG_LINES` (60) lines
+of every connect are logged verbatim at INFO, and the first line of each new kind
+once, so the next surprise is diagnosable from the journal.
+
 **The DAS route list is the MONTAGE** (`LIVE_DAS_ROUTES`, 45 base names with the
 montage's L/M suffix stripped), not `GET RouteStatus`: RouteStatus reports everything
 the login can see — options, short-locate, test and PRO routes Cobra does not expose —
