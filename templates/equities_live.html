@@ -237,6 +237,13 @@
     .lv-inp.route {
       width:80px; font-weight:600; font-variant-numeric:tabular-nums;
     }
+    /* Greyed, NOT hidden and not disabled: the montage is the list, and DAS
+       marking one off for the session is information rather than a reason to
+       change what the dropdown contains. `unconfirmed` is dimmer still and
+       italic — it means nobody has said, which is not the same as "off". */
+    .lv-inp.route option[data-state="disabled"] { color:#8a8a8a; }
+    .lv-inp.route option[data-state="unconfirmed"] { color:#9a8a5a; font-style:italic; }
+    .lv-sub.lv-routenote { color:#8a8a8a; }
     /* The link age, when it is not healthy. Same pink as every other "this
        is not what you think it is" on the page. */
     .lv-sub.dn { color:#e84393; }
@@ -658,10 +665,24 @@
                 <option value="" x-text="defaultRoute()
                                          ? defaultRoute() + ' (default)'
                                          : 'default'"></option>
+                <!-- DISABLED ROUTES STAY, GREYED. Dropping them would make
+                     the list change shape between pre-market and the
+                     session, which is how a venue you meant to use vanishes
+                     without saying why. They stay SELECTABLE too: DAS
+                     decides what it will accept, and this snapshot must not
+                     be the thing that blocks a live venue — an unconfirmed
+                     one (in the montage, never mentioned by RouteStatus)
+                     least of all. -->
                 <template x-for="r in routes()" :key="r">
-                  <option :value="r" x-text="r"></option>
+                  <option :value="r" :data-state="routeState(r)"
+                          :title="routeTitle(r)" x-text="routeLabel(r)"></option>
                 </template>
               </select>
+            </template>
+            <template x-if="routes().length && routeNote()">
+              <span class="lv-sub lv-routenote" x-text="routeNote()"
+                    :title="'The montage is the list; DAS marks each one. '
+                            + 'Disabled and unconfirmed routes stay on it.'"></span>
             </template>
 
             <span class="lv-sub">row</span>

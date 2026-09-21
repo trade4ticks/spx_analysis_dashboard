@@ -322,13 +322,34 @@ DAS_ACCOUNT = os.environ.get("LIVE_DAS_ACCOUNT", "")
 # order; this is only what "no choice" means.
 DAS_ROUTE = os.environ.get("LIVE_DAS_ROUTE", "SMAT").strip().upper()
 
-# WHICH ROUTES THE PAGE OFFERS. Left empty on purpose: the adapter asks DAS
-# itself with `GET RouteStatus` on login and offers the ENABLED ones, so the
-# list is the broker's answer rather than a guess that goes stale when Cobra
-# changes what is entitled. This is the fallback for a DAS build that does
-# not answer that command.
+# WHICH ROUTES THE PAGE OFFERS: THE MONTAGE, and only the montage.
+#
+# This was `GET RouteStatus`, on the reasoning that the broker's own answer
+# cannot go stale. It can't — but it answers a different question. RouteStatus
+# reports everything the login can see, including options, short-locate, test
+# and PRO routes that Cobra does not expose in the montage, and a venue that
+# is not in the montage is not one to send an equity order to. The curated
+# list is the montage; RouteStatus is how each entry is marked ENABLED or
+# DISABLED (das.health), never what is on the list.
+#
+# These are the montage names with the L/M suffix stripped, because that is
+# what the API wants (see das.norm_route). Order is the montage's, so the
+# dropdown reads the way the montage does.
+#
+# The two sources disagree in both directions and both are handled rather
+# than hidden: a route here that RouteStatus never mentions is shown
+# UNCONFIRMED (PSMT is one today), and a route RouteStatus reports that is
+# not here is simply not offered.
+_DAS_MONTAGE_ROUTES = (
+    "SMAT,ARCAE,BATS,BATSY,EDGA,EDGX,IEXG,NSDQ,SMART,"
+    "CARCA,CBATS,CEDGA,CEDGX,CNQBX,CNSDQ,CNYSE,CNYSEB,CXDRK,CYBAT,"
+    "LAMP,STRK,SNSR,SMOK,FAN,DASH,REB25,FREE25,PSMT,PMID,QUIK,MNGD,"
+    "CMEMX,CMIAX,"
+    "TWAP,VWAP,TWP2,TWP5,TWP10,TWP20,TWP30,TWP90,TWP120,TWP180,TWP240,TWP300"
+)
 DAS_ROUTES = [r.strip().upper() for r in
-              os.environ.get("LIVE_DAS_ROUTES", "SMAT").split(",") if r.strip()]
+              os.environ.get("LIVE_DAS_ROUTES", _DAS_MONTAGE_ROUTES).split(",")
+              if r.strip()]
 
 # HOW OFTEN LIVENESS IS PROVEN. The CMD API pushes order and position
 # updates, so there is no poll whose success would stand in for "the socket

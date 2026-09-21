@@ -80,6 +80,17 @@ was NOT CALLED AT ALL when a switch or guard refuses, and scans every
 Exceptions kept deliberately: `cancel` is never gated on arming; `flatten` needs
 trading allowed but not the pane's arm flag.
 
+**The DAS route list is the MONTAGE** (`LIVE_DAS_ROUTES`, 45 base names with the
+montage's L/M suffix stripped), not `GET RouteStatus`: RouteStatus reports everything
+the login can see — options, short-locate, test and PRO routes Cobra does not expose —
+and none of those is somewhere to send an equity order. RouteStatus only MARKS each
+montage entry in `health()["routing"]["states"]`: `enabled` / `disabled` / `unconfirmed`
+(never mentioned, or nothing heard yet — PSMT is the standing case). Disabled entries
+stay on the list, greyed, so the dropdown does not change shape between pre-market and
+the session, and all three states stay selectable: DAS decides what it accepts, and a
+stale snapshot here must not block a live venue. `check_das.case_route_list` plants a
+reply with stray non-montage routes and a missing PSMT.
+
 Adapter internals are now `schwab.*` — the checks and probes monkeypatch
 `schwab._acall` / `schwab._account_hash`, not `broker.*`. Rate limits belong to the
 adapter (a broker-API fact); the rule they serve — getting flat must never be

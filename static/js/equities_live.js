@@ -3145,6 +3145,68 @@ document.addEventListener('alpine:init', () => {
       const r = this.routing();
       return (r && r.supported && r.choices) ? r.choices : [];
     },
+
+    /* THE MARK ON ONE ROUTE, from the broker's own answer.
+     *
+     * 'enabled' | 'disabled' | 'unconfirmed'. A disabled route stays in the
+     * list and is greyed: hiding it would make the dropdown change shape
+     * between pre-market and the session. An unconfirmed one is a route the
+     * montage lists and the broker has not mentioned — it is NOT known to be
+     * off, so it is offered with a flag rather than struck out. An adapter
+     * that sends no `states` map is taken at its word: everything enabled. */
+    routeState(name) {
+      const r = this.routing();
+      return (r && r.states && r.states[name]) || 'enabled';
+    },
+
+    routeLabel(name) {
+      const st = this.routeState(name);
+      return st === 'enabled' ? name
+           : st === 'disabled' ? name + ' — disabled'
+                               : name + ' — unconfirmed';
+    },
+
+    routeTitle(name) {
+      const r = this.routing();
+      switch (this.routeState(name)) {
+        case 'disabled':
+          return `${name} is in your montage; DAS reports it DISABLED right `
+               + `now. It is still offered — an order on it will be refused `
+               + `by DAS, which is the authority, not this list.`;
+        case 'unconfirmed':
+          return `${name} is in your montage but `
+               + ((r && r.from_broker)
+                   ? `DAS's RouteStatus never mentioned it, so whether it is `
+                   + `enabled is unknown.`
+                   : `DAS has not answered RouteStatus yet, so nothing is `
+                   + `confirmed.`)
+               + ` It is still offered.`;
+        default:
+          return `${name} — DAS reports it enabled.`;
+      }
+    },
+
+    /* One line under the control, so the marks are readable without hovering
+     * every entry. Silent when everything is enabled. */
+    routeNote() {
+      const r = this.routing();
+      if (!r || !r.supported || !r.states) return '';
+      const names = this.routes();
+      const off = names.filter(n => this.routeState(n) === 'disabled');
+      const unk = names.filter(n => this.routeState(n) === 'unconfirmed');
+      if (!r.from_broker) {
+        return `routes not confirmed yet — DAS has not answered RouteStatus`;
+      }
+      // NAMED, BUT NOT ALL OF THEM. One unconfirmed route is worth reading
+      // (PSMT is the standing case); forty of them — which is what a partial
+      // RouteStatus reply looks like — is a paragraph in the order bar.
+      const shown = unk.slice(0, 3).join(', ')
+                  + (unk.length > 3 ? ` +${unk.length - 3} more` : '');
+      const parts = [];
+      if (off.length) parts.push(`${off.length} disabled`);
+      if (unk.length) parts.push(`${unk.length} unconfirmed (${shown})`);
+      return parts.length ? `${names.length} montage routes · ${parts.join(' · ')}` : '';
+    },
     defaultRoute() {
       const r = this.routing();
       return (r && r.default) || '';

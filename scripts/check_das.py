@@ -964,6 +964,84 @@ def case_no_market_data():
               f"adapter.")
 
 
+
+# ── the montage is the list ─────────────────────────────────────────────────
+def case_route_list():
+    """The dropdown offers the MONTAGE; RouteStatus only marks it.
+
+    RouteStatus answers "what can this login see" -- options, short-locate,
+    test and PRO routes included -- and none of those is somewhere to send an
+    equity order. So the offered list is the configured montage, in its own
+    order, and the broker's reply becomes a state on each entry. The three
+    states are not interchangeable: DISABLED is "the broker says no for now"
+    and UNCONFIRMED is "nobody has said", and collapsing the second into the
+    first is how a venue that works looks broken.
+    """
+    link = use(live_link())
+    try:
+        # A REAL-SHAPED REPLY: some montage routes enabled, one disabled, one
+        # montage route (PSMT) never mentioned, and three routes DAS can see
+        # that the montage does not carry.
+        for line in ("$RouteStatus SMAT Enabled",
+                     "$RouteStatus ARCAE Enabled",
+                     "$RouteStatus NSDQ Enabled",
+                     "$RouteStatus BATS Disabled",
+                     "$RouteStatus OPTX Enabled",       # options route
+                     "$RouteStatus LOCATE Enabled",     # short locate
+                     "$RouteStatus PROTEST Enabled"):   # a PRO/test route
+            link._dispatch(line)
+
+        r = das.health()["routing"]
+        check(r["choices"] == list(config.DAS_ROUTES),
+              "the offered routes are not the montage, in the montage's order")
+        check(r.get("source") == "montage" and r["supported"] is True,
+              f"routing does not say where the list came from: {r.get('source')!r}")
+
+        # NOTHING DAS CAN SEE BUT THE MONTAGE DOES NOT CARRY IS OFFERED.
+        for stray in ("OPTX", "LOCATE", "PROTEST"):
+            check(stray not in r["choices"],
+                  f"{stray} came from RouteStatus and is not in the montage, "
+                  f"but the page would offer it")
+            check(stray not in r["states"],
+                  f"{stray} is marked in `states` although it is not offered")
+
+        st = r["states"]
+        check(st["SMAT"] == "enabled" and st["ARCAE"] == "enabled"
+              and st["NSDQ"] == "enabled",
+              f"an enabled montage route is not marked enabled: {st['SMAT']!r}")
+
+        # DISABLED STAYS ON THE LIST. Dropping it would change the dropdown's
+        # shape between pre-market and the session.
+        check("BATS" in r["choices"] and st["BATS"] == "disabled",
+              f"a disabled route was dropped from the list or mismarked: "
+              f"{st.get('BATS')!r}")
+
+        # PSMT: in the montage, absent from RouteStatus. Unknown, NOT off.
+        check("PSMT" in r["choices"], "PSMT is in the montage but not offered")
+        check(st["PSMT"] == "unconfirmed",
+              f"PSMT is absent from RouteStatus and was marked {st['PSMT']!r} — "
+              f"'disabled' would claim DAS said something it never said")
+
+        # Every montage route is marked, one way or another.
+        check(set(st) == set(config.DAS_ROUTES),
+              "some montage routes carry no state at all")
+        check(r["from_broker"] is True,
+              "RouteStatus answered and from_broker says otherwise")
+
+        # BEFORE ANY REPLY, everything is unconfirmed and the page is told
+        # that the silence is the reason -- not that 45 routes are off.
+        quiet = use(live_link())
+        r2 = das.health()["routing"]
+        check(set(r2["states"].values()) == {"unconfirmed"} and r2["from_broker"] is False,
+              f"before RouteStatus answers, the marks are {set(r2['states'].values())} "
+              f"and from_broker={r2['from_broker']}")
+        check(r2["choices"] == list(config.DAS_ROUTES),
+              "the list changes shape before the broker has answered")
+        assert quiet is das.LINK
+    finally:
+        use(link)
+
+
 def case_interface():
     """It is a Broker, and it answers the façade's questions."""
     try:
@@ -998,6 +1076,7 @@ def case_interface():
 
 CASES = [
     ("order statuses", case_statuses),
+    ("the route list is the montage", case_route_list),
     ("the %ORDER layouts", case_order_layout),
     ("%OrderAct notes and token", case_order_act),
     ("%TRADE and %POS", case_trade_and_pos),

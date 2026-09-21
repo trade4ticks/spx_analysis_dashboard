@@ -1622,7 +1622,6 @@ async def reconcile(*, symbol: str, side: str, qty: float,
 def health() -> dict:
     """DAS's own facts. The trading switches are the façade's to report."""
     link = LINK.state()
-    enabled = sorted(r for r, on in LINK.routes.items() if on)
     return {
         "broker": "das",
         "host": link["host"],
@@ -1633,17 +1632,41 @@ def health() -> dict:
         "socket": link,
         "last_error": link["last_error"],
         "limits": LIMITER.state(),
-        # THE ROUTES DAS ITSELF REPORTS as enabled, which is why they are
-        # worth offering: a list written down here would be a guess about
-        # entitlements that change without this file being touched.
+        # THE MONTAGE IS THE LIST; RouteStatus only marks it.
+        #
+        # RouteStatus answers "what can this login see", which includes
+        # options, short-locate, test and PRO routes Cobra does not expose in
+        # the montage — not one of them is somewhere to send an equity order.
+        # So the offered list is config.DAS_ROUTES (the montage, in its own
+        # order) and the broker's answer becomes a STATE on each entry:
+        #
+        #   enabled      RouteStatus says ENABLED
+        #   disabled     RouteStatus says anything else. STILL OFFERED, and
+        #                the page greys it: hiding it would make the dropdown
+        #                change shape between pre-market and the session,
+        #                which is how a venue you meant to use disappears
+        #                without saying so.
+        #   unconfirmed  RouteStatus never mentioned it (PSMT today), or has
+        #                not answered yet. NOT "disabled": we do not know, and
+        #                the montage says it exists. Shown, flagged, and
+        #                selectable — DAS is the authority on the order, and a
+        #                stale snapshot here must not block a live venue.
         "routing": {
             "supported": True,
             "default": config.DAS_ROUTE,
-            "choices": enabled or list(config.DAS_ROUTES),
-            "from_broker": bool(enabled),
+            "choices": list(config.DAS_ROUTES),
+            "states": {r: ("enabled" if LINK.routes.get(r) else
+                           "disabled" if r in LINK.routes else "unconfirmed")
+                       for r in config.DAS_ROUTES},
+            # Whether RouteStatus has answered AT ALL. False means every entry
+            # is unconfirmed because nothing has been heard yet, which is a
+            # different thing from a route being missing from a reply.
+            "from_broker": bool(LINK.routes),
+            "source": "montage",
             "why": ("DAS routes every order explicitly; SMAT is its smart "
                     "router and the only route that accepts every order "
-                    "type."),
+                    "type. The list is your montage; DAS's RouteStatus marks "
+                    "each one enabled or disabled."),
         },
     }
 

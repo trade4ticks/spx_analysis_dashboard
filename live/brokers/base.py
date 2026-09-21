@@ -74,8 +74,29 @@ not something the page should have to know, so every adapter states it:
 
   health()["routing"] = {"supported": bool,      # is route honoured at all
                          "default": str|None,    # what None means here
-                         "choices": [str],       # offered in the UI
+                         "choices": [str],       # offered in the UI, in order
+                         "states": {str: str},   # optional; see below
+                         "from_broker": bool,    # optional; has the broker
+                                                 #   answered about routes yet
                          "why": str}             # one line, for a tooltip
+
+`choices` IS THE CURATED LIST, not everything the login can see. DAS learned
+this the expensive way: `GET RouteStatus` returns options, short-locate, test
+and PRO routes that the montage does not expose, and none of them is a place
+to send an equity order. The adapter offers the configured montage and uses
+the broker's answer to MARK it, through the optional `states` map:
+
+  enabled      the broker says so
+  disabled     the broker says otherwise. STILL OFFERED and greyed by the
+               page -- a list that changes shape between pre-market and the
+               session is how a venue disappears without saying why.
+  unconfirmed  the broker has not mentioned it, or has not answered yet.
+               NOT the same as disabled: it means we do not know. Shown,
+               flagged, and still selectable, because the broker is the
+               authority on the order and a stale snapshot here must not
+               block a venue that is live.
+
+An adapter may omit `states`; the page then treats every choice as enabled.
 
 An adapter that cannot route must report `supported: False` rather than
 accept a route and drop it silently. A venue that was chosen and quietly
