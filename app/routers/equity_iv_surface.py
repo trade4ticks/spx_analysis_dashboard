@@ -36,6 +36,7 @@ a node is fabricated or it is not. Fabricated nodes are excluded from every
 historical distribution — otherwise "normal range" is partly built from values
 the spline invented — and marked, never silently dropped, in today's curve.
 """
+import asyncio
 import math
 from datetime import date as date_type
 
@@ -53,33 +54,53 @@ router = APIRouter(tags=["equity-iv"])
 
 SURFACE_TABLE = "equity_surface"
 
-_axes_cache: dict | None = None
+_axes_cache: dict[str, dict] = {}
+_axes_lock = asyncio.Lock()
 
 
-async def _axes(pool) -> dict:
-    """The tenors and deltas the surface is actually fitted at.
+async def _axes(pool, ticker: str) -> dict:
+    """The tenors and deltas the surface is actually fitted at, for `ticker`.
 
     Read from the data rather than hardcoded. equity_iv.TENORS exists but is a
     different thing — the tenors that appear in METRIC column names, used to
     turn a name into an extrap flag. The surface carries 17 tenors and 19
     deltas, and a grid built from the metric list would quietly omit the rest.
 
-    Cached for the process lifetime: the fitted grid changes when the loader
-    changes, which is a deploy.
+    Read from ONE session — the ticker's latest trade_date — never the whole
+    table. `SELECT DISTINCT dte FROM equity_surface` has no index leading with
+    dte, so it was a full scan of every partition; once live capture put ~55
+    buckets a day in the table (~12M rows in Aug 2026 against ~1.3M a month
+    before) it passed the pool's 30 s command_timeout, and because a failure
+    was never cached, every request on the page ran it again, in parallel.
+    Here both lookups walk ix_equity_surface_latest / the unique key on
+    (ticker, trade_date, ...), and one day is every snapshot's full grid.
+
+    Cached per ticker for the process lifetime: the fitted grid changes when
+    the loader changes, which is a deploy. An empty answer (no rows yet) is
+    not cached. The lock makes the page's concurrent first requests share one
+    lookup instead of each running it.
     """
-    global _axes_cache
-    if _axes_cache is not None:
-        return _axes_cache
-    async with pool.acquire() as conn:
-        dtes = await conn.fetch(
-            f"SELECT DISTINCT dte FROM {SURFACE_TABLE} ORDER BY dte")
-        deltas = await conn.fetch(
-            f"SELECT DISTINCT put_delta FROM {SURFACE_TABLE} ORDER BY put_delta")
-    _axes_cache = {
-        "dtes":   [int(r["dte"]) for r in dtes],
-        "deltas": [int(r["put_delta"]) for r in deltas],
-    }
-    return _axes_cache
+    hit = _axes_cache.get(ticker)
+    if hit is not None:
+        return hit
+    async with _axes_lock:
+        hit = _axes_cache.get(ticker)
+        if hit is not None:
+            return hit
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT DISTINCT dte, put_delta FROM {SURFACE_TABLE} "
+                f"WHERE ticker = $1 AND trade_date = "
+                f"  (SELECT max(trade_date) FROM {SURFACE_TABLE} WHERE ticker = $1)",
+                ticker,
+            )
+        out = {
+            "dtes":   sorted({int(r["dte"]) for r in rows}),
+            "deltas": sorted({int(r["put_delta"]) for r in rows}),
+        }
+        if rows:
+            _axes_cache[ticker] = out
+        return out
 
 
 def _nearest(values, want):
@@ -159,7 +180,7 @@ async def curve_band(
     if kind not in ("skew", "term", "skew_term"):
         raise HTTPException(400, f"kind must be skew|term|skew_term, got {kind!r}")
 
-    ax = await _axes(pool)
+    ax = await _axes(pool, ticker)
     keep = "" if not exclude_extrapolated else " AND NOT s.extrapolated"
 
     async with pool.acquire() as conn:
@@ -387,7 +408,7 @@ async def tent(
         return {"error": "OI database not configured"}
 
     cat = await _catalog(pool)
-    ax  = await _axes(pool)
+    ax  = await _axes(pool, ticker)
     use_dte = _nearest(ax["dtes"], dte)
     if use_dte is None:
         return {"error": "equity_surface has no tenors"}
@@ -718,7 +739,7 @@ async def sticky_strike(
     if not pool:
         return {"error": "OI database not configured"}
 
-    ax = await _axes(pool)
+    ax = await _axes(pool, ticker)
     use_dte = _nearest(ax["dtes"], dte)
     if use_dte is None:
         return {"error": "equity_surface has no tenors"}
@@ -869,7 +890,7 @@ async def surface_grid(
     if view not in GRID_VIEWS:
         raise HTTPException(400, f"view must be one of {', '.join(GRID_VIEWS)}")
 
-    ax = await _axes(pool)
+    ax = await _axes(pool, ticker)
     keep = " AND NOT s.extrapolated" if exclude_extrapolated else ""
 
     async with pool.acquire() as conn:
@@ -1117,7 +1138,7 @@ async def spot_vol(
     if not pool:
         return {"error": "OI database not configured", "points": []}
 
-    ax = await _axes(pool)
+    ax = await _axes(pool, ticker)
     use_dte = _nearest(ax["dtes"], dte)
     if use_dte is None:
         return {"error": "equity_surface has no tenors", "points": []}
