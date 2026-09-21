@@ -814,14 +814,26 @@ async def place(*, symbol: str, side: str, qty: int,
 
 
 async def replace(*, order_id: str, symbol: str, side: str, qty: int,
-                  price: float, route: str | None = None) -> dict:
+                  price: float, route: str | None = None,
+                  filled: float = 0.0) -> dict:
     """Reprice. A replace is one call, and it is how the ladder nudge moves.
 
     ONE CALL, not cancel-then-place: the round trip would lose the queue
     position and leave a window with no order resting at all.
 
     `route` is ignored here for the reason given on `place`.
+
+    THE REMAINING, NOT THE TOTAL. A Schwab replace is a cancel and a new
+    order, so its quantity is the new order's own size; sending the total
+    would re-buy the part that had already executed. `qty` is the order's
+    total and `filled` what is gone, so the difference is what rests.
     """
+    remaining = int(qty) - int(filled or 0)
+    if remaining <= 0:
+        raise BrokerError(
+            f"{qty} shares with {int(filled or 0)} already filled leaves "
+            f"nothing to reprice; cancel the order instead.")
+    qty = remaining
     if route:
         log.info("Schwab has no venue selection; route %r ignored", route)
     hv = await account_hash()
@@ -959,9 +971,10 @@ class SchwabBroker(base.Broker):
         return await place(symbol=symbol, side=side, qty=qty, price=price,
                            route=route)
 
-    async def replace(self, *, order_id, symbol, side, qty, price, route=None):
+    async def replace(self, *, order_id, symbol, side, qty, price, route=None,
+                      filled=0.0):
         return await replace(order_id=order_id, symbol=symbol, side=side,
-                             qty=qty, price=price, route=route)
+                             qty=qty, price=price, route=route, filled=filled)
 
     async def cancel(self, *, order_id):
         return await cancel(order_id=order_id)

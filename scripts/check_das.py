@@ -522,6 +522,18 @@ def _accept(order_id="900"):
     return reply
 
 
+def _replaced(order_id="65377"):
+    """DAS answers a REPLACE with the order, at its new price."""
+    def reply(line):
+        if line.startswith("REPLACE"):
+            parts = line.split()
+            return [f"%ORDER {parts[1]} 1749678729 LLY S L {parts[2]} "
+                    f"{parts[2]} 0 {parts[3]} SMART Accepted 09:58:54 0 "
+                    f"730001 BIAN CMDAPI DAY+ N/A"]
+        return []
+    return reply
+
+
 def case_place():
     link = use(live_link(reply=_accept()))
     out = asyncio.run(das.place(symbol="FDX", side="BUY", qty=100,
@@ -1336,6 +1348,119 @@ def case_wire_price():
           f"the journal does not show the price as sent: {placed}")
 
 
+
+# ── a replace carries the order's TOTAL ─────────────────────────────────────
+def case_replace_sends_total():
+    """DAS MODIFIES the order, so the share field is its total.
+
+    Measured on 2026-09-22: order 65377 went 5 -> 4 -> 3 -> 2 across four
+    nudges with NO fills. The pane sent the remaining, DAS read it as the new
+    total, and the reply's smaller remaining became the next request's
+    total -- an order shrinking itself one nudge at a time.
+    """
+    link = use(live_link(reply=_replaced()))
+    # DAS's own record: five ordered, two gone, three resting.
+    link._dispatch("%ORDER 65377 1749678729 LLY S L 5 3 0 1166.38 SMART Partial")
+    asyncio.run(das.replace(order_id="65377", symbol="LLY", side="SELL",
+                            qty=5, price=1166.40, filled=2))
+    sent = link.writer.lines[-1]
+    check(sent.split()[:3] == ["REPLACE", "65377", "5"],
+          f"REPLACE did not carry the order's total: {sent!r}")
+
+    # FOUR NUDGES, NO FILLS: the size must not move. This is the exact walk
+    # that was observed, and it only stays flat if the total is the total.
+    for px in (1166.42, 1166.44, 1166.46, 1166.48):
+        asyncio.run(das.replace(order_id="65377", symbol="LLY", side="SELL",
+                                qty=5, price=px, filled=2))
+    sizes = [ln.split()[2] for ln in link.writer.lines if ln.startswith("REPLACE")]
+    check(sizes == ["5"] * 5,
+          f"the order shrank across nudges: {sizes} — each reply's remaining "
+          f"became the next request's total, which is the 5/4/3/2 walk")
+
+    # THE WALK ITSELF, driven the way it actually happened: a caller that
+    # passes the REMAINING, as the pane did. The adapter takes the total from
+    # DAS's own record, so the wire is right even when the caller's number is
+    # the one that caused the bug -- and the order stops shrinking.
+    link = use(live_link(reply=_replaced()))
+    link._dispatch("%ORDER 65377 1749678729 LLY S L 5 3 0 1166.38 SMART Partial")
+    for px in (1166.40, 1166.42, 1166.44, 1166.46):
+        o = link.orders["65377"]
+        remaining = int((o["qty"] or 0) - (o["filled"] or 0))
+        asyncio.run(das.replace(order_id="65377", symbol="LLY", side="SELL",
+                                qty=remaining, price=px, filled=o["filled"]))
+    walk = [ln.split()[2] for ln in link.writer.lines if ln.startswith("REPLACE")]
+    check(walk == ["5"] * 4,
+          f"a caller passing the remaining still shrinks the order: {walk} — "
+          f"this is the 5/4/3/2 walk, and DAS's own record is what prevents it")
+
+    # AN ORDER THIS PROCESS HAS NEVER BEEN TOLD ABOUT: the caller's own two
+    # numbers add back up to the total.
+    link = use(live_link(reply=_replaced("777")))
+    asyncio.run(das.replace(order_id="777", symbol="LLY", side="SELL",
+                            qty=3, price=1166.40, filled=2))
+    check(link.writer.lines[-1].split()[2] == "5",
+          f"without a record, total is qty+filled: {link.writer.lines[-1]!r}")
+
+
+# ── nothing left is not working ─────────────────────────────────────────────
+GHOST = "%ORDER 65377 1749678729 LLY S L 2 0 1 1166.38 SMART Partial"
+
+
+def case_zero_remaining_is_not_working():
+    """`Partial` with zero left is a finished order wearing a live status.
+
+    DAS sent exactly this after a cancel: two ordered, ZERO left, one
+    cancelled, status still `Partial` because a share had filled. The status
+    says what HAPPENED to the order, not whether it still rests -- so it
+    outlives the order, and taking it as live left a dead order on the ladder
+    that a nudge could not move and a cancel was refused for
+    ("order not open").
+    """
+    link = use(live_link())
+    link._dispatch(GHOST)
+    o = link.orders["65377"]
+    check(o["working"] is False,
+          f"an order with nothing left is still marked working: qty={o['qty']} "
+          f"filled={o['filled']} cancelled={o['cancelled_qty']} "
+          f"status={o['status']!r}")
+
+    out = asyncio.run(das.read_orders())
+    check(not out["working"] and [x["order_id"] for x in out["recent"]] == ["65377"],
+          f"the ghost is still on the ladder: working={out['working']}")
+
+    # AND FLATTEN LEAVES IT ALONE. Cancelling an order DAS has already closed
+    # is the "order not open" error, from the one path that must not waste
+    # its attempts.
+    link = use(live_link(reply=lambda ln: []))
+    link._dispatch(GHOST)
+    link._dispatch("%POS LLY 2 0 1166.00 0 0 0 2026/09/22-09:30:00 0")
+    asyncio.run(das.flatten(symbol="LLY"))
+    cancels = [ln for ln in link.writer.lines if ln.startswith("CANCEL")]
+    check(cancels == [],
+          f"flatten tried to cancel an order with nothing left: {cancels}")
+
+    # A PARTIAL WITH A BALANCE IS STILL LIVE -- the half of the rule that
+    # must not be lost while fixing the other half.
+    link = use(live_link())
+    link._dispatch("%ORDER 65380 1 LLY S L 5 3 0 1166.38 SMART Partial")
+    check(link.orders["65380"]["working"] is True,
+          "a partial with three shares still resting was called finished")
+
+    # NOT YET AT THE EXCHANGE: zero resting says nothing, and hiding it would
+    # hide an order about to be live -- and its cancel with it.
+    for status in ("Sending", "Hold"):
+        link = use(live_link())
+        link._dispatch(f"%ORDER 65381 1 LLY S L 5 0 0 1166.38 SMART {status}")
+        check(link.orders["65381"]["working"] is True,
+              f"a {status} order with nothing resting yet was hidden; it is "
+              f"about to be live and must stay cancellable")
+
+    # An older layout carries no lvqty at all: fall back to the status.
+    o = das.parse_order(ORDER_OLD)
+    check(o["working"] is True,
+          "a layout without lvqty was called finished on a missing field")
+
+
 def case_interface():
     """It is a Broker, and it answers the façade's questions."""
     try:
@@ -1375,6 +1500,8 @@ CASES = [
     ("only a header opens a dump", case_only_a_header_opens_a_dump),
     ("a dump that never ends", case_dump_never_ends),
     ("the price on the wire", case_wire_price),
+    ("a replace carries the total", case_replace_sends_total),
+    ("nothing left is not working", case_zero_remaining_is_not_working),
     ("the head is matched whole", case_head_matching),
     ("the route list is the montage", case_route_list),
     ("the %ORDER layouts", case_order_layout),

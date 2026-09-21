@@ -1124,9 +1124,10 @@ class FakeBroker(base.Broker):
         self.calls.append(("place", symbol, side, qty, price, route))
         return {"ok": True, "order_id": "F1", "status": 201, "rt_ms": 1.0}
 
-    async def replace(self, *, order_id, symbol, side, qty, price, route=None):
+    async def replace(self, *, order_id, symbol, side, qty, price, route=None,
+                      filled=0.0):
         self.calls.append(("replace", order_id, symbol, side, qty, price,
-                           route))
+                           route, filled))
         return {"ok": True, "order_id": order_id, "status": 200, "rt_ms": 1.0}
 
     async def cancel(self, *, order_id):
@@ -1194,7 +1195,9 @@ def case_policy_above_adapter():
         fake.calls.clear()
         asyncio.run(broker.replace(order_id="X", armed=True, route="NSDQ",
                                    **ok))
-        check(fake.calls and fake.calls[-1][-1] == "NSDQ",
+        # The replace tuple is (…, price, route, filled): name the position
+        # rather than counting from the end, which a new argument moves.
+        check(fake.calls and fake.calls[-1][6] == "NSDQ",
               f"the route did not reach the adapter on a replace: "
               f"{fake.calls[-1:]!r}")
 
@@ -1237,7 +1240,7 @@ def case_policy_above_adapter():
             pass
         check(fake.calls == [], "the adapter was called for a reprice the guards refused")
         asyncio.run(broker.replace(order_id="X", armed=True, **ok))
-        check(fake.calls == [("replace", "X", "AAPL", "BUY", 10, 100.0, None)],
+        check(fake.calls == [("replace", "X", "AAPL", "BUY", 10, 100.0, None, 0.0)],
               "an armed, guarded reprice did not reach the adapter")
 
         # 6. CANCEL is NOT gated on arming — deliberately, and the fake proves
@@ -1268,6 +1271,51 @@ def case_policy_above_adapter():
 
 
 # ── the façade is the only thing above the adapters ─────────────────────────
+def case_replace_quantities():
+    """`qty` is the order's TOTAL and `filled` rides with it.
+
+    The two brokers want different numbers on the wire -- DAS modifies the
+    resting order and wants the total, Schwab cancels and places a new order
+    and wants the remaining -- so the caller sends the order's own figures and
+    the adapter does the arithmetic. Sending the remaining to DAS shrank a
+    partially filled order on every nudge (5/4/3/2, 2026-09-22).
+    """
+    fake = _with_fake()
+    try:
+        config.TRADING_ENABLED = True
+        _arm_runtime()
+        asyncio.run(broker.replace(order_id="65377", symbol="LLY", side="SELL",
+                                   qty=5, price=1166.40, filled=2, armed=True,
+                                   reference=1166.00, position_qty=0.0))
+        check(fake.calls == [("replace", "65377", "LLY", "SELL", 5, 1166.40, None, 2)],
+              f"the façade did not pass the order's total and filled through: "
+              f"{fake.calls}")
+    finally:
+        broker.set_trading(False)
+        _restore_real()
+
+    # SCHWAB'S WIRE: the remaining, because its replace is a new order and
+    # the total would buy the executed part a second time.
+    rec = Recorder({"account": _acct()})
+    schwab._acall, schwab._account_hash = rec, "H"
+    asyncio.run(schwab.replace(order_id="65377", symbol="LLY", side="SELL",
+                               qty=5, price=1166.40, filled=2))
+    body = rec.calls[-1]["body"]
+    check(body["orderLegCollection"][0]["quantity"] == 3,
+          f"Schwab was sent {body['orderLegCollection'][0]['quantity']} shares "
+          f"for an order of 5 with 2 filled; its replace is a cancel and a new "
+          f"order, so the new one is for what is LEFT")
+
+    # And nothing left to reprice is refused rather than sent as zero.
+    try:
+        asyncio.run(schwab.replace(order_id="65377", symbol="LLY", side="SELL",
+                                   qty=2, price=1166.40, filled=2))
+        check(False, "a replace with nothing remaining was sent")
+    except broker.BrokerError as exc:
+        check("cancel" in str(exc).lower(),
+              f"the refusal does not say what to do instead: {exc}")
+
+
 def case_interface():
     # Schwab implements every method the interface declares: an abstract
     # method left out would raise here rather than at 09:31 on the morning it
@@ -1424,6 +1472,7 @@ CASES = [
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
     ("the switches sit above the adapter", case_policy_above_adapter),
+    ("replace quantities", case_replace_quantities),
     ("the broker interface", case_interface),
     ("the token refresh", case_token_refresh),
 ]

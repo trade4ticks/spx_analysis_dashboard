@@ -298,7 +298,8 @@ async def place(*, symbol: str, side: str, qty: int, price: float | None,
 
 async def replace(*, order_id: str, symbol: str, side: str, qty: int,
                   price: float, armed: bool, reference: float | None,
-                  position_qty: float, route: str | None = None) -> dict:
+                  position_qty: float, route: str | None = None,
+                  filled: float = 0.0) -> dict:
     """Reprice. Same two checks as a placement — a nudge is an order.
 
     The guards run on the REPRICED order, not the original: repricing is
@@ -313,7 +314,8 @@ async def replace(*, order_id: str, symbol: str, side: str, qty: int,
     if why:
         raise BrokerError(f"refused by the guards: {why}")
     return await _broker().replace(order_id=order_id, symbol=symbol, side=side,
-                                   qty=qty, price=price, route=route)
+                                   qty=qty, price=price, route=route,
+                                   filled=filled)
 
 
 async def cancel(*, order_id: str) -> dict:

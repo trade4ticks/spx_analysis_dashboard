@@ -2229,7 +2229,15 @@ window.lvPane = function (id, send) {
      * the confirmation path sends the identical request rather than a second
      * copy of it that could drift. */
     async sendMove(o, price) {
-      const qty = (o.qty || 0) - (o.filled || 0);
+      // THE ORDER'S OWN TWO NUMBERS, not a derivation. A replace means
+      // something different at each broker -- DAS modifies the resting order
+      // and wants its TOTAL, Schwab cancels and places a new one and wants
+      // the remaining -- so the adapter does that arithmetic and the pane
+      // stops guessing which it is talking to. Sending the remaining to DAS
+      // shrank the order on every nudge (5 -> 4 -> 3 -> 2 on 2026-09-22).
+      const qty = o.qty || 0;
+      const filled = o.filled || 0;
+      const remaining = qty - filled;
       const sentAt = Date.now() / 1000;
       const t0 = performance.now();
       // CAPTURED BEFORE ANYTHING IS MUTATED. `o` is the same object as the
@@ -2242,15 +2250,16 @@ window.lvPane = function (id, send) {
       // OPTIMISTIC, AND SAID SO. The marker moves now; `pending` is what
       // makes it draw as a request rather than as the record.
       this.traceMark(`move set: ${o.price} -> ${price}`);
+      // The marker shows what is actually resting, which is the remaining.
       this.move = { order_id: oldId, from: Number(o.price),
-                    to: Number(price), qty, side: o.side, sentAt,
+                    to: Number(price), qty: remaining, side: o.side, sentAt,
                     state: 'sending' };
       this.revert = null;
       const visible = Math.round(performance.now() - t0);
 
       const j = await this.brokerCall('replace', {
         order_id: o.order_id, symbol: this.symbol, side: o.side,
-        qty, price, armed: true,
+        qty, filled, price, armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
         // THE RESTING ORDER'S OWN VENUE, not the pane's current pick. DAS's
         // REPLACE carries no route and cannot move an order between venues;

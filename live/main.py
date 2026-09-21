@@ -284,6 +284,9 @@ async def broker_replace(req: Request):
             side=str(b.get("side") or "").upper(),
             qty=int(b.get("qty") or 0),
             price=float(b.get("price")),
+            # The order's TOTAL and how much of it is gone. Which number the
+            # wire wants is the adapter's business (base.Broker.replace).
+            filled=float(b.get("filled") or 0),
             armed=bool(b.get("armed")),
             reference=(float(b["reference"]) if b.get("reference") else None),
             position_qty=float(b.get("position_qty") or 0),

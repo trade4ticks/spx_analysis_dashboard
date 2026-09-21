@@ -80,6 +80,23 @@ was NOT CALLED AT ALL when a switch or guard refuses, and scans every
 Exceptions kept deliberately: `cancel` is never gated on arming; `flatten` needs
 trading allowed but not the pane's arm flag.
 
+**`replace(qty=…, filled=…)`: `qty` is the order's TOTAL.** Brokers mean different
+things by the number on the wire, so the caller sends the order's own two figures and
+the adapter converts: DAS MODIFIES the resting order and sends the total (its own
+record's, where it has one); Schwab cancels and places a new order and sends
+`qty − filled`. The pane sending the remaining shrank partially filled DAS orders on
+every nudge — 5 → 4 → 3 → 2 with no fills (2026-09-22) — because each reply's
+remaining became the next request's total.
+
+**An order with nothing left is not working, whatever its status says**
+(`das.is_working`). DAS returns `Partial` after a cancel of a partly filled order
+(`… 2 0 1 … Partial`: two ordered, zero left, one cancelled): the status records what
+HAPPENED, not whether anything rests, so it outlives the order. Taking it as live kept
+a ghost on the ladder that a nudge could not move and a cancel answered "order not
+open". Exception: `HOLD`/`SENDING` with zero left stay working — nothing rests YET,
+and hiding an order about to be live (with its cancel) is the direction this file
+never takes. A layout without `lvqty` falls back to the status.
+
 **Only a validated DUMP HEADER touches the DAS snapshot, and only an END marker
 sets it.** Twice a line from the `#Order` family blinded the pane: `#OrderServer`
 (2026-09-17, a prefix test) and again on 2026-09-21 despite exact-token matching —

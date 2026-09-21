@@ -240,6 +240,29 @@ async function optimistic(reply) {
   };
 }
 
+
+// THE PANE SENDS THE ORDER'S OWN TWO NUMBERS on a move.
+//
+// It used to send `qty - filled`, the remaining, which is what a SCHWAB
+// replace wants -- that one cancels and places a new order. DAS MODIFIES the
+// resting order and reads the same field as the TOTAL, so a partially filled
+// order shrank on every nudge: 5 -> 4 -> 3 -> 2 across four moves with no
+// fills (2026-09-22). Which arithmetic belongs on the wire is the adapter's
+// to know; the pane reports what the order IS.
+async function moveSendsOrderNumbers() {
+  const c = pane();
+  c.armed = true;
+  c.symbol = 'LLY';
+  let body = null;
+  c.brokerCall = async (path, b) => {
+    body = { path, ...b };
+    return { ok: true, order_id: '65377' };
+  };
+  await c.sendMove({ order_id: '65377', side: 'SELL', qty: 5, filled: 2,
+                     price: 1166.38, route: 'SMART' }, 1166.40);
+  return body;
+}
+
 // A read-back must not overwrite the readout an action set.
 async function rtNotStolen() {
   const c = quoted(pane());
@@ -1047,6 +1070,7 @@ async function found() {
   out.stalePollTime = await stalePoll('time');
   out.freshPoll = await freshPoll();
   out.pendingPaint = pendingPaint();
+  out.moveBody = await moveSendsOrderNumbers();
   out.calls = await callBudget();
   out.pollsTrading = await polls(true);
   out.pollsWatching = await polls(false);
@@ -1081,6 +1105,18 @@ def main() -> int:
         fail("an order this pane SENT was not returned as its primary. The "
              "id came back from our own placement, so it is ours whatever "
              "the stamp says — the source test must not veto it.")
+
+    mv = out.get("moveBody") or {}
+    if mv.get("qty") != 5:
+        fail(f"a move sends qty={mv.get('qty')!r} — it must be the order's "
+             f"TOTAL. The remaining is what a Schwab replace wants; DAS reads "
+             f"the same field as the total and shrinks a partially filled "
+             f"order on every nudge (5/4/3/2 on 2026-09-22). The adapter "
+             f"decides which number goes on the wire.")
+    if mv.get("filled") != 2:
+        fail(f"a move sends filled={mv.get('filled')!r} — without it an "
+             f"adapter cannot work out the remaining, which is what Schwab's "
+             f"replace needs.")
 
     if out["fallbackOurs"] != "2":
         fail("after a reload the pane no longer recognises its own order: a "

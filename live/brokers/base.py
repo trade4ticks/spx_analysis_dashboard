@@ -256,9 +256,27 @@ class Broker(ABC):
 
     @abstractmethod
     async def replace(self, *, order_id: str, symbol: str, side: str,
-                      qty: int, price: float,
-                      route: str | None = None) -> dict:
+                      qty: int, price: float, route: str | None = None,
+                      filled: float = 0.0) -> dict:
         """Reprice a working order, in ONE call where the API allows it.
+
+        `qty` IS THE ORDER'S TOTAL QUANTITY and `filled` is how much of it has
+        already executed. They are passed separately because brokers mean
+        different things by the number on the wire, and only the adapter knows
+        which:
+
+          DAS     REPLACE MODIFIES the resting order and its share field is
+                  the order's TOTAL. Sending the remaining shrinks the order
+                  by whatever had filled -- measured 2026-09-22, order 65377
+                  walked 5 -> 4 -> 3 -> 2 over four nudges with NO fills,
+                  each reply's remaining becoming the next request's total.
+          Schwab  a replace is a CANCEL AND A NEW ORDER, so its quantity is
+                  that new order's own size: the remaining, or the part
+                  already executed is bought a second time.
+
+        So an adapter sends `qty` or `qty - filled` according to its own
+        protocol, and a caller passes the order's own two numbers rather than
+        doing that arithmetic on the adapter's behalf.
 
         This is the ladder nudge: a cancel-then-place round trip loses the
         queue position and leaves a window with no order at all, so an

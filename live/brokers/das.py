@@ -115,6 +115,47 @@ def working_from_status(status: str | None) -> bool:
     return s not in TERMINAL_STATES
 
 
+# Statuses where a zero `lvqty` is NOT evidence the order is over: DAS has not
+# put it on the exchange yet, so there is nothing resting to count and a zero
+# says nothing either way. Everywhere else, zero left means nothing is left.
+PRE_EXCHANGE_STATES = {"HOLD", "SENDING"}
+
+
+def is_working(status: str | None, qty: float | None, lvqty: float | None,
+               cxlqty: float | None) -> bool:
+    """Status AND something still resting.
+
+    PARTIAL IS A GHOST WHEN NOTHING IS LEFT. DAS reported, after a cancel:
+
+        %ORDER 65377 1749678729 LLY S L 2 0 1 1166.38 SMART Partial
+
+    -- two ordered, ZERO left, one cancelled, and the status still `Partial`
+    because a share had filled. The status describes what HAPPENED to the
+    order, not whether it is still resting, so `Partial` outlives the order
+    that earned it. Taking it as live kept a dead order on the ladder, where
+    a nudge would reprice nothing and a cancel would be refused with
+    "order not open".
+
+    So an order is working only if its status allows it AND `lvqty` is above
+    zero. The one exception is the pre-exchange statuses: an order DAS is
+    holding or still sending has nothing resting yet, and hiding it would
+    hide an order that is about to be live -- which is the direction this
+    file never takes. A layout with no `lvqty` at all (the older %ORDER
+    shape) falls back to the status alone, for the same reason.
+    """
+    if not working_from_status(status):
+        return False
+    if lvqty is None:
+        return True
+    if lvqty > 0:
+        return True
+    s = (status or "").strip().upper()
+    if s in PRE_EXCHANGE_STATES:
+        # Nothing resting YET. Stays visible, and stays cancellable.
+        return True
+    return False
+
+
 # ── %OrderAct action types ──────────────────────────────────────────────────
 #
 # THE TWO THAT ARE NOT FAILURES. TimeOut and Send_Rej say the order's fate is
@@ -423,7 +464,7 @@ def parse_order(line: str, *, mine=None) -> dict | None:
         "price": _f(at("price")),
         "route": at("route"),
         "status": status,
-        "working": working_from_status(status),
+        "working": is_working(status, qty, lvqty, cxlqty),
         "entered": iso_stamp(at("time")),
         "orig_order_id": at("orig"),
         "account": at("account"),
@@ -1559,8 +1600,20 @@ async def place(*, symbol: str, side: str, qty: int, price: float | None,
 
 
 async def replace(*, order_id: str, symbol: str, side: str, qty: int,
-                  price: float, route: str | None = None) -> dict:
+                  price: float, route: str | None = None,
+                  filled: float = 0.0) -> dict:
     """Reprice a working order in ONE call. This is the ladder nudge.
+
+    THE SHARE FIELD IS THE ORDER'S TOTAL, NOT WHAT IS LEFT OF IT. DAS
+    MODIFIES the resting order, so `REPLACE 65377 2 1166.38` means "this
+    order is for 2 shares now", executions included. Sending the remaining
+    shrinks it on every nudge: on 2026-09-22 order 65377 went 5 -> 4 -> 3 ->
+    2 across four moves with no fills at all, because each reply's remaining
+    became the next request's total.
+
+    The total comes from DAS'S OWN RECORD where there is one -- that is the
+    number DAS measures the command against -- and from the caller's
+    qty + filled otherwise.
 
     A ROUTE THAT WOULD MOVE THE ORDER IS REFUSED, and refused rather than
     ignored. REPLACE takes an order id, a size and a price and has no route
@@ -1581,7 +1634,17 @@ async def replace(*, order_id: str, symbol: str, side: str, qty: int,
                 f"this order is resting on {at} and DAS's REPLACE cannot "
                 f"move it to {want} — the command carries no route. Cancel "
                 f"it and place a new order on {want}.")
-    cmd = build_replace(order_id=str(order_id), qty=int(qty), price=price)
+    resting = LINK.orders.get(str(order_id)) or {}
+    total = resting.get("qty")
+    if total is None:
+        total = int(qty) + int(filled or 0)
+        log.info("DAS replace %s: no record of this order, so the total is "
+                 "the caller's %s + %s filled", order_id, qty, int(filled or 0))
+    if int(total) <= 0:
+        raise BrokerError(
+            f"order {order_id} has a total quantity of {total}; there is "
+            f"nothing to reprice.")
+    cmd = build_replace(order_id=str(order_id), qty=int(total), price=price)
     fut = LINK.register(order_id=str(order_id))
     await _send(cmd, kind="replace")
     ack = await LINK.wait_ack(fut, order_id=str(order_id),
@@ -1880,9 +1943,10 @@ class DasBroker(base.Broker):
         return await place(symbol=symbol, side=side, qty=qty, price=price,
                            route=route)
 
-    async def replace(self, *, order_id, symbol, side, qty, price, route=None):
+    async def replace(self, *, order_id, symbol, side, qty, price, route=None,
+                      filled=0.0):
         return await replace(order_id=order_id, symbol=symbol, side=side,
-                             qty=qty, price=price, route=route)
+                             qty=qty, price=price, route=route, filled=filled)
 
     async def cancel(self, *, order_id):
         return await cancel(order_id=order_id)
