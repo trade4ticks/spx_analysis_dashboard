@@ -382,7 +382,12 @@ def case_snapshot_markers():
 
     # A SECOND DUMP REPLACES THE FIRST. An order that filled elsewhere has to
     # vanish; a merge is how a phantom stays on the screen.
-    link._dispatch("#Order")
+    #
+    # THE REAL HEADER ROW, not a bare "#Order": since 2026-09-21 a dump is
+    # opened only by the field-name row the platform actually sends (see
+    # LOGIN_BANNER, captured by telnet), because an `#Order` line carrying an
+    # order is indistinguishable from a bare one by its head alone.
+    link._dispatch(LOGIN_BANNER[3])
     link._dispatch("#OrderEnd")
     check(link.orders == {},
           f"a fresh order dump merged into the old one: {link.orders}")
@@ -1153,11 +1158,11 @@ def case_head_matching():
     """
     cases = [
         # line                        starts a dump?   ends one?
-        ("#Order id token symb",      "start_orders",  None),
+        ("#Order id token symb b/s mkt/lmt qty", "start_orders", None),
         ("#OrderEnd",                 None,            "end_orders"),
         ("#OrderServer Connected",    None,            None),
         ("#OrderStatus whatever",     None,            None),   # invented
-        ("#POS symb type qty",        "start_pos",     None),
+        ("#POS symb type qty avgcost initqty",   "start_pos",   None),
         ("#POSEND",                   None,            "end_pos"),
         ("#POSITIONLIMIT 3",          None,            None),   # invented
     ]
@@ -1165,18 +1170,170 @@ def case_head_matching():
         link = use(live_link(record=False))
         link.order_snapshot = link.pos_snapshot = True
         link._dispatch(line)
+        # A HEADER OPENS A DUMP AND LEAVES THE FLAG ALONE. Changed
+        # 2026-09-21: clearing it on the header is what let one stray line
+        # blind every read until a reconnect. What we were told stays true
+        # until an END marker replaces it.
         if starts == "start_orders":
-            check(not link.order_snapshot and link._staging_orders == {},
-                  f"{line!r} did not open an order dump")
+            check(link.order_snapshot and link._staging_orders == {},
+                  f"{line!r} did not open an order dump, or cleared the flag")
         elif starts == "start_pos":
-            check(not link.pos_snapshot and link._staging_pos == {},
-                  f"{line!r} did not open a position dump")
+            check(link.pos_snapshot and link._staging_pos == {},
+                  f"{line!r} did not open a position dump, or cleared the flag")
         else:
             check(link.order_snapshot and link.pos_snapshot,
                   f"{line!r} was mistaken for the start of a dump — it shares "
                   f"a prefix with one, which is not the same as being one")
             check(link._staging_orders is None and link._staging_pos is None,
                   f"{line!r} opened a staging buffer")
+
+
+
+# ── only a real header opens a dump ─────────────────────────────────────────
+#
+# TWICE NOW a line from the #Order family has been read as the start of an
+# order snapshot: #OrderServer (2026-09-17) and #OrderSending (2026-09-21).
+# Exact-token matching killed the first and not the second, and neither fix
+# would survive the next name DAS invents -- including the case no token test
+# can catch, an #Order line carrying an ORDER rather than the field names.
+#
+# So the rule under test is not a list of exceptions. It is: a dump is opened
+# ONLY by the documented header row, the snapshot flag is set ONLY by the END
+# marker, and NOTHING else in the family touches either.
+ORDER_FAMILY_NOISE = [
+    "#OrderSending",
+    "#OrderServer Connected",
+    "#OrderServer: OK",
+    # The one a head test cannot separate: same first token as the header,
+    # carrying an order.
+    "#Order 55 102 LLY B L 1 0 0 1158.60 SMAT Accepted 09:58:54 0 730001 BIAN",
+    # Whatever is added next.
+    "#OrderInvented 1",
+    "#OrderQueue 3 pending",
+    "#POSUpdate LLY 1",
+    "#TradeSummary 4",
+]
+
+
+def case_only_a_header_opens_a_dump():
+    link = use(live_link(record=False))
+    for ln in LOGIN_BANNER:
+        link._dispatch(ln)
+    check(link.order_snapshot and link.pos_snapshot,
+          "the banner did not establish the record")
+    link._dispatch(ORDER_18)
+    held = dict(link.orders)
+    check(held, "the pushed order was not recorded")
+
+    for ln in ORDER_FAMILY_NOISE:
+        link._dispatch(ln)
+        check(link.order_snapshot,
+              f"{ln!r} cleared the order snapshot. Every read for the rest of "
+              f"the session then fails with 'order list has not arrived yet', "
+              f"and only a reconnect clears it")
+        check(link.pos_snapshot, f"{ln!r} cleared the position snapshot")
+        check(link._staging_orders is None and link._staging_pos is None,
+              f"{ln!r} opened a staging buffer; every push after it is filed "
+              f"where nothing reads")
+
+    check(link.orders == held,
+          f"the record changed while informational lines arrived: {link.orders}")
+
+    # AND THE PANE STILL READS. The symptom was never a flag, it was cancel
+    # and replace aiming at orders DAS had already closed because this process
+    # had stopped being told anything.
+    out = asyncio.run(das.read_orders())
+    ids = [o["order_id"] for o in out["working"] + out["recent"]]
+    check("1" in ids, f"the record is no longer readable: {ids}")
+
+    # A SECOND REAL HEADER is still a dump -- and until its END arrives the
+    # old record stays readable, because what we were told is true until
+    # something replaces it.
+    link._dispatch(LOGIN_BANNER[3])
+    check(link.order_snapshot,
+          "a genuine header cleared the snapshot flag; the pane goes blind "
+          "for as long as the dump takes, and forever if its END never comes")
+    check(link._staging_orders == {}, "a genuine header did not open a dump")
+    link._dispatch("%ORDER 2 103 MSFT B L 5 5 0 400.00 SMAT Accepted "
+                   "09:59:00 0 730001 BIAN CMDAPI DAY+ N/A")
+    check(list(link.orders) == list(held),
+          "a dump in progress was published before its END marker")
+    link._dispatch("#OrderEnd")
+    check(list(link.orders) == ["2"],
+          f"the END marker did not replace the record: {list(link.orders)}")
+
+
+def case_dump_never_ends():
+    """A dump whose END never arrives is abandoned, not left swallowing pushes.
+
+    The header is genuine here, so nothing above rejects it; what must not
+    happen is the failure that followed both faults -- every subsequent order
+    filed into a staging dict nobody reads.
+    """
+    link = use(live_link(record=False))
+    for ln in LOGIN_BANNER:
+        link._dispatch(ln)
+    link._dispatch(LOGIN_BANNER[3])                 # opens a dump
+    check(link._staging_orders == {}, "the dump did not open")
+
+    # Still inside the window: pushes stage, as they should.
+    link._dispatch(ORDER_18)
+    check(link.orders == {} and list(link._staging_orders) == ["1"],
+          "a push during a dump did not stage")
+
+    # Past it: the dump is abandoned and the live record takes over.
+    link._dump_open_at["orders"] = time.time() - config.DAS_DUMP_TIMEOUT_S - 1
+    link._dispatch("%ORDER 9 104 NVDA B L 2 2 0 100.00 SMAT Accepted "
+                   "10:00:00 0 730001 BIAN CMDAPI DAY+ N/A")
+    check(link._staging_orders is None,
+          "a dump that never ended is still open and still swallowing pushes")
+    check("9" in link.orders,
+          f"the push after the abandoned dump did not reach the record: "
+          f"{list(link.orders)}")
+    check(any("unended" in k for k in link.unhandled),
+          f"the missing END marker was not recorded: {link.unhandled}")
+    out = asyncio.run(das.read_orders())
+    check("9" in [o["order_id"] for o in out["working"] + out["recent"]],
+          "the pane cannot read an order that arrived after an abandoned dump")
+
+
+def case_wire_price():
+    """What goes on the wire, and what the journal says went on it.
+
+    1158.6000000000001 reads as a sub-penny limit nobody could have placed;
+    the wire carried 1158.60 and the log printed the float it came from.
+    """
+    check(das.fmt_price(1158.6000000000001) == "1158.60",
+          f"the price on the wire is {das.fmt_price(1158.6000000000001)!r}")
+    cmd = das.build_neworder(token=1, side="BUY", symbol="LLY", qty=1,
+                             price=1158.6000000000001)
+    check(cmd.split()[6] == "1158.60", f"NEWORDER carries {cmd!r}")
+
+    # AND THE LOG LINE AGREES. Captured from the logger the adapter uses, so
+    # a future edit that prints the raw float again fails here.
+    import logging
+    seen = []
+
+    class Grab(logging.Handler):
+        def emit(self, rec):
+            seen.append(rec.getMessage())
+
+    h = Grab()
+    das.log.addHandler(h)
+    was = das.log.level
+    das.log.setLevel(logging.INFO)          # or the record is never made
+    try:
+        link = use(live_link(reply=_accept("902")))
+        asyncio.run(das.place(symbol="LLY", side="BUY", qty=1,
+                              price=1158.6000000000001, route="SMAT"))
+        check(link.writer.lines[0].split()[6] == "1158.60",
+              f"the order as sent: {link.writer.lines[0]!r}")
+    finally:
+        das.log.removeHandler(h)
+        das.log.setLevel(was)
+    placed = [m for m in seen if "DAS placed" in m]
+    check(placed and "1158.60" in placed[0] and "1158.6000000000001" not in placed[0],
+          f"the journal does not show the price as sent: {placed}")
 
 
 def case_interface():
@@ -1215,6 +1372,9 @@ CASES = [
     ("order statuses", case_statuses),
     ("the real login banner", case_login_banner),
     ("#OrderServer is not a snapshot", case_order_server_line),
+    ("only a header opens a dump", case_only_a_header_opens_a_dump),
+    ("a dump that never ends", case_dump_never_ends),
+    ("the price on the wire", case_wire_price),
     ("the head is matched whole", case_head_matching),
     ("the route list is the montage", case_route_list),
     ("the %ORDER layouts", case_order_layout),

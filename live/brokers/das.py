@@ -563,6 +563,32 @@ def norm_route(route: str | None, *, known: set[str] | None = None) -> str:
     return r
 
 
+# ── what a dump header looks like ───────────────────────────────────────────
+#
+# THE FIRST FIELD OF EACH HEADER ROW, from the login banner:
+#
+#   #POS   symb type qty avgcost ...
+#   #Order id token symb b/s ...
+#   #Trade id symb b/s qty ...
+#
+# A dump is opened ONLY by a line of this shape. `#OrderServer`, `#OrderSending`
+# and whatever DAS adds next share the `#Order` family and are informational;
+# so, crucially, is a `#Order`-headed line carrying an actual order, whose head
+# token is identical to the header's and which therefore cannot be told apart
+# by the head alone. The header is all field NAMES -- no digits anywhere -- and
+# that is what separates it from a row of data.
+DUMP_HEADERS = {"#POS": "SYMB", "#ORDER": "ID", "#TRADE": "ID"}
+
+
+def is_dump_header(head: str, parts: list[str]) -> bool:
+    """True only for the field-name row that opens a snapshot."""
+    want = DUMP_HEADERS.get(head)
+    if want is None or len(parts) < 2 or parts[1] != want:
+        return False
+    # Field names, not values. One digit anywhere means this is a row.
+    return not any(ch.isdigit() for tok in parts[1:] for ch in tok)
+
+
 def fmt_price(price: float) -> str:
     """Two decimals, or four under a dollar.
 
@@ -698,6 +724,9 @@ class DasLink:
         self._heads_seen: set[str] = set()
         self.unhandled: dict[str, int] = {}
         self._logged_lines = 0
+        # When each dump was opened, so one that never ends can be abandoned
+        # rather than swallowing every push after it.
+        self._dump_open_at: dict[str, float] = {}
 
         # Tokens this process minted, and what each was for. This is what
         # makes reconcile exact; see `reconcile`.
@@ -858,8 +887,17 @@ class DasLink:
                     # banner is exactly what was wanted and missing when the
                     # snapshot silently never arrived. After that the volume
                     # is the tape's, so it drops to DEBUG.
+                    head_up = line.split(None, 1)[0].upper() if line.split() else ""
                     if self._logged_lines < config.DAS_LOG_LINES:
                         self._logged_lines += 1
+                        log.info("DAS <- %s", line[:300])
+                    elif (config.DAS_LOG_ORDERS
+                          and head_up.rstrip(":") in ("%ORDER", "%ORDERACT")):
+                        # EVERY ORDER STATE CHANGE, past the connect budget.
+                        # The first-of-each-kind rule is for discovering line
+                        # types; it hides exactly the stream needed to follow
+                        # one order from sent to filled, which is what two
+                        # snapshot faults in a week have cost.
                         log.info("DAS <- %s", line[:300])
                     else:
                         log.debug("DAS <- %s", line[:300])
@@ -955,41 +993,61 @@ class DasLink:
             # with.
             log.info("DAS <- first %s line: %s", head, line[:200])
 
+        # A DUMP ENDS. The staged record replaces what was held -- a snapshot
+        # REPLACES rather than merges, because an order that filled or was
+        # cancelled elsewhere has to disappear, and a merge is how a phantom
+        # order stays on the screen. The flag is set HERE and only here: it
+        # means "this process has been told what the account holds", and the
+        # END marker is the only proof of that.
         if head == "#POSEND":
             if self._staging_pos is not None:
                 self.positions = self._staging_pos
                 self._staging_pos = None
+            self._dump_open_at.pop("pos", None)
             self.pos_snapshot = True
             return
         if head == "#ORDEREND":
             if self._staging_orders is not None:
                 self.orders = self._staging_orders
                 self._staging_orders = None
+            self._dump_open_at.pop("orders", None)
             self.order_snapshot = True
             return
         if head == "#TRADEEND":
             if self._staging_fills is not None:
                 self.fills = self._staging_fills
                 self._staging_fills = None
+            self._dump_open_at.pop("fills", None)
             return
 
-        # A snapshot REPLACES what is held rather than merging into it. An
-        # order that filled or was cancelled elsewhere has to disappear, and
-        # a merge is how a phantom order stays on the screen.
-        if head == "#POS":
-            self._staging_pos = {}
-            self.pos_snapshot = False
+        # A DUMP BEGINS -- but only if this really is the header row.
+        #
+        # THE FLAGS ARE NOT CLEARED HERE, and that is the point. Opening a
+        # dump used to mean "forget that we know anything", so one line that
+        # merely looked like a header blinded every read for the rest of the
+        # session (#OrderServer on 2026-09-17, #OrderSending on 2026-09-21).
+        # What we have been told stays true until something REPLACES it, so
+        # the worst a stray header can now do is stage a record nobody
+        # publishes -- and the abandonment below cleans that up too.
+        if head in DUMP_HEADERS and is_dump_header(head, up.split()):
+            if head == "#POS":
+                self._staging_pos, self._dump_open_at["pos"] = {}, time.time()
+            elif head == "#ORDER":
+                self._staging_orders, self._dump_open_at["orders"] = {}, time.time()
+            else:
+                self._staging_fills, self._dump_open_at["fills"] = {}, time.time()
             return
-        if head == "#ORDER":
-            self._staging_orders = {}
-            self.order_snapshot = False
-            return
-        if head == "#TRADE":
-            self._staging_fills = {}
+        if head in DUMP_HEADERS:
+            # Same family, not the header: an order echo, a status push, or
+            # whatever DAS adds next. Counted and named rather than guessed
+            # at, so it shows up in health() instead of in a support call.
+            self._note_unhandled(f"{head}(info)", line)
             return
 
         if head == "%POS":
             p = parse_pos(line)
+            if self._staging_expired("pos"):
+                self._staging_pos = None
             if p and p["symbol"]:
                 (self._staging_pos if self._staging_pos is not None
                  else self.positions)[p["symbol"]] = p
@@ -1026,7 +1084,35 @@ class DasLink:
         # NOTHING MATCHED. Counted by head and left alone: the next line DAS
         # adds should show up in health() as a name nobody handled, not get
         # folded into whichever branch its prefix happens to resemble.
-        self.unhandled[head] = self.unhandled.get(head, 0) + 1
+        self._note_unhandled(head, line)
+
+    def _note_unhandled(self, key: str, line: str) -> None:
+        self.unhandled[key] = self.unhandled.get(key, 0) + 1
+        if key not in self._heads_seen:
+            self._heads_seen.add(key)
+            log.info("DAS <- unhandled %s: %s", key, line[:200])
+
+    def _staging_expired(self, kind: str) -> bool:
+        """Has a dump been open too long to still be one?
+
+        A dump that never gets its END marker would otherwise swallow every
+        push into a staging dict nobody reads. After DAS_DUMP_TIMEOUT_S the
+        staging is abandoned and the live record takes the pushes again --
+        loudly, because a missing END marker is a protocol surprise worth
+        seeing.
+        """
+        started = self._dump_open_at.get(kind)
+        if started is None:
+            return False
+        if time.time() - started <= config.DAS_DUMP_TIMEOUT_S:
+            return False
+        log.warning("DAS: a %s dump was opened %.0fs ago and never ended; "
+                    "abandoning it and applying pushes to the live record",
+                    kind, time.time() - started)
+        self._dump_open_at.pop(kind, None)
+        self.unhandled[f"#{kind.upper()}(unended)"] = \
+            self.unhandled.get(f"#{kind.upper()}(unended)", 0) + 1
+        return True
 
     def _on_login(self, line: str, up: str) -> None:
         """Settle the login wait.
@@ -1054,6 +1140,8 @@ class DasLink:
         if not o or not o["order_id"]:
             return
         self._snapshot_started()
+        if self._staging_expired("orders"):
+            self._staging_orders = None
         target = (self._staging_orders if self._staging_orders is not None
                   else self.orders)
         target[o["order_id"]] = o
@@ -1458,9 +1546,12 @@ async def place(*, symbol: str, side: str, qty: int, price: float | None,
     ack = await LINK.wait_ack(fut, token=tok, what="the order")
     LINK.minted[tok]["resolved"] = True
     ms = (time.perf_counter() - t0) * 1000.0
+    # THE PRICE AS SENT, not the float it came from: the wire carries
+    # 1158.60 and the log used to print 1158.6000000000001, which reads as a
+    # sub-penny limit nobody could have placed.
     log.info("DAS placed %s %s %s @ %s via %s -> %s in %.0fms",
-             side, qty, symbol, price, route or config.DAS_ROUTE,
-             ack.get("order_id"), ms)
+             side, qty, symbol, "MKT" if price is None else fmt_price(price),
+             route or config.DAS_ROUTE, ack.get("order_id"), ms)
     return {"ok": True, "order_id": ack.get("order_id"),
             "status": ack.get("status"), "token": tok,
             "route": norm_route(route, known=set(LINK.routes)),

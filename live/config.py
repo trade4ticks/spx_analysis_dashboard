@@ -362,6 +362,20 @@ DAS_ROUTES = [r.strip().upper() for r in
 # is the tape's and logging drops to DEBUG.
 DAS_LOG_LINES = int(os.environ.get("LIVE_DAS_LOG_LINES", "60"))
 
+# HOW LONG A DUMP MAY STAY OPEN WITHOUT ITS END MARKER.
+#
+# A `#Order` header opens a staging buffer that `#OrderEnd` publishes. If the
+# END never comes — a surprise, but two #Order-family surprises have already
+# happened — every push after it would be filed into staging, which nothing
+# reads. Past this, the staging is abandoned and pushes go to the live record
+# again, with a warning naming it.
+DAS_DUMP_TIMEOUT_S = float(os.environ.get("LIVE_DAS_DUMP_TIMEOUT_S", "10"))
+
+# LOG EVERY %ORDER AND %OrderAct, past the connect budget. On while the DAS
+# path is settling: the first-of-each-kind rule is for discovering line types
+# and hides the stream that follows one order from sent to filled.
+DAS_LOG_ORDERS = os.environ.get("LIVE_DAS_LOG_ORDERS", "1").strip().lower()     in ("1", "true", "yes", "on")
+
 # HOW OFTEN LIVENESS IS PROVEN. The CMD API pushes order and position
 # updates, so there is no poll whose success would stand in for "the socket
 # is alive" — on a quiet name nothing arrives for minutes. ECHO is a cheap

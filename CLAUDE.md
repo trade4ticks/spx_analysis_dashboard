@@ -80,6 +80,21 @@ was NOT CALLED AT ALL when a switch or guard refuses, and scans every
 Exceptions kept deliberately: `cancel` is never gated on arming; `flatten` needs
 trading allowed but not the pane's arm flag.
 
+**Only a validated DUMP HEADER touches the DAS snapshot, and only an END marker
+sets it.** Twice a line from the `#Order` family blinded the pane: `#OrderServer`
+(2026-09-17, a prefix test) and again on 2026-09-21 despite exact-token matching —
+because an `#Order` line carrying an ORDER has the same head as the header row and
+cannot be told apart by the head at all. The rule is now structural, not a list of
+exceptions: a dump opens only on the documented field-name row (`is_dump_header`:
+first field `ID`/`SYMB`, no digits anywhere), the snapshot flag is NEVER cleared by
+a header (only set by `#OrderEnd`/`#POSEND`, only reset on connect), and a dump that
+never gets its END is abandoned after `DAS_DUMP_TIMEOUT_S` so pushes go back to the
+live record. Anything else in the family is counted as `#ORDER(info)` in
+`LINK.unhandled` → `health().socket.unhandled`. Symptoms when this breaks: every read
+"order list has not arrived yet (6s)" (that 6s is `DAS_SNAPSHOT_S`, the wait, not an
+age) plus CANCEL/REPLACE "order not open", because the process is targeting orders
+DAS has already closed.
+
 **DAS dispatch matches the EXACT first token**, never a prefix. `#OrderServer`
 (a routine status push) shares its prefix with `#Order`, so a prefix test read it as
 the header of a fresh order snapshot: it cleared `order_snapshot` — so `_ready`
@@ -93,8 +108,12 @@ are counted in `LINK.unhandled` and surface in `health().socket.unhandled`
 (`#SLOrder` is the standing example). The real login banner is captured verbatim in
 `check_das.LOGIN_BANNER` — an account with NO orders sends only headers and END
 markers, and that is a complete snapshot. The first `LIVE_DAS_LOG_LINES` (60) lines
-of every connect are logged verbatim at INFO, and the first line of each new kind
-once, so the next surprise is diagnosable from the journal.
+of every connect are logged verbatim at INFO, the first line of each new kind once,
+and — while `LIVE_DAS_LOG_ORDERS` is on (default) — EVERY `%ORDER` and `%OrderAct`,
+because first-of-each-kind hides the stream that follows one order from sent to
+filled. The `DAS placed` line prints the WIRE price (`fmt_price`), not the float it
+came from: 1158.6000000000001 in the journal reads as a sub-penny limit nobody could
+have placed, while the wire carried 1158.60.
 
 **The DAS route list is the MONTAGE** (`LIVE_DAS_ROUTES`, 45 base names with the
 montage's L/M suffix stripped), not `GET RouteStatus`: RouteStatus reports everything
