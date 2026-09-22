@@ -149,6 +149,11 @@ GATES = [
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
        note="no aggregation, caps hold, resubscribe on reconnect"),
+    # The third tier on the same upstream socket, and the page that is only
+    # allowed to watch. Its worst failure is silent: an unsubscribe taken out
+    # from under another tier looks like a symbol that went quiet.
+    _s("check_wall.py",
+       note="tiers share one socket; the cursor is a count; no broker"),
     # The band must hold still under a flat tape, and a rate must be a rate.
     _s("check_live_axis.py",
        note="price band steps only at the edge; trades/min is a fixed minute"),

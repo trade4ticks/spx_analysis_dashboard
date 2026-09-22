@@ -28,6 +28,7 @@ import websockets
 from app import scalp_quiet as quiet
 from live import config
 from live.scan import SymbolBuf, rollup_all
+from live.wall import WallSym
 from app.scalp_spread import SpreadAccum
 
 log = logging.getLogger("live.hub")
@@ -97,6 +98,14 @@ class Hub:
         # aggregate, so what is kept is the duration-weighted sums per minute
         # -- ~240 bytes a symbol against ~42 MB for a quote tape at 430.
         self.spread: dict[str, SpreadAccum] = {}
+        # THE WALL TIER. symbol -> its short tape and sampled quote band.
+        #
+        # A THIRD STORE for the same reason the scan is a second one: it wants
+        # a different shape of the same feed. Two minutes of trades AND a
+        # sampled quote, for a hundred symbols the wall draws as small
+        # pictures -- which the scan does not keep (no quote tape at all) and
+        # the pane cannot hold a hundred of. See live/wall.py.
+        self.wall: dict[str, WallSym] = {}
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
         # obvious set-of-tuples does not survive contact with Python.
@@ -121,6 +130,26 @@ class Hub:
         self._stop = False
 
     # ── subscriptions ───────────────────────────────────────────────────
+    def holders(self, sym: str, exclude: str = "") -> list[str]:
+        """Which tiers still want this symbol, other than `exclude`.
+
+        ONE PLACE, ASKED BY EVERY TIER. Each tier's add and drop needs the
+        same answer -- "is anyone else holding it" -- and a copy of the test
+        per tier is how the third tier gets left out of the second one's
+        arithmetic. The failure that causes is an unsubscribe on a symbol
+        another page is still drawing, and it shows up as a row that has gone
+        QUIET rather than one that has gone blank, which is precisely the
+        distinction both pages exist to make.
+        """
+        out = []
+        if exclude != "pane" and sym in self.refs:
+            out.append("pane")
+        if exclude != "scan" and sym in self.scan:
+            out.append("scan")
+        if exclude != "wall" and sym in self.wall:
+            out.append("wall")
+        return out
+
     async def acquire(self, symbol: str) -> str | None:
         """Reference a symbol. Returns an error string, or None on success."""
         sym = (symbol or "").strip().upper()
@@ -133,16 +162,16 @@ class Hub:
                 return (f"at the {config.MAX_SYMBOLS}-symbol cap "
                         f"({', '.join(sorted(self.refs))}); close a pane first.")
             first = sym not in self.refs
-            held_by_scan = sym in self.scan
+            held_elsewhere = bool(self.holders(sym, exclude="pane"))
             self.refs[sym] = self.refs.get(sym, 0) + 1
             self.trades.setdefault(sym, deque())
             self.quotes.setdefault(sym, deque())
-        # NOTHING TO SEND IF THE SCAN ALREADY HOLDS IT. Both tiers now take
-        # both channels, so a pane opening on a scan symbol needs no upgrade
-        # -- the subscription it wants is already live. Re-sending would be
-        # harmless upstream but would make the release path below look wrong,
-        # and the two have to stay mirror images of each other.
-        if first and not held_by_scan:
+        # NOTHING TO SEND IF ANOTHER TIER ALREADY HOLDS IT. Every tier takes
+        # both channels, so a pane opening on a scan or wall symbol needs no
+        # upgrade -- the subscription it wants is already live. Re-sending
+        # would be harmless upstream but would make the release path below
+        # look wrong, and the two have to stay mirror images of each other.
+        if first and not held_elsewhere:
             await self._send({"action": "subscribe",
                               "params": _channels(sym)})
         return None
@@ -157,14 +186,14 @@ class Hub:
             self.refs.pop(sym, None)
             self.trades.pop(sym, None)
             self.quotes.pop(sym, None)
-            held_by_scan = sym in self.scan
+            held_elsewhere = bool(self.holders(sym, exclude="pane"))
         # THE SCAN KEEPS IT, WHOLE. Dropping any part of the subscription
         # because the last PANE closed would blank a row in the grid -- and
         # blank it silently, since a symbol that stops printing looks exactly
         # like a symbol that has gone quiet, which is the one thing the page
         # exists to tell apart. Now that the scan takes quotes too, that means
         # sending nothing at all rather than dropping the quote channel.
-        if not held_by_scan:
+        if not held_elsewhere:
             await self._send({"action": "unsubscribe",
                               "params": _channels(sym)})
 
@@ -217,10 +246,10 @@ class Hub:
             for s in drop:
                 self.scan.pop(s, None)
                 self.spread.pop(s, None)
-            # A pane still holding a dropped symbol keeps it subscribed, so
-            # its trade channel must not be unsubscribed here.
-            drop_sub = [s for s in drop if s not in self.refs]
-            add_sub = [s for s in add if s not in self.refs]
+            # A pane or the wall still holding a dropped symbol keeps it
+            # subscribed, so it must not be unsubscribed here.
+            drop_sub = [s for s in drop if not self.holders(s, exclude="scan")]
+            add_sub = [s for s in add if not self.holders(s, exclude="scan")]
 
         # One message each way, not one per symbol: 600 subscribe frames is a
         # burst the socket does not need to see, and the upstream answers each
@@ -282,6 +311,87 @@ class Hub:
                                  else (float("nan"), float("nan"), 0,
                                        float("nan")))
         return state
+
+    # ── the wall tier ───────────────────────────────────────────────────
+    async def wall_set(self, symbols) -> tuple[list[str], list[str], list[str]]:
+        """Replace the wall's symbol set wholesale. (added, removed, refused).
+
+        WHOLESALE, the same rule the scan follows and for the same reason:
+        the page's watchlist IS the set, it is edited as a list, and building
+        the change out of adds and removes makes the intermediate states
+        reachable on a connection where every subscription is shared.
+
+        A symbol another tier holds is not unsubscribed by a removal here.
+        """
+        want, seen, refused = [], set(), []
+        for s in symbols:
+            sym = (s or "").strip().upper()
+            if not sym or not sym.isalnum():
+                refused.append(f"{s!r} is not a symbol.")
+                continue
+            if sym in seen:
+                continue
+            if len(seen) >= config.WALL_MAX_SYMBOLS:
+                refused.append(f"{sym}: at the "
+                               f"{config.WALL_MAX_SYMBOLS}-symbol wall cap.")
+                continue
+            seen.add(sym)
+            want.append(sym)
+
+        async with self._lock:
+            have = set(self.wall)
+            add = [s for s in want if s not in have]
+            drop = [s for s in have if s not in seen]
+            for s in add:
+                self.wall[s] = WallSym(config.WALL_RETAIN_S,
+                                       config.WALL_RING_START,
+                                       config.WALL_RING_MAX,
+                                       config.WALL_QUOTE_RING_MAX,
+                                       config.WALL_QUOTE_SAMPLE_MS)
+            for s in drop:
+                self.wall.pop(s, None)
+            drop_sub = [s for s in drop if not self.holders(s, exclude="wall")]
+            add_sub = [s for s in add if not self.holders(s, exclude="wall")]
+
+        # One message each way, not one per symbol.
+        if add_sub:
+            await self._send({"action": "subscribe",
+                              "params": ",".join(_channels(s)
+                                                 for s in add_sub)})
+        if drop_sub:
+            await self._send({"action": "unsubscribe",
+                              "params": ",".join(_channels(s)
+                                                 for s in drop_sub)})
+        if add or drop:
+            log.info("wall set: %d held (+%d, -%d), %d refused",
+                     len(self.wall), len(add), len(drop), len(refused))
+        return add, drop, refused
+
+    def wall_status(self) -> dict:
+        """What the wall tier is holding, and what it is losing.
+
+        `truncated` is here for the same reason the scan reports it: a ring at
+        its ceiling still evicting inside the retention window is drawing a
+        SHORT tape, and a short tape on this page reads as a quiet symbol --
+        which is the one judgement the wall exists to support.
+        """
+        truncated = sorted(s for s, w in self.wall.items()
+                           if w.trades.evicted_live or w.quotes.evicted_live)
+        return {
+            "held": len(self.wall),
+            "cap": config.WALL_MAX_SYMBOLS,
+            "retain_s": config.WALL_RETAIN_S,
+            "window_s": config.WALL_WINDOW_S,
+            "trades_held": sum(w.trades.n for w in self.wall.values()),
+            "quotes_held": sum(w.quotes.n for w in self.wall.values()),
+            "buffer_mb": sum(w.bytes_held()
+                             for w in self.wall.values()) / 1048576.0,
+            "quoteless": sorted(s for s, w in self.wall.items()
+                                if w.last_quote is None)[:20],
+            "crossed": sum(w.crossed for w in self.wall.values()),
+            "truncated": truncated[:20],
+            "truncated_count": len(truncated),
+        }
 
     # ── pins ────────────────────────────────────────────────────────────
     async def pin(self, symbol: str) -> str | None:
@@ -375,12 +485,11 @@ class Hub:
             # server remembers nothing, and a reconnect that restores the
             # socket without the subscriptions is a live-looking dead plot.
             async with self._lock:
-                # BOTH TIERS, each with its own channels. Restoring only the
-                # panes would leave the scan grid frozen after a drop with
-                # every row looking merely quiet, and restoring the scan with
-                # quotes would put back the 68% of the message volume that
-                # not subscribing to them is the point of.
-                syms = sorted(set(self.refs) | set(self.scan))
+                # EVERY TIER. Restoring only the panes would leave the scan
+                # grid frozen after a drop with every row looking merely
+                # quiet, and the wall's hundred panes flat -- both of which
+                # read as a calm market rather than as a dead socket.
+                syms = sorted(set(self.refs) | set(self.scan) | set(self.wall))
             if syms:
                 params = ",".join(_channels(s) for s in syms)
                 await ws.send(json.dumps({"action": "subscribe",
@@ -413,10 +522,15 @@ class Hub:
                 # stores must not be able to make each other's records
                 # disappear.
                 buf = self.scan.get(sym)
-                if buf is not None:
+                wsym = self.wall.get(sym)
+                if buf is not None or wsym is not None:
                     ts, price, size = m.get("t"), m.get("p"), m.get("s")
                     if ts is not None and price is not None and size is not None:
-                        buf.push(float(ts), float(price), float(size))
+                        if buf is not None:
+                            buf.push(float(ts), float(price), float(size))
+                        if wsym is not None:
+                            wsym.push_trade(float(ts), float(price),
+                                            float(size))
                 if sym in self.trades:
                     rec = {"t": m.get("t"), "p": m.get("p"), "s": m.get("s"),
                            "x": m.get("x"), "z": m.get("z"),
@@ -438,10 +552,14 @@ class Hub:
                 # the same rule the trade path follows. A symbol can be held
                 # by both, by either, or briefly by neither.
                 acc = self.spread.get(sym)
-                if acc is not None:
+                wsym = self.wall.get(sym)
+                if acc is not None or wsym is not None:
                     ts, bp, ap = m.get("t"), m.get("bp"), m.get("ap")
                     if ts is not None and bp is not None and ap is not None:
-                        acc.push(float(ts), float(bp), float(ap))
+                        if acc is not None:
+                            acc.push(float(ts), float(bp), float(ap))
+                        if wsym is not None:
+                            wsym.push_quote(float(ts), float(bp), float(ap))
                 if sym in self.quotes:
                     rec = {"t": m.get("t"), "bp": m.get("bp"),
                            "ap": m.get("ap"), "bs": m.get("bs"),
@@ -544,11 +662,13 @@ class Hub:
             "symbols": sorted(self.refs),
             "pinned": sorted(self.pinned),
             "scan": self.scan_status(),
+            "wall": self.wall_status(),
             "msgs_in": self.msgs_in,
             "trades_in": self.trades_in,
             "quotes_in": self.quotes_in,
             "dropped_cap": self.dropped_cap,
             "caps": {"scan_symbols": config.SCAN_MAX_SYMBOLS,
+                     "wall_symbols": config.WALL_MAX_SYMBOLS,
                      "symbols": config.MAX_SYMBOLS,
                      "window_s": config.MAX_WINDOW_S,
                      "trades": config.MAX_TRADES_PER_SYMBOL,

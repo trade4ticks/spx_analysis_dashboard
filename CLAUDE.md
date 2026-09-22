@@ -225,6 +225,63 @@ arriving prints still say where the market is.
 wrong one is what moves money). The ladder hatching and the drag label now
 mark only what is known to cross, for the same reason.
 
+## Equities Wall (`/wall`, in progress — 2026-09-22)
+
+A page of dozens to ~100 small live tapes, so a whole watchlist can be
+scanned at a glance for which names are quiet and which have a usable
+spread. **It is for watching.** No ladder, no arming, no order entry,
+nothing that reaches a broker — gated (`check_wall.py` parses the wall's
+modules and its endpoints and refuses any reference to the broker).
+
+**No metric, no score, no colour-coding, no ranking.** The scan page's metric
+surfaced untradeable names; this page shows the picture and lets the eye
+decide.
+
+**Phases:** P1 server side (hub tier, watchlist store, endpoints, frames) —
+done; P2 the page and its canvas panes; P3 controls (add/remove, window,
+spread share, per-pane override); P4 capacity and docs.
+
+**The vertical scale is the point.** Each pane scales so the spread fills a
+fixed share of its height (default 60%, centred on the mid, adjustable, with
+a per-pane override saved next to the ticker). "Bouncy" is defined relative
+to the spread's own width, so a half-spread move looks the same on FDX (7c)
+and LLY (50c), and absolute spread width stops dominating the wall. The
+spread number in cents is what tells them apart.
+
+**Decisions already made and gated:**
+- **A third tier on the one upstream socket.** The account permits exactly
+  one Polygon connection; a second evicts the first. `Hub.holders(sym,
+  exclude=tier)` is the single place that answers "does anyone else still
+  hold this", and every tier's add and drop goes through it — the failure it
+  prevents (an unsubscribe pulled out from under another tier) shows as a row
+  or pane that has gone QUIET, not blank, which is the one distinction these
+  pages exist to make.
+- **One browser connection for the whole page.** The service caps browsers at
+  `MAX_CLIENTS` (8); a hundred panes with a socket each is twelve times over.
+  `/wall/ws` carries every pane.
+- **One frame a second, and a symbol with nothing new is not sent** (which is
+  what lets the page skip that pane's redraw). The frame still goes out when
+  empty, or the page cannot tell a quiet market from a stopped feed.
+- **The cursor is a COUNT, not a timestamp.** Several trades share a
+  millisecond; a timestamp cursor drops all but the first, silently, on
+  exactly the names being watched.
+- **The quote is sampled at 200 ms for the band, but `last_quote` takes every
+  message** — the spread number is a fact about now. A crossed or one-sided
+  quote is dropped and counted (a zero bid would throw the pane's whole
+  scale). The typical spread is a **median over the last minute**, so one
+  wide quote cannot rescale a pane; with no samples in the window it falls
+  back to the last quote, because a quiet name's spread is old, not absent.
+- **The watchlist lives server-side** (`data/wall_watchlist.json`, written
+  whole through a temp file and a rename) and carries each entry's scale
+  override, because the override is a fact about that symbol on this wall.
+  `WallRunner.apply()` is the one path that sets the hub tier, the file and
+  every open page — two of the three would be wrong in a way nobody sees
+  until the next deploy.
+
+Files: `live/wall.py` (the per-symbol store), `live/wall_store.py`,
+`live/wall_runner.py`, the wall tier in `live/hub.py`, `/wall/*` in
+`live/main.py`. Gate: `scripts/check_wall.py`, 21 cases, no market needed.
+
 ### Surface metrics exploration (P6, in progress)
 
 Phases (approved 2026-09-15): **P6a** server groundwork — done; **P6b** ranking chart —

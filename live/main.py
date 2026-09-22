@@ -19,10 +19,12 @@ from live import broker, config, norms, scan_universe
 from live.hub import HUB
 from live.scan_runner import ScanRunner
 from live.scan_history import SESSION_MINUTES
+from live.wall_runner import WallRunner
 
 # One runner for the process, created here rather than in lifespan so
 # the route handlers can name it without a module-global set later.
 SCAN = ScanRunner(HUB)
+WALL = WallRunner(HUB)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,8 +60,15 @@ async def lifespan(app: FastAPI):
     n = SCAN.history.load()
     log.info("scan history: %d symbols for %s (%s)", n, SCAN.history.date,
              SCAN.history.loaded_from or "no file yet")
-    tasks = [asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump()),
-             asyncio.create_task(SCAN.run())]
+    # THE WALL'S WATCHLIST, RESTORED BEFORE ANYTHING TICKS, for the same
+    # reason the scan's history is: the list is the page, it was chosen by
+    # hand, and a deploy must not empty it. Holding the symbols here also
+    # means they are already buffering when the first browser connects.
+    held = await WALL.restore()
+    log.info("wall watchlist: %d symbols (%s)", held,
+             WALL.store.loaded_from or "no file yet")
+    tasks =[asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump()),
+             asyncio.create_task(SCAN.run()), asyncio.create_task(WALL.run())]
     # Pinned BEFORE anything connects, so a symbol on the list is already
     # buffering by the time a pane asks for it — which is the entire point of
     # pinning rather than watching.
@@ -72,6 +81,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await SCAN.stop()
+        await WALL.stop()
         await HUB.stop()
         await norms.close()
         await broker.aclose()
@@ -109,6 +119,7 @@ def _status() -> dict:
     st = HUB.status()
     st["trading"] = broker.trading_state()
     st["scan_runner"] = SCAN.status()
+    st["wall_runner"] = WALL.status()
     return st
 
 
@@ -471,6 +482,72 @@ async def scan_ws(sock: WebSocket):
         log.info("scan socket ended: %s", exc)
     finally:
         SCAN.unsubscribe(sock)
+
+
+# ── the wall ────────────────────────────────────────────────────────────────
+#
+# A THIRD PAGE ON THE SAME SERVICE, and a third tier on the same upstream
+# socket, for the reason the scan already explains: the account permits one
+# connection upstream. Downstream it is ONE BROWSER SOCKET FOR THE WHOLE PAGE
+# however many panes are on it -- the service caps browser connections at
+# MAX_CLIENTS (8), and a wall of a hundred panes holding one each would blow
+# through that twelve times over.
+#
+# It is for WATCHING. Nothing here places, moves or cancels an order, and
+# nothing here reads a broker.
+
+
+@app.get("/wall/watchlist")
+async def wall_watchlist():
+    """The saved list, its settings, and what the tier is actually holding."""
+    return WALL.state()
+
+
+@app.post("/wall/watchlist")
+async def wall_watchlist_set(req: Request):
+    """{"entries": [{"symbol", "scale"}...], "settings": {...}} — wholesale.
+
+    Wholesale because the page edits a list and posts the list; see
+    WallRunner.apply for why the hub, the file and every open page are set
+    from one call rather than three.
+    """
+    body = await req.json()
+    entries = body.get("entries")
+    if entries is None:
+        entries = body.get("symbols") or []
+    if not isinstance(entries, list):
+        return {"error": "entries must be a list"}
+    return await WALL.apply(entries, body.get("settings"))
+
+
+@app.websocket("/wall/ws")
+async def wall_ws(sock: WebSocket):
+    """One wall page. Every pane's data comes down this one connection."""
+    await sock.accept()
+    st = WALL.subscribe(sock)
+    try:
+        await sock.send_json({"ev": "hello", "data": _status(),
+                              **WALL.state()})
+        # The first frame is sent immediately rather than up to a second
+        # later, so opening the page draws panes instead of empty boxes.
+        await sock.send_json(WALL.frame(st))
+        while True:
+            msg = await sock.receive_json()
+            act = msg.get("action")
+            if act == "window":
+                WALL.set_window(sock, msg.get("window_s"))
+                await sock.send_json(WALL.frame(st))
+            elif act == "watchlist":
+                await WALL.apply(msg.get("entries") or [],
+                                 msg.get("settings"))
+            elif act == "status":
+                await sock.send_json({"ev": "status", "data": _status()})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:                              # noqa: BLE001
+        log.info("wall socket ended: %s", exc)
+    finally:
+        WALL.unsubscribe(sock)
 
 
 @app.websocket("/ws")

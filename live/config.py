@@ -210,6 +210,61 @@ SCAN_QUOTE_DWELL_CAP_S = float(
 SCAN_ROLLUP_SLICE_MS = float(os.environ.get("LIVE_SCAN_ROLLUP_SLICE_MS", "8"))
 
 
+# ── the wall tier ───────────────────────────────────────────────────────────
+#
+# A THIRD TIER ON THE SAME UPSTREAM SOCKET, for the same reason the scan is
+# one: the account permits exactly one, and a second evicts the first.
+#
+# What it holds is small and short. Trades and a SAMPLED quote for two
+# minutes, against the scan's six minutes of trades and the pane's fifteen of
+# everything. At the 100-symbol ceiling that is a few MB, so the ceiling is
+# set by what a person can read on a screen rather than by the box.
+WALL_MAX_SYMBOLS = int(os.environ.get("LIVE_WALL_MAX_SYMBOLS", "120"))
+
+# The tape each pane draws, plus a margin so the window is full at its left
+# edge rather than filling in from empty after a change of window.
+WALL_RETAIN_S = float(os.environ.get("LIVE_WALL_RETAIN_S", "180"))
+WALL_WINDOW_S = float(os.environ.get("LIVE_WALL_WINDOW_S", "120"))
+
+# Ring sizing, the same grow-on-demand arrangement the scan uses. 256 records
+# is two minutes at 2 trades/sec, which covers most of a watchlist outright;
+# 24,000 is two minutes at 200/sec, which is more than the busiest name prints
+# at the open.
+WALL_RING_START = int(os.environ.get("LIVE_WALL_RING_START", "256"))
+WALL_RING_MAX = int(os.environ.get("LIVE_WALL_RING_MAX", "24000"))
+
+# THE QUOTE IS SAMPLED -- see live/wall.py. 200 ms is a fifth of one redraw,
+# and it turns a busy name's 6,000 quotes a window into 600. The ring is
+# capped just above the window's worth so a stalled sampler cannot grow it.
+WALL_QUOTE_SAMPLE_MS = float(os.environ.get("LIVE_WALL_QUOTE_SAMPLE_MS", "200"))
+WALL_QUOTE_RING_MAX = int(os.environ.get("LIVE_WALL_QUOTE_RING_MAX", "1200"))
+
+# The lookback for the TYPICAL spread, which is what the vertical scale is
+# built from. A minute, so the scale moves when the spread moves and not when
+# one quote is wide -- the whole point of scaling to the spread is that the
+# pane does not jump while you are looking at it.
+WALL_SPREAD_WINDOW_S = float(os.environ.get("LIVE_WALL_SPREAD_WINDOW_S", "60"))
+
+# ONE FRAME A SECOND, not a flush every 100 ms. A hundred panes redrawn at
+# 30fps is a page that melts a laptop to show tape a person reads in glances;
+# the eye is looking for "is this one moving", which one frame a second
+# answers. It is also the cadence the page redraws at, so a faster push would
+# only queue work the browser throws away.
+WALL_TICK_S = float(os.environ.get("LIVE_WALL_TICK_S", "1.0"))
+
+# The share of a pane's height the spread fills, and what a pane may override
+# it to. The default is the page's, saved with the watchlist; see the wall
+# store for why the override lives next to the ticker.
+WALL_SPREAD_SHARE = float(os.environ.get("LIVE_WALL_SPREAD_SHARE", "0.60"))
+WALL_SHARE_MIN = 0.05
+WALL_SHARE_MAX = 0.95
+
+# Where the watchlist is kept so a restart does not empty the wall. One small
+# JSON file, written whole -- see live/wall_store.py.
+WALL_STORE_PATH = os.environ.get(
+    "LIVE_WALL_STORE_PATH", str(ROOT / "data" / "wall_watchlist.json"))
+
+
 # ── the persistent watchlist ────────────────────────────────────────────────
 #
 # Symbols held whether or not a pane is watching them, so closing the browser
