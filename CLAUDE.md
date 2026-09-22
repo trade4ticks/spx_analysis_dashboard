@@ -238,8 +238,8 @@ surfaced untradeable names; this page shows the picture and lets the eye
 decide.
 
 **Phases:** P1 server side (hub tier, watchlist store, endpoints, frames) —
-done; P2 the page and its canvas panes; P3 controls (add/remove, window,
-spread share, per-pane override); P4 capacity and docs.
+done; P2 the page and its canvas panes — done; P3 controls — done; P4
+capacity (the user's own measurement on the box) and docs.
 
 **The vertical scale is the point.** Each pane scales so the spread fills a
 fixed share of its height (default 60%, centred on the mid, adjustable, with
@@ -278,9 +278,45 @@ spread number in cents is what tells them apart.
   every open page — two of the three would be wrong in a way nobody sees
   until the next deploy.
 
+**The page (P2/P3).** Canvas per pane, unlike the scan page's windowed DOM:
+what is drawn is a picture (a couple of hundred bubbles and a stepped band)
+rather than a row of cells, and there is nothing to hit-test. One
+`setInterval` at 1 Hz draws every pane; a pane is skipped when it is off
+screen (IntersectionObserver) or has nothing new, with a forced refresh every
+`WL_FORCE_REDRAW_MS` (5 s) so a quiet pane's bubbles cannot sit still while
+the window slides out from under them. The band's fill is drawn UNDER the
+prints and the bid/ask lines OVER them — rendered and looked at: with
+everything underneath, a busy two minutes buried the band the pane is scaled
+to. Bubbles are translucent (0.55) so density reads as shade. Prices are
+drawn against the SERVER's clock (`at` minus local elapsed), not the
+browser's; a laptop a few seconds out would put every print off the pane.
+
+**`x-init="init()"` IS A DOUBLE INITIALISATION.** Alpine 3 calls a data
+object's own `init()` automatically, so naming it in `x-init` as well runs it
+twice — on this page that was two WebSockets and two draw loops per tab,
+found by rendering the page in headless Edge and counting the sockets (2,
+then 1 after removing it), invisible to every source-reading gate. **Every
+other page in this app still does it** (14 templates, `ai_explorer`,
+`equities_live`, `equities_scan`, `oo_backtest`, … all pair `x-init="init()"`
+with a component that defines `init()`): each one double-fetches on load, and
+the tape page holds two of `MAX_CLIENTS`' eight slots per tab. Not changed
+here — it is a separate, wider fix.
+
+Controls: add box and an Edit-list textarea (an edit KEEPS each symbol's
+override), window and spread-share sliders, pane width. The per-pane override
+is not a control on every pane — a hundred panes carrying sliders is a
+hundred controls on a page whose job is to be looked at — but a click selects
+a pane and the bar grows a scale slider, "use default" and "remove" for it.
+Window and share are saved server-side with the list (debounced 500 ms); pane
+WIDTH is local storage, because it is about this screen and the same list is
+read on a laptop and a 32-inch monitor.
+
 Files: `live/wall.py` (the per-symbol store), `live/wall_store.py`,
 `live/wall_runner.py`, the wall tier in `live/hub.py`, `/wall/*` in
-`live/main.py`. Gate: `scripts/check_wall.py`, 21 cases, no market needed.
+`live/main.py`, `templates/equities_wall.html`, `static/js/equities_wall.js`.
+Gate: `scripts/check_wall.py`, 26 cases, no market needed — the last five
+execute the shipped JS in node (the scale property: a half-spread move is the
+same fraction of the pane on a 7c name and a 50c one).
 
 ### Surface metrics exploration (P6, in progress)
 

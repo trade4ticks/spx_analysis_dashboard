@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Equities Wall</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+
+  <style>
+    /* Equities Wall — page-scoped, prefixed .wl-.
+
+       CANVAS PER PANE, unlike the scan page's windowed DOM, because what is
+       drawn here is a picture rather than a row of cells: a couple of hundred
+       bubbles and a stepped band, redrawn as a whole. The scan's measurement
+       (DOM 29 ms windowed against canvas 2.4 ms) already said canvas wins on
+       cost and loses on hit-testing; there is nothing to hit-test here. */
+    html { color-scheme: dark; }
+    .wl-body { flex:1; display:flex; flex-direction:column; min-height:0;
+               padding:10px 12px; }
+
+    .wl-bar {
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:11px;
+    }
+    .wl-grp { display:flex; align-items:center; gap:6px; }
+    .wl-grp.sep { border-left:1px solid var(--border); padding-left:14px; }
+    .wl-lab { color:var(--muted); white-space:nowrap; }
+    .wl-num { font-variant-numeric:tabular-nums; color:var(--text);
+              font-weight:600; }
+    .wl-spacer { flex:1; }
+    .wl-inp {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--text); font-size:11px; padding:3px 7px; border-radius:4px;
+      color-scheme: dark;
+    }
+    .wl-inp.sym { width:110px; text-transform:uppercase; }
+    .wl-btn {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--muted); font-size:11px; padding:3px 9px; border-radius:4px;
+      cursor:pointer;
+    }
+    .wl-btn:hover { color:var(--text); }
+    .wl-btn.on { border-color:var(--accent); color:var(--accent); }
+    .wl-btn:disabled { opacity:0.4; cursor:default; }
+    input[type=range] { accent-color:var(--accent); width:120px; }
+
+    .wl-warn {
+      background:rgba(232,67,147,0.14); border:1px solid #e84393;
+      color:#e84393; font-weight:600; font-size:11px;
+      padding:6px 12px; border-radius:5px; margin-bottom:8px;
+    }
+    .wl-note { font-size:10px; color:var(--muted); }
+
+    /* ── the wall ──────────────────────────────────────────────────────
+       auto-fill rather than a fixed column count: the same list is read on a
+       laptop and on a 32-inch monitor, and the pane width is the control that
+       decides how many fit. */
+    .wl-scroll {
+      flex:1; min-height:0; overflow:auto;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:8px;
+    }
+    .wl-grid { display:grid; gap:8px; }
+
+    .wl-pane {
+      background:var(--raised); border:1px solid var(--border);
+      border-radius:5px; padding:4px 5px 5px; cursor:pointer;
+      display:flex; flex-direction:column; min-width:0;
+    }
+    .wl-pane.sel { border-color:var(--accent); }
+    .wl-head {
+      display:flex; align-items:baseline; gap:6px; margin-bottom:3px;
+      font-size:10px; line-height:1;
+    }
+    .wl-sym { color:var(--text); font-weight:700; letter-spacing:0.3px;
+              font-size:11px; }
+    .wl-px { color:var(--muted); font-variant-numeric:tabular-nums; }
+    /* THE SPREAD IS THE NUMBER ON THIS PAGE. Every pane is scaled so its
+       spread fills the same share of the height, which is the whole point --
+       and which means the picture alone cannot tell 7 cents from 50. */
+    .wl-sp { margin-left:auto; color:var(--accent); font-weight:700;
+             font-variant-numeric:tabular-nums; }
+    .wl-sp.est { color:var(--muted); font-weight:500; }
+    .wl-canvas { width:100%; display:block; }
+    .wl-empty { padding:26px; text-align:center; color:var(--muted);
+                font-size:12px; }
+  </style>
+</head>
+{#- NO `x-init="init()"` HERE. Alpine 3 calls a data object's own init()
+    automatically, so naming it again in x-init runs it TWICE — which on this
+    page meant two WebSockets and two draw loops per tab, on a service that
+    caps browser connections. Caught by rendering the page and counting the
+    sockets; no gate that reads source could see it. -#}
+<body class="page" x-data="equitiesWall">
+  {% set nav_active = "/wall" %}{% include "_nav.html" %}
+
+  <div class="wl-body">
+
+    <template x-if="warning">
+      <div class="wl-warn" x-text="warning"></div>
+    </template>
+
+    <!-- ── the watchlist ────────────────────────────────────────────── -->
+    <div class="wl-bar">
+      <span class="wl-lab">add</span>
+      <input class="wl-inp sym" placeholder="FDX"
+             @keydown.enter="addSymbol($event.target.value); $event.target.value = ''">
+      <button class="wl-btn" @click="showManual = !showManual"
+              :class="showManual ? 'on' : ''">Edit list</button>
+      <span class="wl-note"
+            x-text="entries.length + ' of ' + caps.symbols + ' held · saved on the server'"></span>
+
+      <span class="wl-spacer"></span>
+      <span class="wl-note" x-text="connSummary()"></span>
+    </div>
+
+    <template x-if="showManual">
+      <div class="wl-bar">
+        <textarea class="wl-inp" rows="3" style="flex:1;min-width:320px"
+                  x-model="manualText"
+                  placeholder="FDX LLY NVDA — space, comma or newline separated. Replaces the list; per-symbol scales are kept."></textarea>
+        <button class="wl-btn" @click="applyManual()" :disabled="busy">Apply</button>
+        <button class="wl-btn" @click="fillManualFromHeld()">Load current</button>
+      </div>
+    </template>
+
+    <!-- ── how the panes are drawn ──────────────────────────────────── -->
+    <div class="wl-bar">
+      <!-- THE SPREAD SHARE FIRST, because it is what makes two names
+           comparable: a half-spread move looks the same on FDX and on LLY
+           only because both spreads fill the same share of their pane. -->
+      <div class="wl-grp">
+        <span class="wl-lab">spread fills</span>
+        <input type="range" min="0.15" max="0.90" step="0.05"
+               x-model.number="settings.spread_share" @input="onShare()">
+        <span class="wl-num" x-text="sharePct()"></span>
+        <span class="wl-lab">of the pane</span>
+      </div>
+
+      <div class="wl-grp sep">
+        <span class="wl-lab">window</span>
+        <input type="range" min="20" max="180" step="10"
+               x-model.number="settings.window_s" @input="onWindow()">
+        <span class="wl-num" x-text="settings.window_s + 's'"></span>
+      </div>
+
+      <div class="wl-grp sep">
+        <span class="wl-lab">pane width</span>
+        <input type="range" min="120" max="420" step="20"
+               x-model.number="paneWidth" @input="onPaneWidth()">
+        <span class="wl-num" x-text="paneWidth + 'px'"></span>
+      </div>
+
+      <!-- THE PER-PANE OVERRIDE lives here rather than on every pane: a
+           hundred panes each carrying a slider is a hundred controls on a
+           page whose whole job is to be looked at. Click a pane, set it,
+           and it is saved next to that ticker. -->
+      <template x-if="selected">
+        <div class="wl-grp sep">
+          <span class="wl-lab">scale for</span>
+          <span class="wl-num" x-text="selected"></span>
+          <input type="range" min="0.15" max="0.90" step="0.05"
+                 :value="overrideOf(selected)"
+                 @input="setOverride($event.target.value)">
+          <span class="wl-num"
+                x-text="Math.round(overrideOf(selected) * 100) + '%'"></span>
+          <button class="wl-btn" @click="clearOverride()"
+                  :disabled="!hasOverride(selected)">Use default</button>
+          <button class="wl-btn" @click="remove(selected)">Remove</button>
+        </div>
+      </template>
+    </div>
+
+    <div class="wl-scroll">
+      <template x-if="!entries.length">
+        <div class="wl-empty" x-text="emptyMessage()"></div>
+      </template>
+      <div class="wl-grid" x-ref="grid" :style="gridStyle()">
+        <template x-for="e in entries" :key="e.symbol">
+          <div class="wl-pane" :class="selected === e.symbol ? 'sel' : ''"
+               :data-sym="e.symbol" :title="paneTitle(e.symbol)"
+               @click="select(e.symbol)">
+            <div class="wl-head">
+              <span class="wl-sym" x-text="e.symbol"></span>
+              <span class="wl-px" x-text="headOf(e.symbol).px"></span>
+              <span class="wl-sp" :class="headOf(e.symbol).from === 'spread' ? '' : 'est'"
+                    x-text="headOf(e.symbol).sp"></span>
+            </div>
+            <canvas class="wl-canvas"
+                    :style="'height:' + Math.round(paneWidth * 0.62) + 'px'"></canvas>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  {#- NOT `defer` — see the note in equities_scan.html. Alpine is deferred in
+      the head, so a deferred bundle here would register its component after
+      `alpine:init` has already fired and every expression on the page would
+      throw. Gated in check_rendered_assets.py. -#}
+  <script src={{ asset('js/equities_wall.js') }}></script>
+</body>
+</html>

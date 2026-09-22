@@ -644,9 +644,235 @@ async def case_the_wall_never_talks_to_a_broker():
             check(not refs,
                   f"live/main.py:{node.name}() references {sorted(set(refs))}"
                   f" — a wall endpoint must not reach a broker")
-    check(sorted(seen) == ["wall_watchlist", "wall_watchlist_set", "wall_ws"],
+    check(sorted(seen) == ["wall_page", "wall_watchlist", "wall_watchlist_set",
+                           "wall_ws"],
           f"the wall's endpoints are {sorted(seen)}; this check scans routes "
           f"by name and a renamed one would be scanned by nothing")
+
+
+# ── the page ────────────────────────────────────────────────────────────────
+#
+# The shipped JS is EXECUTED, not read. The scale is the page's whole claim --
+# that a half-spread move looks the same on a 7 cent name and a 50 cent one --
+# and it is arithmetic, so it can be checked exactly rather than by looking at
+# a wall and forming an impression.
+
+JS = ROOT / "static" / "js" / "equities_wall.js"
+
+JS_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const tail = `
+  const out = {};
+  // FDX at 7c and LLY at 50c, both at 60% of the pane.
+  const fdx = wlScale(334.40, 7.0, 0.60, 0);
+  const lly = wlScale(1158.60, 50.0, 0.60, 0);
+  out.fdxShare = (0.07 / fdx.range);
+  out.llyShare = (0.50 / lly.range);
+  out.fdxCentred = Math.abs((fdx.lo + fdx.hi) / 2 - 334.40);
+  out.llyCentred = Math.abs((lly.lo + lly.hi) / 2 - 1158.60);
+  // A half-spread move is the same FRACTION of the pane in both.
+  out.fdxHalf = (0.035 / fdx.range);
+  out.llyHalf = (0.25 / lly.range);
+  // An override changes only its own pane.
+  out.override = (0.50 / wlScale(1158.60, 50.0, 0.30, 0).range);
+  out.effOwn = wlEffShare({symbol:'LLY', scale:0.3}, 0.6);
+  out.effPage = wlEffShare({symbol:'FDX', scale:null}, 0.6);
+  out.effClamped = wlEffShare({symbol:'X', scale:9}, 0.6);
+  // No quote: scaled to its own prints, and it says so.
+  out.noQuoteFrom = wlScale(10.0, null, 0.6, 0.20).from;
+  out.quoteFrom = fdx.from;
+  // Re-centring: an EMA, except across a gap.
+  out.ema = wlCentre(100.0, 100.10, 0.20);
+  out.jump = wlCentre(100.0, 101.00, 0.20);
+  out.first = wlCentre(0, 100.0, 0.20);
+  // Bubbles: monotone, bounded, and a one-lot is still visible.
+  out.r1 = wlBubbleR(1);
+  out.r100 = wlBubbleR(100);
+  out.r1000 = wlBubbleR(1000);
+  out.r1e6 = wlBubbleR(1e6);
+  // Redraw rules.
+  out.dueOffscreen = wlDue({dirty:true, drawnAt:0}, 10000, false);
+  out.dueDirty = wlDue({dirty:true, drawnAt:9999}, 10000, true);
+  out.dueQuiet = wlDue({dirty:false, drawnAt:9000}, 10000, true);
+  out.dueStale = wlDue({dirty:false, drawnAt:0}, 10000, true);
+  out.forceMs = WL_FORCE_REDRAW_MS;
+  // Trimming, and the symbol box.
+  out.trim = wlTrim([[1,1,1],[5,1,1],[9,1,1]], 5).length;
+  out.parse = wlParseSymbols('fdx, lly\\nNVDA fdx  BRK.B');
+  out.fmt = [wlFmtSpread(7), wlFmtSpread(50), wlFmtSpread(null)];
+  globalThis.__out = out;
+`;
+eval(src + tail);
+process.stdout.write(JSON.stringify(globalThis.__out));
+"""
+
+
+async def case_js_scale_makes_names_comparable():
+    """The shipped JS, executed: the spread fills the share it is given.
+
+    THE PAGE'S WHOLE CLAIM. "Bouncy" is relative to the spread's own width,
+    so a half-spread move must occupy the same fraction of the pane on FDX
+    (7c) and LLY (50c). On a shared axis it does not, and the wide name looks
+    like everything while the narrow one looks like nothing.
+    """
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the shipped JS was NOT executed")
+        return
+    p = subprocess.run(["node", "-e", JS_DRIVER, str(JS)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        FAILS.append(f"the page JS did not run: {p.stderr.strip()[:300]}")
+        return
+    out = json.loads(p.stdout)
+
+    check(abs(out["fdxShare"] - 0.60) < 1e-9 and abs(out["llyShare"] - 0.60) < 1e-9,
+          f"the spread fills {out['fdxShare']:.3f} of FDX's pane and "
+          f"{out['llyShare']:.3f} of LLY's, asked for 0.60")
+    check(abs(out["fdxHalf"] - out["llyHalf"]) < 1e-12,
+          f"a half-spread move is {out['fdxHalf']:.4f} of FDX's pane and "
+          f"{out['llyHalf']:.4f} of LLY's — the two are supposed to look the "
+          f"same, and the spread NUMBER is what tells them apart")
+    check(out["fdxCentred"] < 1e-9 and out["llyCentred"] < 1e-9,
+          f"the window is not centred on the mid: {out['fdxCentred']}, "
+          f"{out['llyCentred']}")
+    check(abs(out["override"] - 0.30) < 1e-9,
+          f"a per-pane override of 0.30 gave {out['override']:.3f}")
+    check(out["effOwn"] == 0.3 and out["effPage"] == 0.6,
+          f"the override is not preferred over the page setting: "
+          f"{out['effOwn']}, {out['effPage']}")
+    check(out["effClamped"] <= 0.95,
+          f"a share of 9 was not clamped ({out['effClamped']}); a spread "
+          f"filling nine panes leaves nowhere for the trades")
+    check(out["quoteFrom"] == "spread" and out["noQuoteFrom"] == "trades",
+          f"a pane with no quote does not say so ({out['noQuoteFrom']}); it "
+          f"is not scaled to a spread and must not look like one that is")
+
+
+async def case_js_redraw_and_recentre():
+    """Off screen is never drawn; nothing new waits; a gap does not crawl."""
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the shipped JS was NOT executed")
+        return
+    p = subprocess.run(["node", "-e", JS_DRIVER, str(JS)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        FAILS.append(f"the page JS did not run: {p.stderr.strip()[:300]}")
+        return
+    out = json.loads(p.stdout)
+
+    check(out["dueOffscreen"] is False,
+          "a pane scrolled off the screen was redrawn; at a hundred panes "
+          "that is most of the page's work done for nobody")
+    check(out["dueDirty"] is True,
+          "a pane with new data was not redrawn")
+    check(out["dueQuiet"] is False,
+          "a pane with nothing new was redrawn a second later; the server "
+          "does not even send it")
+    check(out["dueStale"] is True and out["forceMs"] <= 10000,
+          f"a quiet pane is never refreshed (force={out['forceMs']} ms); its "
+          f"bubbles would sit still while the window slid out from under "
+          f"them, and old prints would stay on screen — a quiet name looking "
+          f"busier than it is")
+    check(abs(out["ema"] - 100.035) < 1e-9,
+          f"re-centring is not an EMA: {out['ema']}")
+    check(out["jump"] == 101.0,
+          f"a gap bigger than the pane crawled toward the new mid "
+          f"({out['jump']}); every print would be off the top of the pane "
+          f"for several seconds, which is the moment worth watching")
+    check(out["first"] == 100.0, f"the first centre was {out['first']}")
+    check(out["r1"] >= 1.0 and out["r100"] > out["r1"]
+          and out["r1000"] > out["r100"] and out["r1e6"] <= 9.0,
+          f"bubble radii {out['r1']}, {out['r100']}, {out['r1000']}, "
+          f"{out['r1e6']} — 91% of this tape is under 40 shares and a one-lot "
+          f"must still be visible, while a block must not swallow the pane")
+    check(out["trim"] == 2, f"the window trim kept {out['trim']} of 3")
+    check(out["parse"] == ["FDX", "LLY", "NVDA"],
+          f"the symbol box parsed {out['parse']} — duplicates and a dotted "
+          f"class ticker the feed does not take must not reach the server")
+    check(out["fmt"] == ["7.0c", "50c", "—"],
+          f"the spread reads {out['fmt']}")
+
+
+async def case_the_page_holds_one_connection():
+    """One socket for the whole wall, and one timer that draws it.
+
+    The service caps browser connections at MAX_CLIENTS (8). A socket per
+    pane is twelve times over at a hundred panes, and the ninth pane would
+    simply be refused — with the page looking like eight live names and
+    ninety-two dead ones.
+    """
+    src = JS.read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith(("*", "/*", "//")))
+    check(code.count("new WebSocket") == 1,
+          f"the page JS constructs {code.count('new WebSocket')} WebSockets; "
+          f"one page is one connection, whatever the pane count")
+    check(code.count("setInterval") == 1,
+          f"the page JS starts {code.count('setInterval')} timers; every pane "
+          f"is drawn from the one frame loop")
+    # And the draw loop is the thing that runs once a second, not a
+    # requestAnimationFrame chain pretending to be throttled.
+    check("requestAnimationFrame" not in code,
+          "the wall redraws on animation frames; a hundred canvases at 60fps "
+          "is a page that melts a laptop to show tape read in glances")
+    check("drawAll(), 1000" in code.replace(" ", "").replace("=>this.", "")
+          or "drawAll(), 1000" in code,
+          "the draw loop does not run at one frame a second")
+
+
+async def case_the_page_cannot_trade():
+    """Nothing on the page reaches a broker — the markup included."""
+    for rel in ("static/js/equities_wall.js", "templates/equities_wall.html"):
+        text = (ROOT / rel).read_text(encoding="utf-8").lower()
+        # Named precisely, because the page legitimately says "placeholder"
+        # and a scan for "place" would fail on the symbol box's own hint.
+        for tok in ("/broker", "brokercall", "armed", "flatten",
+                    "sendorder", "placeorder", "sendmove", "ladder"):
+            check(tok not in text,
+                  f"{rel} mentions {tok!r}; the wall is for watching, and "
+                  f"the ladder, the arming and the order entry live on the "
+                  f"tape page")
+
+
+async def case_the_page_is_wired_up():
+    """The template names the component, the route serves it, nav links it."""
+    html = (ROOT / "templates" / "equities_wall.html").read_text(encoding="utf-8")
+    check('x-data="equitiesWall"' in html, "the page declares no component")
+    check("equities_wall.js" in html and "defer src={{ asset" not in html,
+          "the page bundle is missing, or deferred (which would register the "
+          "component after alpine:init has already fired)")
+    check('x-ref="grid"' in html and "wl-pane" in html,
+          "the grid the draw loop walks is not in the markup")
+    main = (ROOT / "live" / "main.py").read_text(encoding="utf-8")
+    check('"equities_wall.html"' in main and '@app.get("/wall"' in main,
+          "no route serves the page")
+    # THE COMPONENT IS INITIALISED ONCE.
+    #
+    # Alpine 3 calls a data object's own init() automatically. The other
+    # pages in this app ALSO name it in x-init, which runs it twice — on this
+    # page that meant two WebSockets and two draw loops per tab, measured by
+    # rendering the page in a browser and counting the sockets (2, then 1).
+    # No gate that reads source could see it, so this one holds the rule for
+    # the page where a second connection is the thing the design forbids.
+    js = (ROOT / "static" / "js" / "equities_wall.js").read_text(encoding="utf-8")
+    declares = "init() {" in js
+    body = "\n".join(ln for ln in html.splitlines()
+                     if "NO `x-init" not in ln and not ln.lstrip().startswith("#"))
+    check(declares and 'x-init="init()"' not in body,
+          "the component's init() is named in x-init as well as being "
+          "Alpine's own hook, so it runs twice — two sockets and two draw "
+          "loops on a page whose whole design is one of each")
+
+    nav = (ROOT / "templates" / "_nav.html").read_text(encoding="utf-8")
+    check("/wall" in nav,
+          "the wall is not on the nav; a page nothing links to is one nobody "
+          "opens")
 
 
 CASES = [
@@ -671,6 +897,11 @@ CASES = [
     ("apply keeps all in step",  case_apply_keeps_hub_file_and_pages_in_step),
     ("restore holds the list",   case_restore_holds_the_saved_list),
     ("never talks to a broker",  case_the_wall_never_talks_to_a_broker),
+    ("the scale is comparable",  case_js_scale_makes_names_comparable),
+    ("redraw and re-centre",     case_js_redraw_and_recentre),
+    ("one connection, one loop", case_the_page_holds_one_connection),
+    ("the page cannot trade",    case_the_page_cannot_trade),
+    ("the page is wired up",     case_the_page_is_wired_up),
 ]
 
 

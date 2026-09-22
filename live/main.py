@@ -497,6 +497,11 @@ async def scan_ws(sock: WebSocket):
 # nothing here reads a broker.
 
 
+@app.get("/wall", response_class=HTMLResponse)
+async def wall_page(request: Request):
+    return templates.TemplateResponse(request, "equities_wall.html")
+
+
 @app.get("/wall/watchlist")
 async def wall_watchlist():
     """The saved list, its settings, and what the tier is actually holding."""
