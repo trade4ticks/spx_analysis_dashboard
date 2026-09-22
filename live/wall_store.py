@@ -58,6 +58,23 @@ def clean_share(v, default=None):
     return min(config.WALL_SHARE_MAX, max(config.WALL_SHARE_MIN, f))
 
 
+def clean_spread_floor(v, default=None):
+    """A minimum spread in cents, or 0 for no filter.
+
+    Clamped rather than refused, like the share: it is a DRAWING threshold,
+    and a watchlist that refuses to load because one number is out of range
+    costs the whole list.
+    """
+    default = config.WALL_MIN_SPREAD_CENTS if default is None else default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if f != f:
+        return default
+    return min(config.WALL_MAX_SPREAD_FILTER, max(0.0, f))
+
+
 def clean_window(v, default=None):
     default = config.WALL_WINDOW_S if default is None else default
     try:
@@ -81,6 +98,12 @@ class WallStore:
         self.settings: dict = {
             "window_s": config.WALL_WINDOW_S,
             "spread_share": config.WALL_SPREAD_SHARE,
+            # PRESENTATION ONLY. It is kept beside the other two because it is
+            # the same kind of thing -- how the wall is drawn, saved with the
+            # list so it survives a refresh and a restart -- but unlike them
+            # nothing downstream of it reaches the hub: see the note on
+            # WALL_MIN_SPREAD_CENTS.
+            "min_spread_cents": config.WALL_MIN_SPREAD_CENTS,
         }
         self.updated: float | None = None
         self.loaded_from: str | None = None
@@ -123,6 +146,8 @@ class WallStore:
                 "window_s": clean_window(st.get("window_s")),
                 "spread_share": clean_share(st.get("spread_share"),
                                             config.WALL_SPREAD_SHARE),
+                "min_spread_cents": clean_spread_floor(
+                    st.get("min_spread_cents")),
             }
             self.updated = raw.get("updated")
             self.loaded_from = str(self.path)
@@ -171,6 +196,10 @@ class WallStore:
             if "spread_share" in settings:
                 self.settings["spread_share"] = clean_share(
                     settings.get("spread_share"), self.settings["spread_share"])
+            if "min_spread_cents" in settings:
+                self.settings["min_spread_cents"] = clean_spread_floor(
+                    settings.get("min_spread_cents"),
+                    self.settings["min_spread_cents"])
         self.updated = time.time()
         return refused
 

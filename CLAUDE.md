@@ -314,8 +314,25 @@ with a component that defines `init()`): each one double-fetches on load, and
 the tape page holds two of `MAX_CLIENTS`' eight slots per tab. Not changed
 here — it is a separate, wider fix.
 
+**The spread floor FADES, it does not filter** (`min_spread_cents`, saved
+with the list, 0 = off). A pane under the threshold is drawn at 0.30 opacity
+IN PLACE: every name keeps streaming and keeps accumulating, so a symbol that
+dips under and comes back has its two minutes intact instead of rebuilding,
+and nothing downstream of the control reaches the hub (gated: setting it adds
+and drops nothing and sends nothing upstream). Panes never reflow — the grid
+iterates the whole list and marks the failures, because on a wall you
+recognise positions, not names. Two rules stop it flickering: it compares the
+**typical** spread (the server's median of the last minute, already sent as
+`tp`), never the instantaneous `sp`; and it **dims late, undims at once** —
+ten seconds below before fading, full strength the moment it qualifies. A
+threshold CHANGE back-dates the timer so the slider applies immediately (a
+control that does nothing for ten seconds looks broken). A symbol that has
+never quoted cannot be shown to qualify, so it fades with the rest and its
+header reads "—". The status line names the count ("9 under 10c") because a
+faded pane is set aside, not dropped.
+
 Controls: add box and an Edit-list textarea (an edit KEEPS each symbol's
-override), window and spread-share sliders, pane width. The per-pane override
+override), window, spread-share and spread-floor sliders, pane width. The per-pane override
 is not a control on every pane — a hundred panes carrying sliders is a
 hundred controls on a page whose job is to be looked at — but a click selects
 a pane and the bar grows a scale slider, "use default" and "remove" for it.
@@ -326,7 +343,7 @@ read on a laptop and a 32-inch monitor.
 Files: `live/wall.py` (the per-symbol store), `live/wall_store.py`,
 `live/wall_runner.py`, the wall tier in `live/hub.py`, `/wall/*` in
 `live/main.py`, `templates/equities_wall.html`, `static/js/equities_wall.js`.
-Gate: `scripts/check_wall.py`, 26 cases, no market needed — the last five
+Gate: `scripts/check_wall.py`, 29 cases, no market needed — the last five
 execute the shipped JS in node (the scale property: a half-spread move is the
 same fraction of the pane on a 7c name and a 50c one).
 

@@ -70,6 +70,13 @@
       display:flex; flex-direction:column; min-width:0;
     }
     .wl-pane.sel { border-color:var(--accent); }
+    /* BELOW THE SPREAD FLOOR. Faded, in place, still drawing: the pane is
+       still subscribed and still accumulating, and removing it would both
+       reflow the grid and throw away the history the name needs when it
+       widens again. The transition is slower than the redraw so a fade reads
+       as a change of state rather than as a dropped frame. */
+    .wl-pane.dim { opacity:0.30; transition:opacity 600ms ease; }
+    .wl-pane { transition:opacity 250ms ease; }
     .wl-head {
       display:flex; align-items:baseline; gap:6px; margin-bottom:3px;
       font-size:10px; line-height:1;
@@ -139,6 +146,19 @@
         <span class="wl-lab">of the pane</span>
       </div>
 
+      <!-- THE SPREAD FLOOR FADES, IT DOES NOT REMOVE. Every name keeps
+           streaming and keeps its place in the grid; panes reflowing as names
+           cross the line would be harder to read than the fade. It reads the
+           median of the last minute and holds for ten seconds before dimming,
+           so a name on the boundary does not strobe. -->
+      <div class="wl-grp sep">
+        <span class="wl-lab">spread &ge;</span>
+        <input type="range" min="0" max="30" step="0.5"
+               x-model.number="settings.min_spread_cents"
+               @input="onSpreadFilter()">
+        <span class="wl-num" x-text="spreadFloorLabel()"></span>
+      </div>
+
       <div class="wl-grp sep">
         <span class="wl-lab">window</span>
         <input type="range" min="20" max="180" step="10"
@@ -179,7 +199,9 @@
       </template>
       <div class="wl-grid" x-ref="grid" :style="gridStyle()">
         <template x-for="e in entries" :key="e.symbol">
-          <div class="wl-pane" :class="selected === e.symbol ? 'sel' : ''"
+          <div class="wl-pane"
+               :class="(selected === e.symbol ? 'sel ' : '')
+                       + (headOf(e.symbol).dim ? 'dim' : '')"
                :data-sym="e.symbol" :title="paneTitle(e.symbol)"
                @click="select(e.symbol)">
             <div class="wl-head">

@@ -702,6 +702,26 @@ const tail = `
   out.trim = wlTrim([[1,1,1],[5,1,1],[9,1,1]], 5).length;
   out.parse = wlParseSymbols('fdx, lly\\nNVDA fdx  BRK.B');
   out.fmt = [wlFmtSpread(7), wlFmtSpread(50), wlFmtSpread(null)];
+  // ── the spread filter ────────────────────────────────────────────────
+  // THE MEDIAN, NOT THE TICK: sp is wide, tp is narrow, and the pane fades.
+  const wide_now = {sym:'X', sp: 20, tp: 2, belowSince: 0, trades:[1,2,3]};
+  const t0 = 1000000;
+  out.offNever = wlDimState({sym:'X', sp:1, tp:1}, 0, t0).dim;
+  const a = wlDimState(wide_now, 5, t0);          // first tick below
+  out.notYet = a.dim;
+  wide_now.belowSince = a.belowSince;
+  out.holdMid = wlDimState(wide_now, 5, t0 + 9000).dim;
+  out.dimsAfter = wlDimState(wide_now, 5, t0 + 10000).dim;
+  out.holdMs = WL_DIM_AFTER_MS;
+  // QUALIFYING UNDIMS AT ONCE, and clears the timer with it.
+  const back = wlDimState({sym:'X', sp:1, tp:9, belowSince: t0}, 5, t0 + 30000);
+  out.undim = back.dim;
+  out.undimResets = back.belowSince;
+  // Never quoted: cannot be shown to qualify.
+  out.unknown = wlDimState({sym:'Q', sp:null, tp:null, belowSince: t0},
+                           5, t0 + 20000).dim;
+  // AND THE TAPE IS UNTOUCHED. The filter draws; it does not drop data.
+  out.keptTrades = wide_now.trades.length;
   globalThis.__out = out;
 `;
 eval(src + tail);
@@ -797,6 +817,114 @@ async def case_js_redraw_and_recentre():
           f"class ticker the feed does not take must not reach the server")
     check(out["fmt"] == ["7.0c", "50c", "—"],
           f"the spread reads {out['fmt']}")
+
+
+async def case_the_spread_filter_fades_and_does_not_flicker():
+    """Below the floor fades the pane; it never removes or unsubscribes it.
+
+    THE FLICKER IS THE WHOLE DIFFICULTY. A name sitting on the threshold
+    would dim and undim every few seconds on single quotes, and on a wall of
+    a hundred that is the page becoming unreadable — so the comparison is
+    against the server's MEDIAN of the last minute (`tp`), never the
+    instantaneous spread (`sp`), and a pane has to be below for ten seconds
+    before it fades while qualifying undims it at once.
+    """
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the shipped JS was NOT executed")
+        return
+    p = subprocess.run(["node", "-e", JS_DRIVER, str(JS)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        FAILS.append(f"the page JS did not run: {p.stderr.strip()[:300]}")
+        return
+    out = json.loads(p.stdout)
+
+    check(out["offNever"] is False,
+          "a floor of 0 faded a pane; the filter is off at zero")
+    check(out["notYet"] is False and out["holdMid"] is False,
+          f"a pane faded before its hold elapsed ({out['notYet']}, "
+          f"{out['holdMid']}) — a name on the boundary would strobe")
+    check(out["dimsAfter"] is True and out["holdMs"] == 10000,
+          f"a pane below the floor for {out['holdMs']} ms did not fade "
+          f"({out['dimsAfter']})")
+    check(out["undim"] is False and out["undimResets"] == 0,
+          f"a name that qualifies again was not restored at once "
+          f"({out['undim']}) or kept its timer ({out['undimResets']}), which "
+          f"would fade it again the moment it dipped")
+    # THE MEDIAN IS THE INPUT. This case's pane has a 20c last quote and a 2c
+    # median: reading `sp` would leave it bright.
+    check(out["dimsAfter"] is True,
+          "the filter read the instantaneous spread rather than the median")
+    check(out["unknown"] is True,
+          "a symbol that has never quoted stayed at full strength under a "
+          "spread floor; it cannot be shown to qualify")
+    check(out["keptTrades"] == 3,
+          f"the filter touched the pane's tape ({out['keptTrades']} of 3 "
+          f"records) — a name that dips under the floor must keep its two "
+          f"minutes and not rebuild when it comes back")
+
+
+async def case_the_filter_does_not_touch_subscriptions(tmp: Path):
+    """Setting the floor changes nothing the hub holds.
+
+    The whole point of fading rather than filtering: a symbol under the
+    threshold goes on streaming, so when it widens again its window is
+    already full. A filter that reached the tier would give back an empty
+    pane and two minutes of waiting.
+    """
+    h = recording_hub()
+    r = runner(h, tmp)
+    await r.apply([{"symbol": "FDX"}, {"symbol": "KO"}])
+    h.sent.clear()
+    before = sorted(h.wall)
+    out = await r.apply(r.store.entries, {"min_spread_cents": 8})
+    check(sorted(h.wall) == before == ["FDX", "KO"],
+          f"the tier changed when the floor moved: {sorted(h.wall)}")
+    check(not out["added"] and not out["dropped"],
+          f"the floor added {out['added']} and dropped {out['dropped']}")
+    check(h.sent == [],
+          f"the floor sent {params(h)!r} upstream; a presentation setting "
+          f"must not reach the socket")
+    check(r.store.settings["min_spread_cents"] == 8,
+          f"the floor was not saved: {r.store.settings}")
+
+    # AND IT SURVIVES A RESTART, like the window and the share.
+    back = WallStore(tmp / "wall_watchlist.json")
+    back.load()
+    check(back.settings["min_spread_cents"] == 8,
+          f"the floor did not survive a reload: {back.settings}")
+    # Nonsense and out-of-range values clamp rather than refusing the list.
+    s = WallStore(tmp / "floor.json")
+    s.set([{"symbol": "FDX"}], {"min_spread_cents": -4})
+    lo = s.settings["min_spread_cents"]
+    s.set([{"symbol": "FDX"}], {"min_spread_cents": 9e9})
+    hi = s.settings["min_spread_cents"]
+    s.set([{"symbol": "FDX"}], {"min_spread_cents": "wide"})
+    bad = s.settings["min_spread_cents"]
+    check(lo == 0 and hi == config.WALL_MAX_SPREAD_FILTER and bad == hi,
+          f"the floor did not clamp: {lo}, {hi}, and an unparseable value "
+          f"became {bad} instead of leaving the setting alone")
+
+    # THE PANES STAY WHERE THEY ARE. The page draws every entry and marks the
+    # failing ones; it does not draw a filtered list.
+    html = (ROOT / "templates" / "equities_wall.html").read_text(encoding="utf-8")
+    check('x-for="e in entries"' in html,
+          "the grid iterates something other than the whole list, so panes "
+          "would reflow as names cross the threshold")
+    # THE CLASS THE TEMPLATE ADDS IS THE CLASS THAT FADES. Tested as one
+    # fact rather than two: a substring check for the rule passed happily
+    # when the CSS was renamed to `.wl-pane.dimmed` and the binding still
+    # added `dim`, which is a pane that never fades at all.
+    import re
+    bound = re.search(r"dim \? '([a-z-]+)'", html)
+    styled = re.search(r"\.wl-pane\.([a-z-]+)\s*\{[^}]*opacity", html)
+    check(bound is not None and styled is not None
+          and bound.group(1) == styled.group(1),
+          f"the pane's faded class does not match its rule: the template "
+          f"adds {bound.group(1) if bound else None!r} and the stylesheet "
+          f"fades {styled.group(1) if styled else None!r}")
 
 
 async def case_the_page_holds_one_connection():
@@ -982,6 +1110,8 @@ CASES = [
     ("never talks to a broker",  case_the_wall_never_talks_to_a_broker),
     ("the scale is comparable",  case_js_scale_makes_names_comparable),
     ("redraw and re-centre",     case_js_redraw_and_recentre),
+    ("spread floor fades",       case_the_spread_filter_fades_and_does_not_flicker),
+    ("floor spares the tier",    case_the_filter_does_not_touch_subscriptions),
     ("one connection, one loop", case_the_page_holds_one_connection),
     ("the page cannot trade",    case_the_page_cannot_trade),
     ("colours are shared",       case_the_colours_come_from_the_tape_page),

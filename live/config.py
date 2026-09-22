@@ -259,6 +259,15 @@ WALL_SPREAD_SHARE = float(os.environ.get("LIVE_WALL_SPREAD_SHARE", "0.60"))
 WALL_SHARE_MIN = 0.05
 WALL_SHARE_MAX = 0.95
 
+# The minimum spread a pane has to have to be shown at full strength. OFF by
+# default (0), and PRESENTATION ONLY: a symbol below it keeps streaming, keeps
+# accumulating its two minutes, and keeps its place in the grid -- it is drawn
+# faded. Nothing here touches a subscription, so a name dipping under the
+# threshold does not lose its history and have to rebuild when it comes back.
+WALL_MIN_SPREAD_CENTS = float(
+    os.environ.get("LIVE_WALL_MIN_SPREAD_CENTS", "0"))
+WALL_MAX_SPREAD_FILTER = 100.0
+
 # Where the watchlist is kept so a restart does not empty the wall. One small
 # JSON file, written whole -- see live/wall_store.py.
 WALL_STORE_PATH = os.environ.get(

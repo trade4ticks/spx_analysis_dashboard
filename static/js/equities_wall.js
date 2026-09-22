@@ -146,6 +146,45 @@ function wlDue(pane, nowMs, visible) {
 }
 
 
+/* The spread filter, which FADES a pane rather than removing it.
+ *
+ * NOT A SUBSCRIPTION, and not a filter of the list. Every name on the
+ * watchlist keeps streaming and keeps accumulating its two minutes whatever
+ * this says, so a symbol that dips under the threshold and comes back has
+ * its history intact rather than rebuilding from nothing. And every pane
+ * keeps its place in the grid: a wall that reflows as names cross the line
+ * is harder to read than one where the failing panes simply go quiet-looking
+ * — you are recognising positions, not names.
+ *
+ * TWO THINGS STOP IT FLICKERING.
+ *
+ *   * It reads the TYPICAL spread (the server's median of the last minute),
+ *     never the instantaneous one. A name sitting on the threshold would
+ *     otherwise dim and undim every few seconds on single quotes.
+ *   * It dims LATE and undims AT ONCE. A name has to be below for
+ *     WL_DIM_AFTER_MS before it fades; the moment it qualifies again it is
+ *     full strength. The asymmetry is deliberate — the cost of showing a
+ *     too-narrow name for ten more seconds is nothing, and the cost of a
+ *     pane strobing at the boundary is that the whole wall is unreadable.
+ *
+ * A pane that has never quoted has no spread to compare, so it cannot be
+ * shown to qualify and fades with the rest — its header reads "—", which is
+ * what says why.
+ */
+const WL_DIM_AFTER_MS = 10000;
+
+function wlDimState(pane, minCents, nowMs) {
+  const min = Number(minCents);
+  if (!(min > 0)) return { dim: false, belowSince: 0 };
+  const typical = pane ? pane.tp : null;
+  if (typical != null && isFinite(typical) && typical >= min) {
+    return { dim: false, belowSince: 0 };
+  }
+  const since = pane && pane.belowSince ? pane.belowSince : nowMs;
+  return { dim: (nowMs - since) >= WL_DIM_AFTER_MS, belowSince: since };
+}
+
+
 /* The share of the pane this symbol's spread fills: its own override, or the
  * page's setting. The override is a fact about the symbol ("LLY needs more
  * room than the default"), which is why it is saved next to the ticker. */
@@ -185,7 +224,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── state ───────────────────────────────────────────────────────────
     entries: [],              // [{symbol, scale}] — the server's list
-    settings: { window_s: 120, spread_share: 0.60 },
+    settings: { window_s: 120, spread_share: 0.60, min_spread_cents: 0 },
     caps: { symbols: 120, retain_s: 180, share_min: 0.05, share_max: 0.95 },
     head: {},                 // sym -> {sp, px, from} — the only reactive tape
     selected: '',
@@ -198,6 +237,7 @@ document.addEventListener('alpine:init', () => {
     skewMs: 0,
     drawn: 0,
     offscreen: 0,
+    dimmed: 0,
     sock: null,
     showManual: false,
     manualText: '',
@@ -297,7 +337,9 @@ document.addEventListener('alpine:init', () => {
         p.tp = cell.tp;
         p.mid = cell.mid;
         p.dirty = true;
-        if (!this.head[sym]) this.head[sym] = { sp: '—', px: '', from: '' };
+        if (!this.head[sym]) {
+          this.head[sym] = { sp: '—', px: '', from: '', dim: false };
+        }
         const h = this.head[sym];
         h.sp = wlFmtSpread(cell.sp);
         h.px = wlFmtPrice(cell.t && cell.t.length
@@ -317,10 +359,32 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── drawing ─────────────────────────────────────────────────────────
+    /* The fade is decided for EVERY held symbol, every second — not only for
+     * the panes being drawn. A pane skipped because it is off screen or has
+     * nothing new still has a ten-second timer running against it, and a
+     * name that goes quiet must still fade while nobody is looking at it,
+     * or scrolling back to it shows a stale answer. The class rides on
+     * `head`, which is the reactive side of the page: WL_DATA is outside
+     * Alpine's proxy on purpose, so writing the flag there would change
+     * nothing on screen. */
+    refreshDim(nowMs) {
+      const min = this.settings.min_spread_cents;
+      let dimmed = 0;
+      for (const p of Object.values(WL_DATA.panes)) {
+        const st = wlDimState(p, min, nowMs);
+        p.belowSince = st.belowSince;
+        const h = this.head[p.sym];
+        if (h && h.dim !== st.dim) h.dim = st.dim;
+        if (st.dim) dimmed++;
+      }
+      this.dimmed = dimmed;
+    },
+
     drawAll() {
       const grid = this.$refs.grid;
       if (!grid) return;
       const nowMs = Date.now() + this.skewMs;
+      this.refreshDim(nowMs);
       let drawn = 0;
       let off = 0;
       for (const el of grid.querySelectorAll('.wl-pane')) {
@@ -532,6 +596,20 @@ document.addEventListener('alpine:init', () => {
       this.saveSoon();
     },
 
+    /* MOVING THE CONTROL APPLIES AT ONCE. The ten-second hold exists to stop
+     * a name on the boundary strobing; it is not there to make the slider
+     * feel broken for ten seconds, which is what waiting would look like.
+     * So a threshold change back-dates the timer — every pane below is
+     * already past its hold — and crossings from then on are held normally. */
+    onSpreadFilter() {
+      const nowMs = Date.now() + this.skewMs;
+      for (const p of Object.values(WL_DATA.panes)) {
+        p.belowSince = nowMs - WL_DIM_AFTER_MS;
+      }
+      this.refreshDim(nowMs);
+      this.saveSoon();
+    },
+
     onPaneWidth() {
       try { localStorage.setItem('equitiesWall.paneWidth', this.paneWidth); }
       catch (e) { /* private window */ }
@@ -566,7 +644,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── readouts ────────────────────────────────────────────────────────
     headOf(sym) {
-      return this.head[sym] || { sp: '—', px: '', from: '' };
+      return this.head[sym] || { sp: '—', px: '', from: '', dim: false };
     },
 
     paneTitle(sym) {
@@ -575,7 +653,18 @@ document.addEventListener('alpine:init', () => {
       const scaled = h.from === 'spread'
         ? `the spread fills ${Math.round(share * 100)}% of the pane`
         : 'no quote yet — scaled to its own prints';
-      return `${sym}: spread ${h.sp}, ${scaled}`;
+      // A faded pane says WHY, and says that it is still running: the
+      // alternative reading of a faded pane is "this one has stopped".
+      const faded = h.dim
+        ? `; faded — its typical spread is under ${this.spreadFloorLabel()}, `
+          + 'still subscribed and still accumulating'
+        : '';
+      return `${sym}: spread ${h.sp}, ${scaled}${faded}`;
+    },
+
+    spreadFloorLabel() {
+      const c = this.settings.min_spread_cents;
+      return (c > 0) ? (c < 10 ? c.toFixed(1) : c.toFixed(0)) + 'c' : 'off';
     },
 
     gridStyle() {
@@ -591,6 +680,10 @@ document.addEventListener('alpine:init', () => {
       const stale = (age != null && age > 4) ? ` · last frame ${age.toFixed(0)}s ago` : '';
       return `${held} symbol${held === 1 ? '' : 's'} · ${this.drawn} drawn`
              + (this.offscreen ? ` · ${this.offscreen} off screen` : '')
+             // Named, because a faded pane is still subscribed and still
+             // accumulating — the count says how much of the wall the filter
+             // is currently setting aside, not how much has been dropped.
+             + (this.dimmed ? ` · ${this.dimmed} under ${this.spreadFloorLabel()}` : '')
              + ' · one connection' + stale;
     },
 
