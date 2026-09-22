@@ -693,7 +693,9 @@ document.addEventListener('alpine:init', () => {
     date: '', snapshot: '',
     zWindow: 63,
     histWindow: '1y',
-    excludeExtrap: true,
+    // Off by default: extrapolated values show, with their markers. The chip
+    // turns on the strict view.
+    excludeExtrap: false,
     selectedTicker: null,
     slice: { date: '', snapshot: '', source: '' },
 
