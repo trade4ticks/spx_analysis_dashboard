@@ -200,6 +200,9 @@
       the head, so a deferred bundle here would register its component after
       `alpine:init` has already fired and every expression on the page would
       throw. Gated in check_rendered_assets.py. -#}
+  {#- The same tape colours Equities Live draws with. Before the bundle and
+      not deferred, for the same reason. -#}
+  <script src={{ asset('js/tape_theme.js') }}></script>
   <script src={{ asset('js/equities_wall.js') }}></script>
 </body>
 </html>

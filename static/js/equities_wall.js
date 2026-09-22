@@ -50,14 +50,15 @@ const WL_RECENTRE = 0.35;
 const WL_BUBBLE_MIN = 1.0;
 const WL_BUBBLE_MAX = 6.0;
 const WL_BUBBLE_REF = 200;
-// Bubbles are translucent so that DENSITY reads as shade: a busy two minutes
-// in a 200px pane is hundreds of prints over each other, and at full opacity
-// that is one solid block whichever name it is. Rendered and looked at —
-// at 0.8 the quote band underneath disappeared entirely.
-const WL_BUBBLE_ALPHA = 0.55;
 
-const WL_BLUE = '#3498db';       // the quote band
-const WL_PINK = '#e84393';       // the prints
+/* COLOURS COME FROM tape_theme.js, WHICH EQUITIES LIVE ALSO READS: blue bid,
+ * pink ask, neutral translucent prints. A wall pane is meant to look like a
+ * small pane of that page, and a second copy of a colour here is the two
+ * drifting apart the next time either is edited.
+ *
+ * The RADII are this page's own: a wall pane is a fifth of the size, and the
+ * tape page's area-proportional rule would put an 8px disc on a 124px pane
+ * for a 200-share print. */
 
 // The per-symbol tape, OUTSIDE Alpine's proxy. A hundred symbols of trade and
 // quote arrays behind a reactive proxy means every push is wrapped and every
@@ -392,37 +393,43 @@ document.addEventListener('alpine:init', () => {
         if (to < 0 || from > w) continue;
         pts.push([Math.max(from, 0), Math.min(to, w), q[i][1], q[i][2]]);
       }
-      // THE FILL GOES UNDER THE PRINTS AND THE LINES GO OVER THEM. Rendered
-      // and looked at: with everything under a busy two minutes of tape the
-      // band vanished, and the band is the reference the whole pane is
-      // scaled to — without it there is nothing to read the movement
-      // against.
-      ctx.fillStyle = 'rgba(52,152,219,0.13)';
-      for (const [a, b, bid, ask] of pts) {
-        ctx.fillRect(a, y(ask), Math.max(b - a, 0.5),
-                     Math.max(y(bid) - y(ask), 0.5));
-      }
+      // NOTHING BETWEEN THE TWO LINES. The tape page draws the spread as two
+      // lines and no fill, and a shaded band here made the wall read as
+      // something else entirely at a glance across a hundred panes.
 
       // ── the prints ──────────────────────────────────────────────────
-      ctx.fillStyle = 'rgba(232,67,147,' + WL_BUBBLE_ALPHA + ')';
+      // Neutral and translucent, as on the tape page: density reads as
+      // shade, and a colour would be claiming something about who crossed.
+      ctx.fillStyle = TAPE_TRADE_FILL;
+      ctx.strokeStyle = TAPE_TRADE_RIM;
+      ctx.lineWidth = 0.9;
       for (const r of p.trades) {
         const px = x(r[0]);
         if (px < -4 || px > w + 4) continue;
         const py = y(r[1]);
         if (py < -6 || py > h + 6) continue;
+        const rad = wlBubbleR(r[2]);
         ctx.beginPath();
-        ctx.arc(px, py, wlBubbleR(r[2]), 0, 6.2832);
+        ctx.arc(px, py, rad, 0, 6.2832);
         ctx.fill();
+        // Only discs big enough to have one, the same rule the tape uses:
+        // a rim on a 1px dot is just a thicker dot.
+        if (rad > 2) ctx.stroke();
       }
 
       // ── bid and ask, on top ─────────────────────────────────────────
+      // BLUE BID, PINK ASK, from the shared file.
       if (pts.length) {
-        ctx.beginPath();
-        for (const [a, b, bid] of pts) { ctx.moveTo(a, y(bid)); ctx.lineTo(b, y(bid)); }
-        for (const [a, b, , ask] of pts) { ctx.moveTo(a, y(ask)); ctx.lineTo(b, y(ask)); }
-        ctx.strokeStyle = 'rgba(52,152,219,0.9)';
         ctx.lineWidth = 1;
-        ctx.stroke();
+        for (const [col, idx] of [[TAPE_BID, 2], [TAPE_ASK, 3]]) {
+          ctx.beginPath();
+          for (const seg of pts) {
+            ctx.moveTo(seg[0], y(seg[idx]));
+            ctx.lineTo(seg[1], y(seg[idx]));
+          }
+          ctx.strokeStyle = col;
+          ctx.stroke();
+        }
       }
 
       // A pane scaled off its trades has no spread to scale to, and must not

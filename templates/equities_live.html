@@ -966,6 +966,10 @@
     </div>
   </div>
 
+  {#- The shared tape colours, BEFORE the bundle and not deferred: the
+      bundle's own constants read these names, and the Equities Wall reads the
+      same file so the two pages cannot drift apart. -#}
+  <script src={{ asset('js/tape_theme.js') }}></script>
   <script src={{ asset('js/equities_live.js') }}></script>
   <!-- The bundle proves it loaded. A page that renders its layout and none of
        its data is the worst failure mode this app has had, and it has had it:

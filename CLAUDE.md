@@ -284,12 +284,24 @@ rather than a row of cells, and there is nothing to hit-test. One
 `setInterval` at 1 Hz draws every pane; a pane is skipped when it is off
 screen (IntersectionObserver) or has nothing new, with a forced refresh every
 `WL_FORCE_REDRAW_MS` (5 s) so a quiet pane's bubbles cannot sit still while
-the window slides out from under them. The band's fill is drawn UNDER the
-prints and the bid/ask lines OVER them — rendered and looked at: with
-everything underneath, a busy two minutes buried the band the pane is scaled
-to. Bubbles are translucent (0.55) so density reads as shade. Prices are
-drawn against the SERVER's clock (`at` minus local elapsed), not the
-browser's; a laptop a few seconds out would put every print off the pane.
+the window slides out from under them. Prices are drawn against the SERVER's
+clock (`at` minus local elapsed), not the browser's; a laptop a few seconds
+out would put every print off the pane.
+
+**A wall pane is a small Equities Live pane, and the colours are shared.**
+`static/js/tape_theme.js` holds them — blue bid, pink ask, neutral
+translucent prints with a rim on discs over 2px — and BOTH bundles read it
+(`equities_live.js` keeps its `LV_*` names but assigns them from `TAPE_*`).
+A colour written out twice is two pages that agree until one is edited, and
+the drift is invisible until they are open side by side, which is how this
+page is used. The shared file loads in its own non-deferred `<script>` BEFORE
+each bundle: the constants are top-level, so the wrong order is a
+ReferenceError and a blank trading page, and the gate checks the order,
+executes both bundles beside the file, and asserts the tape bundle FAILS
+without it. `check_live_axis` and `check_live_reconcile` prepend the same
+file in their node drivers. **No fill between the bid and the ask** — two
+lines and nothing between, as on the tape page; a shaded band made the wall
+read as something else at a glance across a hundred panes.
 
 **`x-init="init()"` IS A DOUBLE INITIALISATION.** Alpine 3 calls a data
 object's own `init()` automatically, so naming it in `x-init` as well runs it

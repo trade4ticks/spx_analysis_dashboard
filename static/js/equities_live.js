@@ -17,16 +17,17 @@
  * only ever be one.
  */
 
-const LV_BLUE = '#3498db';
-const LV_PINK = '#e84393';
-
-/* NEUTRAL BY DEFAULT.
+/* THE SHARED TAPE COLOURS, from static/js/tape_theme.js — not literals.
  *
- * The bubbles were the same blue as the bid line, which reads as "buys"
- * before any decision to read it that way. A print is a print; the colour
- * says nothing until the bichrome toggle is deliberately turned on. */
-const LV_TRADE_FILL = 'rgba(206,212,220,0.30)';
-const LV_TRADE_RIM  = 'rgba(228,233,240,0.80)';
+ * The Equities Wall draws the same picture small, and a wall pane is meant
+ * to look like a small pane of this one. Two copies of a colour are two
+ * pages that agree until one of them is edited, so the definition lives in
+ * one file and both bundles read it. The local names stay because the rest
+ * of this file is written in them. */
+const LV_BLUE = TAPE_BLUE;
+const LV_PINK = TAPE_PINK;
+const LV_TRADE_FILL = TAPE_TRADE_FILL;
+const LV_TRADE_RIM  = TAPE_TRADE_RIM;
 /* BY AGGRESSOR, NOT BY PROXIMITY.
  *
  * A print above the mid is a buyer lifting the offer, so it is BLUE. Below
@@ -878,8 +879,7 @@ window.lvPane = function (id, send) {
           ctx.fill();
         }
         ctx.lineWidth = 1.6;
-        for (const [key, col] of [['bp', 'rgba(130,190,235,0.95)'],
-                                  ['ap', 'rgba(235,150,190,0.95)']]) {
+        for (const [key, col] of [['bp', TAPE_BID], ['ap', TAPE_ASK]]) {
           ctx.beginPath();
           vis.forEach((q, i) => {
             const x = X(q.t), y = Y(q[key]);
@@ -1520,7 +1520,7 @@ window.lvPane = function (id, send) {
         const r = Math.max(1.1, Math.sqrt(sz) * 0.62);
         ctx.beginPath();
         ctx.arc(lx + r, padT + plotH - 10, r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(206,212,220,0.42)';
+        ctx.fillStyle = TAPE_TRADE_LEGEND;
         ctx.fill();
         ctx.fillStyle = '#6a6a6a';
         ctx.fillText(String(sz), lx + r - 4, padT + plotH + 4);

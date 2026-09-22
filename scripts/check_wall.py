@@ -840,6 +840,80 @@ async def case_the_page_cannot_trade():
                   f"tape page")
 
 
+async def case_the_colours_come_from_the_tape_page():
+    """A wall pane is a small Equities Live pane, so the colours are shared.
+
+    ONE DEFINITION, in static/js/tape_theme.js, read by both bundles. Two
+    copies agree until one of them is edited, and the drift is invisible
+    until the two pages are open side by side — which is exactly how this
+    page is used.
+    """
+    theme = (ROOT / "static" / "js" / "tape_theme.js").read_text(encoding="utf-8")
+    for name in ("TAPE_BID", "TAPE_ASK", "TAPE_TRADE_FILL", "TAPE_TRADE_RIM"):
+        check(f"const {name}" in theme,
+              f"{name} is not defined in tape_theme.js")
+
+    wall = (ROOT / "static" / "js" / "equities_wall.js").read_text(encoding="utf-8")
+    live = (ROOT / "static" / "js" / "equities_live.js").read_text(encoding="utf-8")
+    check("TAPE_BID" in wall and "TAPE_ASK" in wall,
+          "the wall does not draw its bid and ask from the shared colours")
+    check("TAPE_TRADE_FILL" in wall and "TAPE_TRADE_RIM" in wall,
+          "the wall's prints are not the tape page's neutral grey")
+    check("TAPE_BID" in live and "TAPE_TRADE_FILL" in live,
+          "Equities Live no longer reads the shared colours, so the file "
+          "that exists to keep the two together is keeping only one of them")
+
+    # THE LITERALS LIVE IN ONE FILE. A colour written out again anywhere else
+    # is the drift this is meant to prevent, whichever page writes it.
+    for lit in ("rgba(130,190,235", "rgba(235,150,190",
+                "rgba(206,212,220", "rgba(228,233,240"):
+        where = [f.name for f in (ROOT / "static" / "js").glob("*.js")
+                 if lit in f.read_text(encoding="utf-8")]
+        check(where == ["tape_theme.js"],
+              f"{lit}…) is written out in {where}; the tape colours are "
+              f"defined once, in tape_theme.js")
+
+    # BOTH BUNDLES LOAD against the shared file, and neither loads without
+    # it. The tape page's constants are TOP LEVEL, so getting the order wrong
+    # is not a wrong colour — it is a ReferenceError before Alpine starts and
+    # a blank trading page.
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the bundles were NOT loaded")
+    else:
+        for name in ("equities_wall.js", "equities_live.js"):
+            src = f'global.document={{addEventListener:()=>{{}}}};' \
+                  f'global.window={{}};' \
+                  f'eval(require("fs").readFileSync({str(ROOT / "static" / "js" / "tape_theme.js")!r},"utf8")' \
+                  f'+require("fs").readFileSync({str(ROOT / "static" / "js" / name)!r},"utf8"))'
+            p = subprocess.run(["node", "-e", src], capture_output=True,
+                               text=True, encoding="utf-8")
+            check(p.returncode == 0,
+                  f"{name} does not load beside tape_theme.js: "
+                  f"{p.stderr.strip()[:200]}")
+        alone = f'global.document={{addEventListener:()=>{{}}}};' \
+                f'global.window={{}};' \
+                f'eval(require("fs").readFileSync({str(ROOT / "static" / "js" / "equities_live.js")!r},"utf8"))'
+        p = subprocess.run(["node", "-e", alone], capture_output=True,
+                           text=True, encoding="utf-8")
+        check(p.returncode != 0 and "TAPE_" in p.stderr,
+              "the tape bundle loads without tape_theme.js, so it is not "
+              "really reading the shared colours and the two pages can still "
+              "drift")
+
+    # NO FILL BETWEEN THE LINES. Two lines and nothing between, as on the
+    # tape page — a shaded band made the wall read as something else at a
+    # glance across a hundred panes.
+    draw = wall.split("── the prints")[0]
+    check("fillRect" not in draw,
+          "the wall shades the spread between the bid and the ask; the tape "
+          "page draws two lines and nothing between them")
+    # And the page's own blue/pink are gone with it.
+    check("WL_BLUE" not in wall and "WL_PINK" not in wall,
+          "the wall still carries its own copy of the tape's blue and pink")
+
+
 async def case_the_page_is_wired_up():
     """The template names the component, the route serves it, nav links it."""
     html = (ROOT / "templates" / "equities_wall.html").read_text(encoding="utf-8")
@@ -847,6 +921,15 @@ async def case_the_page_is_wired_up():
     check("equities_wall.js" in html and "defer src={{ asset" not in html,
           "the page bundle is missing, or deferred (which would register the "
           "component after alpine:init has already fired)")
+    # The shared colours have to be READ before the bundle that reads them.
+    for page, bundle in (("equities_wall.html", "equities_wall.js"),
+                         ("equities_live.html", "equities_live.js")):
+        text = (ROOT / "templates" / page).read_text(encoding="utf-8")
+        i, j = text.find("tape_theme.js"), text.find(bundle + "') }}")
+        check(i != -1 and j != -1 and i < j,
+              f"{page} does not load tape_theme.js before {bundle}; the "
+              f"bundle's colour constants would be a ReferenceError and the "
+              f"page would not start at all")
     check('x-ref="grid"' in html and "wl-pane" in html,
           "the grid the draw loop walks is not in the markup")
     main = (ROOT / "live" / "main.py").read_text(encoding="utf-8")
@@ -901,6 +984,7 @@ CASES = [
     ("redraw and re-centre",     case_js_redraw_and_recentre),
     ("one connection, one loop", case_the_page_holds_one_connection),
     ("the page cannot trade",    case_the_page_cannot_trade),
+    ("colours are shared",       case_the_colours_come_from_the_tape_page),
     ("the page is wired up",     case_the_page_is_wired_up),
 ]
 

@@ -31,10 +31,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JS = ROOT / "static" / "js" / "equities_live.js"
+# The tape's colours moved into a file the Equities Wall reads too, so the
+# two pages cannot drift apart. The page loads it first; so must this, or the
+# bundle's top-level constants are a ReferenceError here and nowhere else.
+THEME = ROOT / "static" / "js" / "tape_theme.js"
 
 DRIVER = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
+const src = fs.readFileSync(process.argv[3], 'utf8') + '\n'
+          + fs.readFileSync(process.argv[2], 'utf8');
 let factory = null;
 global.window = { addEventListener: () => {}, devicePixelRatio: 1 };
 global.document = { addEventListener: (ev, fn) => { if (ev === 'alpine:init') fn(); },
@@ -196,7 +201,8 @@ def main() -> int:
     drv = ROOT / "scripts" / "_live_axis_driver.js"
     drv.write_text(DRIVER, encoding="utf-8")
     try:
-        p = subprocess.run(["node", str(drv), str(JS)], capture_output=True,
+        p = subprocess.run(["node", str(drv), str(JS), str(THEME)],
+                           capture_output=True,
                            text=True, encoding="utf-8", cwd=ROOT)
     finally:
         drv.unlink(missing_ok=True)
