@@ -93,6 +93,11 @@ FAKE_METRICS = [
     "some_future_metric_nobody_documented",
 ]
 UNDOCUMENTED = "some_future_metric_nobody_documented"
+# PRESENT AND ENTIRELY NULL, which the meta endpoint already distinguishes
+# (n vs n_value) and which the filter pane must too: there is nothing to
+# screen on, so it gets no range — and a range of zeros would seed a
+# constraint at a number that is not in the data.
+ALL_NULL_METRIC = "noise_bps_bid_side_5s_mean"
 FAKE_DATES = [datetime.date(2026, 8, 28), datetime.date(2026, 8, 27)]
 
 # A longer run for the health panel, newest last. 2026-08-24 is the BROKEN
@@ -528,6 +533,25 @@ class Conn:
                         out.append({"trade_date": day, "symbol": s,
                                     "metric": m, "value": v})
             return out
+        if "percentile_cont" in sql and "GROUP BY metric" in sql:
+            # The filter pane's spans, one row per metric the date holds.
+            # SPREAD ACROSS METRICS on purpose: a fake that answers the same
+            # numbers for every metric cannot show a range landing on the
+            # wrong row. `off_mid_bps` is in here and on no default column
+            # set, which is the case that matters -- a metric nobody chose in
+            # advance still has to be screenable.
+            out = []
+            for i, m in enumerate(FAKE_METRICS):
+                if m == ALL_NULL_METRIC:
+                    # Present, and every value null: count(value) = 0 and the
+                    # percentile is NULL. It must not become a range of zero.
+                    out.append({"metric": m, "lo": None, "hi": None,
+                                "n": 0, "mid": None})
+                    continue
+                lo = 1.0 + i
+                out.append({"metric": m, "lo": lo, "hi": lo * 4 + 3,
+                            "n": len(FAKE_SYMBOLS), "mid": lo * 2 + 1})
+            return out
         if "DISTINCT metric" in sql:
             return [{"metric": m} for m in FAKE_METRICS]
         if "GROUP BY m.symbol" in sql:
@@ -563,7 +587,10 @@ class Conn:
                      # One deliberately all-null metric: an all-null column and
                      # an absent one look identical in a pivot and only one of
                      # them means the pipeline broke.
-                     "n_value": 0 if m == "noise_bps_bid_side_5s_mean" else 561}
+                     # ONE NAME for it, shared with the pane's ranges below:
+                     # a fixture that is all-null in one query and populated
+                     # in another tests a database that cannot exist.
+                     "n_value": 0 if m == ALL_NULL_METRIC else 561}
                     for m in sorted(FAKE_METRICS)]
         return []
 
@@ -749,6 +776,7 @@ async def run() -> int:
         fails += 1
 
     fails += await check_candidates()
+    fails += await check_filter_pane_ranges()
     fails += await check_health()
     fails += await check_calibration()
     fails += await check_narrowing()
@@ -1168,6 +1196,97 @@ async def check_calibration() -> int:
         print("  an arbitrary `target` was accepted and interpolated into SQL")
         fails += 1
 
+    return fails
+
+
+async def check_filter_pane_ranges() -> int:
+    """The filter pane can screen on every metric the date holds.
+
+    THE FAULT THIS REPRODUCES (reported 2026-09-23): every row in the pane
+    read "not on this date" with its two buttons disabled, and the only one
+    that worked was `$ vol/min` -- the single DERIVED row. The page lists
+    metrics by NAME (from /meta, queried live) and looks each one up in
+    `col_ranges`, which carried only the columns in the pivot, keyed by ROLE
+    ("noise", "ratio", "price"). A metric name matched nothing; a derived key
+    matched itself. Nothing to do with the metric cull, which is where
+    suspicion naturally fell -- the catalog is read from the database on
+    every request.
+
+    The test is the page's own lookup: for each metric /meta lists, is there
+    a range under that exact key.
+    """
+    fails = 0
+    meta = await sc.meta(date=None, pool=Pool())
+    c = await _cand()
+    ranges = c["col_ranges"]
+
+    listed = [m["metric"] for m in meta["metrics"]]
+    have_values = [m for m in meta["metrics"] if m["n_value"]]
+    missing = [m["metric"] for m in have_values
+               if m["metric"] not in ranges]
+    if missing:
+        print(f"  {len(missing)} of {len(have_values)} metrics with values "
+              f"have no range, so the pane says 'not on this date' for them")
+        print(f"    e.g. {missing[:4]}")
+        fails += 1
+
+    # THE ONE THE PRINCIPLE RESTS ON: a metric on no default column set.
+    on_screen = {col["key"] for col in c["columns"]}
+    if "off_mid_bps" in on_screen:
+        print("  the fixture's unchosen metric is on screen, so this check "
+              "no longer tests a metric nobody picked in advance")
+        fails += 1
+    elif "off_mid_bps" not in ranges:
+        print("  a metric that is present but on no column set has no range "
+              "— 'any column is filterable' is the page's whole principle")
+        fails += 1
+
+    # AND THE RANGE BELONGS TO THE METRIC IT IS FILED UNDER. Keys shifting by
+    # one would still leave every row populated and every number wrong.
+    for i, m in enumerate(FAKE_METRICS):
+        if m == ALL_NULL_METRIC:
+            continue
+        want = 1.0 + i
+        got = ranges.get(m, {}).get("min")
+        if got is not None and abs(got - want) > 1e-9 and m not in on_screen:
+            print(f"  {m} reports a range starting at {got}, which is "
+                  f"another metric's ({want} is its own)")
+            fails += 1
+            break
+
+    # An all-null metric is PRESENT and has nothing to screen on. A range of
+    # zeros would seed a constraint at a number that is in no row.
+    if ALL_NULL_METRIC in ranges:
+        print(f"  {ALL_NULL_METRIC} is entirely null on this date and still "
+              f"reports a range of {ranges[ALL_NULL_METRIC]}")
+        fails += 1
+
+    # The role-keyed entries stay: the on-screen columns' ranges come from
+    # the rows the table is drawn from, which is not the same population as
+    # a grouped aggregate over the date once a universe filter exists.
+    for role in ("noise", "ratio"):
+        if role in on_screen and role not in ranges:
+            print(f"  the on-screen column {role!r} lost its range")
+            fails += 1
+
+    # Every range is usable as the pane uses it: three numbers, median inside
+    # the span. A NULL percentile reaching the page is a seed of `null`,
+    # which the pane would turn into a constraint at zero.
+    for k, r in ranges.items():
+        if not all(isinstance(r.get(x), (int, float)) for x in
+                   ("min", "max", "p50")):
+            print(f"  {k}'s range is not three numbers: {r}")
+            fails += 1
+            break
+        if not (r["min"] <= r["p50"] <= r["max"]):
+            print(f"  {k}'s median {r['p50']} is outside its span "
+                  f"{r['min']}..{r['max']}")
+            fails += 1
+            break
+
+    if not fails:
+        print(f"  filter pane: {len(have_values)} of {len(listed)} listed "
+              f"metrics screenable by name, the all-null one excluded")
     return fails
 
 

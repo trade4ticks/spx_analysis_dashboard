@@ -225,6 +225,26 @@ arriving prints still say where the market is.
 wrong one is what moves money). The ladder hatching and the drag label now
 mark only what is known to cross, for the same reason.
 
+## Equities Scalp: the filter pane's ranges (2026-09-23)
+
+**`col_ranges` is keyed two ways, deliberately.** The pivot's columns are
+filed under their ROLE key (`noise`, `ratio`, `price`) with ranges taken from
+the rows the table is drawn from; every metric the date holds is also filed
+under its OWN NAME, from one grouped aggregate over the date
+(`min`/`max`/`percentile_cont(0.5)`/`count`). The pane lists metrics by name
+(from `/meta`, queried live) and looks each one up by name.
+
+The bug this fixes: only the pivoted, role-keyed columns had ranges, so every
+metric row in the pane read **"not on this date"** with its two buttons
+disabled, and the only row that worked was the DERIVED one (`$ vol/min`),
+whose key is its own. Live since `c6f4741`, which introduced the pane —
+nothing to do with the metric cull, though the symptom invites that reading.
+A metric that is present but entirely null still gets no range, and says so
+in the same words: there is nothing to screen on either way. Reproduced and
+gated with no database in `scalp_dryrun.check_filter_pane_ranges`, which
+asks the page's own question — for each metric `/meta` lists, is there a
+range under that exact key.
+
 ## Equities Wall (`/wall`, in progress — 2026-09-22)
 
 A page of dozens to ~100 small live tapes, so a whole watchlist can be

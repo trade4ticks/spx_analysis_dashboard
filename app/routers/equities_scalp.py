@@ -1902,6 +1902,39 @@ async def candidates(
             *params,
         )
 
+        # ── the range of EVERY metric this date holds ────────────────────
+        #
+        # THE FILTER PANE LISTS EVERY METRIC THE DATE HOLDS and reads a range
+        # for each. The ranges below it were computed from the PIVOT, which
+        # carries only the columns on screen -- and are keyed by ROLE
+        # ("noise", "ratio", "price"), while the pane looks a metric up by its
+        # own name. So every metric row read "not on this date" with its two
+        # buttons disabled, and the ONLY row that worked was the derived one,
+        # whose key is its own. Reported 2026-09-23, and it had nothing to do
+        # with the metric cull: the catalog the pane lists is queried live.
+        #
+        # ONE GROUPED AGGREGATE over the date, not a 96-column pivot. The pane
+        # wants a span and a median to seed a constraint at; pulling every
+        # metric into the pivot to get them would change what the table shows,
+        # and screening on one already pulls it in by itself.
+        metric_ranges = {}
+        for r in await conn.fetch(
+                "SELECT metric, min(value) AS lo, max(value) AS hi, "
+                "       count(value) AS n, "
+                "       percentile_cont(0.5) WITHIN GROUP (ORDER BY value) "
+                "         AS mid "
+                "FROM daily_metrics "
+                "WHERE trade_date = $1 AND value IS NOT NULL "
+                "GROUP BY metric", d):
+            # An all-null metric is PRESENT but has no range, and the pane
+            # says so in the same words as an absent one -- which is right:
+            # there is nothing to screen on either way.
+            if not r["n"]:
+                continue
+            metric_ranges[r["metric"]] = {
+                "min": float(r["lo"]), "max": float(r["hi"]),
+                "p50": float(r["mid"]), "n": int(r["n"])}
+
         # ── what I actually traded, per symbol ───────────────────────────
         #
         # The brief asked for this in the ranked table from the start and it
@@ -2049,6 +2082,13 @@ async def candidates(
         if v:
             col_ranges[k] = {"min": v[0], "max": v[-1],
                              "p50": v[len(v) // 2], "n": len(v)}
+    # AND EVERY METRIC UNDER ITS OWN NAME, beside the pivoted columns' role
+    # keys, so the pane can offer a span for a metric nobody put on screen --
+    # which is the whole principle of "any column is filterable".
+    # `setdefault`, so a column that IS pivoted keeps the range taken from the
+    # rows the table is actually drawn from.
+    for name, rng in metric_ranges.items():
+        col_ranges.setdefault(name, rng)
 
     # ── sort ─────────────────────────────────────────────────────────────    # ── sort ─────────────────────────────────────────────────────────────
     #
