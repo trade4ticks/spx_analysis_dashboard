@@ -91,6 +91,29 @@
 
     .ob-status { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin:0 2px 8px; }
     .ob-stats { display:grid; gap:8px; grid-template-columns:repeat(5, minmax(0,1fr)); }
+
+    /* The Summary card pins to the top of .ob-main, the scrolling column, so
+       the fifteen stats stay on screen while a filter is changed from a
+       section far down the page — watching them move IS the filtering.
+       Same pattern as equity_iv's .eq-ctrl (sticky top:0 inside a padded
+       scroll column, own background, border and shadow); unchanged otherwise
+       — three rows of five, same sizing and padding, no condensed variant.
+       The sidebar is the grid's OTHER column with its own scrollbar, so this
+       cannot reach it. z-index clears the ranking card's horizontal scroller,
+       which would otherwise draw over a pinned pane.
+       ::before covers the column's 12px padding band above the card: sticky
+       offsets are measured from the scrollport edge, which is inside that
+       padding, so without it rows show through the gap. */
+    .ob-summary {
+      position:sticky; top:0; z-index:12;
+      background:var(--surface);
+      border-bottom:1px solid var(--border);
+      box-shadow:0 4px 12px rgba(0,0,0,.45);
+    }
+    .ob-summary::before {
+      content:""; position:absolute; left:-15px; right:-15px; top:-13px; height:13px;
+      background:var(--bg);
+    }
     .ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
 
     .ob-loaded {
@@ -392,7 +415,7 @@
         <div class="ob-empty">No trades match the current filters.</div>
       </div>
 
-      <div class="ob-card" x-show="loaded && filteredCount > 0">
+      <div class="ob-card ob-summary" x-show="loaded && filteredCount > 0">
         <div class="ob-card-hdr"><span class="ob-card-title">Summary</span></div>
         <div class="ob-card-body ob-stats">
           <!-- row 1 -->
