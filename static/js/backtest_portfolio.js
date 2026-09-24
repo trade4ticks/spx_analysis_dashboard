@@ -1,29 +1,32 @@
 /* Backtest Portfolio — several saved strategies, combined.
  *
- * P1 CARRIES DATA AND COMPUTES NOTHING. Strategies are chosen, loaded, and
- * their trades held in the browser with their colour, quantity and capital.
- * The stats, the curves and the correlation work are P2-P4, and they will be
- * computed HERE rather than on the server, the same way the single-backtest
- * page does it: the trades go over once and every later change is local.
+ * WHAT IT COMPUTES AND WHERE. Every number on this page comes from
+ * backtest_core.js, the file /oo-backtest reads too: obApplyFilters,
+ * obStats, obExtraStats, obConcurrency, obSharpe. That is the point of the
+ * page — a strategy has to read the same here as it does there — and it is
+ * why there is no second implementation of a statistic in this file.
  *
- * WHAT IS ALREADY DECIDED, so P2 does not re-open it:
- *   qty scales P/L linearly, applied in the browser.
- *   capital seeds from the strategy's saved value and can be overridden
- *     here; portfolio capital is the SUM of the per-strategy figures.
+ * SETTLED, so nothing below re-opens it:
+ *   qty scales P/L linearly, applied HERE, in the browser, and nowhere else.
+ *   capital seeds from the strategy's saved value, is overridable, and the
+ *     portfolio's capital is the SUM of capital x qty.
  *   the date range defaults to the UNION of the loaded spans.
  *   P/L is dated by CLOSE, exactly as the single-backtest page dates it.
+ *   deployment is half-open [open, close): overnight capital only.
  *
- * THE TRADES ARE HELD OUTSIDE ALPINE. A portfolio of five strategies is
- * ~10,000 trades of ~30 columns; wrapping that in a reactive proxy costs on
- * every read for no benefit, because no template ever reads a trade. The
- * page's reactive state is the strategy LIST and the summary numbers. Same
- * arrangement as OB_DATA on the other page, and the same trap: anything
- * derived from BP_DATA must be recomputed into reactive state, never read
- * through a getter that Alpine cannot see change.
+ * THE TRADES ARE HELD OUTSIDE ALPINE (BP_DATA). A five-strategy portfolio is
+ * ~10,000 trades of ~30 columns; a reactive proxy over that costs on every
+ * read and buys nothing, because no template reads a trade. The reactive
+ * state is the strategy list, the filters and the computed rows. The trap
+ * that comes with it: anything derived from BP_DATA must be recomputed INTO
+ * reactive state, never read through a getter Alpine cannot see change.
  */
 'use strict';
 
-const BP_DATA = { payloads: {} };      // strategy id -> the server's payload
+const BP_DATA = {
+  payloads: {},      // strategy id -> the server's payload
+  scaled: {},        // strategy id -> { qty, cols } with pnl x qty
+};
 
 function bpFmtInt(n) {
   return (n == null || !isFinite(n)) ? '—' : Math.round(n).toLocaleString();
@@ -32,9 +35,17 @@ function bpFmtInt(n) {
 function bpFmtMoney(v) {
   if (v == null || !isFinite(v)) return '—';
   const a = Math.abs(v);
-  if (a >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M';
-  if (a >= 1e3) return '$' + (v / 1e3).toFixed(0) + 'k';
-  return '$' + v.toFixed(0);
+  if (a >= 1e6) return (v < 0 ? '-$' : '$') + (a / 1e6).toFixed(1) + 'M';
+  if (a >= 1e4) return (v < 0 ? '-$' : '$') + (a / 1e3).toFixed(0) + 'k';
+  return (v < 0 ? '-$' : '$') + Math.round(a).toLocaleString();
+}
+
+function bpFmtNum(v, dp = 2) {
+  return (v == null || !isFinite(v)) ? '—' : v.toFixed(dp);
+}
+
+function bpFmtPct(v, dp = 1) {
+  return (v == null || !isFinite(v)) ? '—' : v.toFixed(dp) + '%';
 }
 
 function bpFmtSeconds(s) {
@@ -42,13 +53,11 @@ function bpFmtSeconds(s) {
   return s >= 10 ? s.toFixed(0) + 's' : s.toFixed(1) + 's';
 }
 
-/* The union or the intersection of the loaded spans.
- *
- * UNION IS THE DEFAULT (the brief). It uses every trade, at the cost of the
- * early stretch having fewer strategies in it — which is why the page states
- * the span and how many strategies cover it rather than leaving the curve to
- * imply that everything ran from the start. Dates are ISO strings and
- * compare as strings; the payload builder makes them that way on purpose. */
+/* The union or the intersection of the loaded spans. UNION IS THE DEFAULT:
+ * it uses every trade, at the cost of the early stretch having fewer
+ * strategies in it — which the page states rather than letting the curve
+ * imply everything ran from the start. Dates are ISO strings and compare as
+ * strings; the payload builder makes them that way on purpose. */
 function bpSpan(payloads, mode) {
   const lows = [], highs = [];
   for (const p of payloads) {
@@ -64,9 +73,8 @@ function bpSpan(payloads, mode) {
 }
 
 /* Portfolio capital: the SUM of each strategy's planned capital, and each
- * strategy's is its per-position capital times its quantity — qty is a
- * multiplier on the position, so it multiplies the capital behind it as well
- * as the P/L it produces. */
+ * strategy's is capital-per-position x qty — qty multiplies the position, so
+ * it multiplies the capital behind it as well as the P/L it produces. */
 function bpTotalCapital(rows) {
   let total = 0;
   for (const r of rows) {
@@ -76,25 +84,80 @@ function bpTotalCapital(rows) {
   return total;
 }
 
+/* The filter specs for one strategy, in the shape obApplyFilters takes.
+ * Built from the SHARED REGISTRY — the old Dash app kept five parallel dicts
+ * of metrics and this page keeps none. A filter that is off contributes
+ * nothing, so an untouched page filters nothing. */
+function bpSpecs(filters, registry, dateSpan) {
+  const specs = [];
+  for (const m of registry) {
+    const f = filters[m.key];
+    if (!f || !f.on) continue;
+    if (m.type === 'range') {
+      const lo = Number(f.lo), hi = Number(f.hi);
+      if (!isFinite(lo) || !isFinite(hi)) continue;
+      specs.push({ kind: 'range', column: m.column, lo, hi });
+    } else if (m.type === 'categorical') {
+      if (!f.allowed || !f.allowed.length) continue;
+      specs.push({ kind: 'set', column: m.column, allowed: new Set(f.allowed) });
+    }
+  }
+  // THE PORTFOLIO'S DATE RANGE, on the ENTRY date, as the old app had it: a
+  // trade belongs to the window it was opened in.
+  if (dateSpan && (dateSpan.start || dateSpan.end)) {
+    specs.push({ kind: 'date', column: 'date_opened',
+                 from: dateSpan.start, to: dateSpan.end });
+  }
+  return specs;
+}
+
+/* What an active filter costs in trades that have no value for it.
+ * Metrics have staggered coverage — a filter on one that starts late drops
+ * every earlier trade silently — so the page states it, as the single-
+ * backtest page does. */
+function bpCoverageCost(cols, n, filters, registry) {
+  let noValue = 0;
+  const cols_ = [];
+  for (const m of registry) {
+    const f = filters[m.key];
+    if (f && f.on && cols[m.column]) cols_.push(m.column);
+  }
+  if (!cols_.length) return { noValue: 0, columns: [] };
+  for (let i = 0; i < n; i++) {
+    for (const c of cols_) {
+      const v = cols[c][i];
+      if (v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v))) {
+        noValue++;
+        break;
+      }
+    }
+  }
+  return { noValue, columns: cols_ };
+}
+
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('backtestPortfolio', () => ({
 
     // ── state ───────────────────────────────────────────────────────────
-    saved: [],            // everything saved on the other page
-    colors: [],           // the palette, from the server
+    saved: [],
+    registry: [],
+    colors: [],
     maxStrategies: 12,
-    chosen: [],           // [{id, name, qty, capital, savedCapital}]
-    loaded: [],           // the server's payloads, in load order
+    chosen: [],           // [{id, name, qty, capital, savedCapital, filters}]
+    loaded: [],
+    rows: [],             // the summary table: one per strategy, then TOTAL
     pick: 0,
+    editing: 0,           // which strategy's filters are open
     busy: false,
     error: '',
     loadNote: '',
     slowLoad: false,
     rangeMode: 'union',
+    tick: 0,              // bumped whenever the rows are recomputed
 
     async init() {
-      await this.loadSaved();
+      await Promise.all([this.loadSaved(), this.loadRegistry()]);
     },
 
     async loadSaved() {
@@ -107,6 +170,19 @@ document.addEventListener('alpine:init', () => {
         this.maxStrategies = b.max || 12;
       } catch (e) {
         this.error = 'Could not read the saved strategies: ' + e;
+      }
+    },
+
+    async loadRegistry() {
+      try {
+        const r = await fetch('/api/backtest-portfolio/registry');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const b = await r.json();
+        // THE SAME REGISTRY THE OTHER PAGE FILTERS ON, filtered to what can
+        // be screened. `year` is a section, not a filter.
+        this.registry = (b.metrics || []).filter(m => m.filter);
+      } catch (e) {
+        this.error = 'Could not read the metric registry: ' + e;
       }
     },
 
@@ -126,22 +202,29 @@ document.addEventListener('alpine:init', () => {
       const s = this.saved.find(x => x.id === this.pick);
       if (!s) return;
       if (this.chosen.length >= this.maxStrategies) {
-        this.error = `${this.maxStrategies} strategies is the most this page `
-                   + `loads at once.`;
+        this.error = `${this.maxStrategies} strategies is the most this page loads at once.`;
         return;
       }
       this.chosen.push({
-        id: s.id, name: s.name,
-        qty: 1,
-        // THE SAVED VALUE SEEDS THE ROW. A strategy saved with $25,000 a
-        // position should not silently become $10,000 because this page has
-        // a different default; where it saved nothing, the page's default
-        // stands and the row says so.
+        id: s.id, name: s.name, qty: 1,
+        // The saved value seeds the row: a strategy saved with $25,000 a
+        // position must not silently become this page's default.
         capital: s.capital_per_position != null ? s.capital_per_position : 10000,
         savedCapital: s.capital_per_position,
+        filters: this.blankFilters(),
       });
       this.pick = 0;
       this.error = '';
+    },
+
+    blankFilters() {
+      const out = {};
+      for (const m of this.registry) {
+        out[m.key] = (m.type === 'range')
+          ? { on: false, lo: m.min, hi: m.max }
+          : { on: false, allowed: [] };
+      }
+      return out;
     },
 
     remove(i) {
@@ -149,16 +232,22 @@ document.addEventListener('alpine:init', () => {
       this.chosen.splice(i, 1);
       if (c) {
         delete BP_DATA.payloads[c.id];
+        delete BP_DATA.scaled[c.id];
         this.loaded = this.loaded.filter(p => p.saved.id !== c.id);
+        if (this.editing === c.id) this.editing = 0;
       }
+      this.recompute();
     },
 
     clearAll() {
       this.chosen = [];
       this.loaded = [];
+      this.rows = [];
       BP_DATA.payloads = {};
+      BP_DATA.scaled = {};
       this.loadNote = '';
       this.error = '';
+      this.editing = 0;
     },
 
     normalise(c) {
@@ -166,6 +255,7 @@ document.addEventListener('alpine:init', () => {
       c.qty = (isFinite(q) && q > 0) ? q : 1;
       const cap = Number(c.capital);
       c.capital = (isFinite(cap) && cap >= 0) ? cap : 0;
+      this.recompute();
     },
 
     colorOf(i) {
@@ -181,38 +271,181 @@ document.addEventListener('alpine:init', () => {
       const t0 = performance.now();
       try {
         const r = await fetch('/api/backtest-portfolio/load', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ids: this.chosen.map(c => c.id) }),
         });
         const b = await r.json();
         if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
         this.loaded = b.strategies || [];
         BP_DATA.payloads = {};
+        BP_DATA.scaled = {};
         for (const p of this.loaded) BP_DATA.payloads[p.saved.id] = p;
-        // The capital the row carries wins over the saved one on a reload:
-        // it is what the person set on this page a moment ago.
-        for (const c of this.chosen) {
-          const p = BP_DATA.payloads[c.id];
-          if (p && c.capital == null && p.capital_per_position != null) {
-            c.capital = p.capital_per_position;
-          }
-        }
         const wall = (performance.now() - t0) / 1000;
         const srv = b.load || {};
-        // BOTH NUMBERS. The server's time is the work; the wall time includes
-        // sending several megabytes of trades to this browser, and when they
-        // differ a lot it is the transfer that is slow, not the parse.
+        // BOTH NUMBERS: the server's time is the work, the wall time includes
+        // sending several megabytes of trades here. When they differ a lot it
+        // is the transfer that is slow, not the parse.
         this.loadNote = `${srv.n} loaded in ${bpFmtSeconds(srv.seconds)} `
                       + `(${srv.from_cache} cached, ${srv.parsed} parsed) · `
                       + `${bpFmtSeconds(wall)} in the browser`;
         this.slowLoad = (srv.parsed || 0) > 0;
+        this.recompute();
       } catch (e) {
         this.error = 'Load failed: ' + (e.message || e);
         this.loaded = [];
+        this.rows = [];
       } finally {
         this.busy = false;
       }
+    },
+
+    // ── filters ─────────────────────────────────────────────────────────
+    toggleEdit(id) { this.editing = (this.editing === id ? 0 : id); },
+
+    /* The categories a categorical metric actually has in THIS strategy's
+     * trades — from the data, not from a list written here. `exit_reason`
+     * has no declared categories because they are whatever the file says. */
+    categoriesFor(c, m) {
+      const p = BP_DATA.payloads[c.id];
+      if (m.categories && m.categories.length) return m.categories;
+      if (!p) return [];
+      return obDistinct(p.columns[m.column] || [])
+        .map(v => ({ value: v, label: String(v) }));
+    },
+
+    toggleCategory(c, m, value) {
+      const f = c.filters[m.key];
+      const i = f.allowed.indexOf(value);
+      if (i >= 0) f.allowed.splice(i, 1); else f.allowed.push(value);
+      f.on = f.allowed.length > 0;
+      this.recompute();
+    },
+
+    isChosenCategory(c, m, value) {
+      const f = c.filters[m.key];
+      return !!(f && f.allowed.includes(value));
+    },
+
+    onFilterChange() { this.recompute(); },
+
+    resetFilters(c) {
+      c.filters = this.blankFilters();
+      this.recompute();
+    },
+
+    activeCount(c) {
+      let n = 0;
+      for (const m of this.registry) {
+        const f = c.filters[m.key];
+        if (f && f.on) n++;
+      }
+      return n;
+    },
+
+    filterBadge(c) {
+      const n = this.activeCount(c);
+      return n ? `${n} filter${n === 1 ? '' : 's'}` : 'no filters';
+    },
+
+    // ── the numbers ─────────────────────────────────────────────────────
+    span() { return bpSpan(this.loaded, this.rangeMode); },
+
+    /* One strategy's columns with P/L scaled by qty. Cached per (id, qty):
+     * the array is rebuilt when the quantity changes and not on every
+     * recompute, which is every keystroke in a filter box. */
+    scaledCols(c) {
+      const p = BP_DATA.payloads[c.id];
+      if (!p) return null;
+      const hit = BP_DATA.scaled[c.id];
+      if (hit && hit.qty === c.qty) return hit.cols;
+      const qty = Number(c.qty) > 0 ? Number(c.qty) : 1;
+      const cols = Object.assign({}, p.columns,
+                                 { pnl: p.columns.pnl.map(v => v * qty) });
+      BP_DATA.scaled[c.id] = { qty: c.qty, cols };
+      return cols;
+    },
+
+    /* Everything the table shows. Recomputed in full on any change — the
+     * whole portfolio is a few tens of thousands of trades and the work is
+     * milliseconds, so there is no partial-update path to get wrong. */
+    recompute() {
+      const rows = [];
+      const span = this.rangeMode === 'intersection' ? this.span() : null;
+      // One session list for everyone: they all come from the same rollup,
+      // so the union covers every strategy and the per-strategy deployed
+      // series can be summed position by position.
+      const sessions = [...new Set(this.loaded.flatMap(
+        p => (p.market && p.market.spx_sessions) || []))].sort();
+
+      const pooled = { date_opened: [], date_closed: [], pnl: [], days_in_trade: [] };
+      const pctParts = [];          // per-trade P/L %, each against its own capital
+      let deployed = new Array(sessions.length).fill(0);
+
+      for (const c of this.chosen) {
+        const p = BP_DATA.payloads[c.id];
+        if (!p) continue;
+        const cols = this.scaledCols(c);
+        const specs = bpSpecs(c.filters, this.registry, span);
+        const idx = obApplyFilters(cols, p.n, specs);
+        const stats = obStats(cols, idx);
+        const conc = obConcurrency(p.columns, idx, sessions);
+        const capital = (Number(c.capital) || 0) * (Number(c.qty) || 1);
+        const extra = obExtraStats(cols, idx, stats, capital, conc.peak);
+        const series = obDeployedSeries(conc, sessions, capital);
+        for (let i = 0; i < deployed.length; i++) deployed[i] += series[i];
+
+        for (const i of idx) {
+          pooled.date_opened.push(p.columns.date_opened[i]);
+          pooled.date_closed.push(p.columns.date_closed[i]);
+          pooled.pnl.push(cols.pnl[i]);
+          pooled.days_in_trade.push(p.columns.days_in_trade[i]);
+          if (capital > 0) pctParts.push(cols.pnl[i] / capital * 100);
+        }
+
+        rows.push({
+          key: 'k' + c.id, id: c.id, name: c.name, color: p.color,
+          total: false,
+          n: idx.length, nAll: p.n,
+          dropped: p.n - idx.length,
+          cost: bpCoverageCost(p.columns, p.n, c.filters, this.registry),
+          stats, extra, conc,
+          sharpe: obSharpe(cols, idx),
+          capital,
+          peakDeployed: conc.peak * capital,
+        });
+      }
+
+      // ── the TOTAL row ────────────────────────────────────────────────
+      if (rows.length) {
+        const all = [...pooled.pnl.keys()];
+        const tStats = obStats(pooled, all);
+        // PEAK DEPLOYED FOR THE PORTFOLIO is the peak of the SUMMED series,
+        // which is not the sum of the per-strategy peaks unless they all peak
+        // on the same day. Passing it as `capital` with a peak of 1 is how
+        // obExtraStats is told "this is already the denominator".
+        const peakDeployed = deployed.length ? Math.max(...deployed) : 0;
+        const tExtra = obExtraStats(pooled, all, tStats, peakDeployed, 1);
+        // Avg P/L % pools PER-TRADE percentages, each against its own
+        // strategy's capital: with one strategy that is exactly the single
+        // page's avg P/L / capital, and with several it is the only reading
+        // that does not need a "portfolio capital per position" that does
+        // not exist.
+        tExtra.avg_pnl_pct = pctParts.length
+          ? pctParts.reduce((a, b) => a + b, 0) / pctParts.length : null;
+        rows.push({
+          key: 'total', id: 0, name: 'TOTAL', color: '#ffffff', total: true,
+          n: all.length,
+          nAll: rows.reduce((a, r) => a + r.nAll, 0),
+          dropped: rows.reduce((a, r) => a + r.dropped, 0),
+          cost: { noValue: rows.reduce((a, r) => a + r.cost.noValue, 0), columns: [] },
+          stats: tStats, extra: tExtra, conc: null,
+          sharpe: obSharpe(pooled, all),
+          capital: bpTotalCapital(this.chosen),
+          peakDeployed,
+        });
+      }
+      this.rows = rows;
+      this.tick++;
     },
 
     // ── readouts ────────────────────────────────────────────────────────
@@ -222,9 +455,7 @@ document.addEventListener('alpine:init', () => {
         : 'none saved yet';
     },
 
-    allocSummary() {
-      return `${bpFmtMoney(bpTotalCapital(this.chosen))} total`;
-    },
+    allocSummary() { return `${bpFmtMoney(bpTotalCapital(this.chosen))} total`; },
 
     rowMeta(c) {
       const s = this.saved.find(x => x.id === c.id);
@@ -235,18 +466,18 @@ document.addEventListener('alpine:init', () => {
 
     loadedSummary() {
       const trades = this.loaded.reduce((a, p) => a + (p.n || 0), 0);
-      const span = bpSpan(this.loaded, this.rangeMode);
-      const s = span ? ` · ${span.start} → ${span.end}` : '';
-      return `${this.loaded.length} strategies · ${bpFmtInt(trades)} trades${s}`;
+      const sp = this.span();
+      return `${this.loaded.length} strategies · ${bpFmtInt(trades)} trades`
+           + (sp ? ` · ${sp.start} → ${sp.end}` : '');
     },
 
     statusLine() {
       if (!this.chosen.length) return 'Add saved strategies to build a portfolio.';
       if (!this.loaded.length) return `${this.chosen.length} chosen — not loaded yet.`;
-      const span = bpSpan(this.loaded, this.rangeMode);
+      const sp = this.span();
       return `${this.loaded.length} loaded · `
            + `${bpFmtMoney(bpTotalCapital(this.chosen))} capital · `
-           + (span ? `${span.start} → ${span.end} (${this.rangeMode})` : 'no dates');
+           + (sp ? `${sp.start} → ${sp.end} (${this.rangeMode})` : 'no dates');
     },
 
     spanOf(p) {
@@ -258,22 +489,75 @@ document.addEventListener('alpine:init', () => {
       return `${q.source === 'cache' ? 'cached' : 'parsed'} ${bpFmtSeconds(q.seconds)}`;
     },
 
-    /* Anything the load found that the page should not swallow. A market
-     * join that failed, or a trade count that has moved since the strategy
-     * was saved, changes what every later number means. */
+    onRangeMode() { this.recompute(); },
+
+    // Cell formatters. `void this.tick` is the reactivity tie: the rows are
+    // rebuilt into reactive state, but a cell that read only BP_DATA would
+    // never re-render. Same trap the OO page hit twice.
+    cell(row, what) {
+      void this.tick;
+      const s = row.stats, e = row.extra;
+      switch (what) {
+        case 'n':        return bpFmtInt(row.n);
+        case 'win':      return bpFmtPct(s.win_pct);
+        case 'total':    return bpFmtMoney(s.total_pnl);
+        case 'avg':      return bpFmtMoney(s.avg_pnl);
+        case 'avgWin':   return bpFmtMoney(s.avg_win_pnl);
+        case 'avgLoss':  return bpFmtMoney(s.avg_loss_pnl);
+        case 'pf':       return e.profit_factor === null ? '—'
+                              : (isFinite(e.profit_factor) ? bpFmtNum(e.profit_factor) : '∞');
+        case 'dd':       return bpFmtMoney(s.max_drawdown);
+        case 'calmar':   return bpFmtNum(e.calmar);
+        case 'sharpe':   return bpFmtNum(row.sharpe);
+        case 'annual':   return bpFmtMoney(e.avg_annual_pnl);
+        case 'annualPct': return bpFmtPct(e.avg_annual_return_pct);
+        case 'avgPct':   return bpFmtPct(e.avg_pnl_pct, 2);
+        case 'days':     return bpFmtNum(s.avg_days_in_trade, 1);
+        case 'peak':     return bpFmtMoney(row.peakDeployed);
+        default:         return '';
+      }
+    },
+
+    cellSign(row, what) {
+      void this.tick;
+      const s = row.stats, e = row.extra;
+      const v = { total: s.total_pnl, avg: s.avg_pnl, dd: s.max_drawdown,
+                  annual: e.avg_annual_pnl, calmar: e.calmar,
+                  sharpe: row.sharpe, annualPct: e.avg_annual_return_pct,
+                  avgPct: e.avg_pnl_pct }[what];
+      if (v == null || !isFinite(v)) return '';
+      return v >= 0 ? 'pos' : 'neg';
+    },
+
+    /* What the filters cost, per strategy, stated rather than implied. */
+    rowNote(row) {
+      void this.tick;
+      if (row.total) return '';
+      const parts = [];
+      if (row.dropped) parts.push(`${bpFmtInt(row.dropped)} of ${bpFmtInt(row.nAll)} filtered out`);
+      if (row.cost.noValue) {
+        parts.push(`${bpFmtInt(row.cost.noValue)} have no value for an active `
+                 + `filter and are dropped by it`);
+      }
+      if (row.conc && row.conc.sameSession === row.conc.counted && row.conc.counted) {
+        parts.push('nothing held overnight, so no capital is deployed by this measure');
+      }
+      return parts.join(' · ');
+    },
+
     warnings() {
       const out = [];
       for (const p of this.loaded) {
         const name = p.saved ? p.saved.name : p.filename;
         if (p.saved_count_changed) {
-          out.push(`${name}: ${bpFmtInt(p.saved_count_changed.when_saved)} trades `
-                 + `when saved, ${bpFmtInt(p.saved_count_changed.now)} now — the `
-                 + `parser has changed since.`);
+          out.push(`${name}: ${bpFmtInt(p.saved_count_changed.when_saved)} trades when `
+                 + `saved, ${bpFmtInt(p.saved_count_changed.now)} now — the parser has `
+                 + `changed since.`);
         }
         const mk = p.market || {};
         if (mk.joined === false) {
           out.push(`${name}: market data did not join (${mk.error || 'no reason given'}) `
-                 + `— metric filters will have nothing to filter on.`);
+                 + `— the metric filters have nothing to filter on.`);
         }
       }
       return out;

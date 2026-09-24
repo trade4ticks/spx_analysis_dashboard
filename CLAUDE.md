@@ -232,9 +232,38 @@ and how the combination performs. Spec'd from the old Dash app
 (`Options-Backtest-Dashboard/pages/portfolio.py`, `utils/portfolio_calcs.py`)
 read as a specification, not a template.
 
-**Phases:** P1 scaffold + load — done; P2 filters, allocation, summary table
-with TOTAL row; P3 equity/drawdown/capital deployed; P4 correlation; P5
-saved profiles; P6 distribution, overlap, rolling risk; P7 docs.
+**Phases:** P1 scaffold + load — done; P2 filters, allocation, summary
+table with TOTAL row — done; P3 equity/drawdown/capital deployed; P4
+correlation (BOTH correlations weekly — the old app's matrix was weekly and
+its rolling pairwise was daily); P5 saved profiles; P6 distribution, overlap,
+rolling risk (Sharpe/Sortino); P7 docs.
+
+**One core, two pages.** `static/js/backtest_core.js` holds every shared
+calculation — `obApplyFilters`, `obStats`, `obEquity`, `obExtraStats`,
+`obConcurrency`, `obSharpe`, `obDeployedSeries` and the formatters — moved
+out of `oo_backtest.js` and read by both. The portfolio page defines no
+statistic of its own; the gate asserts that in both directions (the page
+calls them, the page does not define them, the core does, the OO page no
+longer does). **The file has no `'use strict'` on purpose**: the gates run
+the shipped functions by `eval`ing the core together with a page's bundle in
+node, and a strict eval keeps its declarations to itself — every driver would
+see `obStats is not defined`. `obNull` is a `const`, so the core and the
+bundle must be evaluated in ONE eval, not two.
+
+**P2's decisions.** Filters come from the shared registry, per strategy, with
+range boxes and categorical chips; a filter drops trades with no value for it
+and the row states the cost (staggered coverage). The TOTAL row pools the
+filtered, qty-scaled trades and runs the same `obStats`/`obExtraStats` over
+them. Two figures need their own definition at portfolio level and the page
+says so under the table: **ann ret %** divides by the peak of the SUMMED
+deployed-capital series (lower than the sum of per-strategy peaks unless they
+all peak together), and **avg P/L %** pools per-trade percentages, each
+against its own strategy's capital — which reduces to the single page's
+definition when there is one strategy. **Sharpe is the old app's**, labelled
+in the header tooltip and under the table: P/L summed by close date,
+mean/stdev × √252, days without a close NOT zero-filled, dollars and no
+risk-free rate, so it ranks rows against each other and is not comparable
+with a published Sharpe.
 
 **Settled with the user (2026-09-24), not to be re-opened:**
 - **Our stat definitions win** over the old app's, unchanged — Max DD,
@@ -287,13 +316,28 @@ OO page before and after to an identical PNG.
   calendar days; at ~2 closes a week that annualisation is generous. Kept as
   the old app had it, per the user.
 - Old has no Profit Factor, Avg Days, Max DD %, Avg P/L %; we have all four.
-- `capital_deployed` — old dedupes by OPEN DAY ("multiple rows on one entry
-  day are one slot") and uses a half-open interval `[open, close)`. Our
-  Deployment pane counts POSITIONS per SPX session with both ends inclusive.
-  Different numbers; decide in P3.
+- `capital_deployed` — **settled 2026-09-25: half-open `[open, close)` on
+  BOTH pages.** The measure is OVERNIGHT capital, what is still at risk at
+  the close, so a position is deployed on the sessions it is held through and
+  not on the one it closes on. A strategy entering every Friday and closing
+  the next Friday reads a constant 1, where inclusive counting drew 2 every
+  Friday — the same position counted twice on the day it changes hands. The
+  OO page's Deployment pane was wrong and now matches; its **peak concurrency
+  falls**, so **Avg Annual Return % on that page changes too** (it divides by
+  peak deployed capital). A trade opened and closed in one session is held
+  overnight never and contributes nothing: correct for this measure, and a
+  0DTE log therefore draws a flat zero, so `obConcurrency` counts those trades
+  (`sameSession`/`counted`) and the pane says so instead of drawing nothing.
+  **The old app's dedupe-by-open-day is NOT carried over**: it grouped every
+  trade opened on one day into a single slot lasting until the latest of their
+  closes, which assumes same-day rows are one position split across rows. In
+  our data one MesoSim row is one PositionId, so genuine same-day entries
+  would be undercounted, and a short trade opened beside a long one would be
+  counted as deployed after it had closed.
 - Strategy correlation — old uses **weekly** resampled P/L (deliberately, to
   avoid the daily zero-fill artifact) but its rolling pairwise correlation
-  uses DAILY rows, so the two disagree about what a correlation is. Fix in P4.
+  uses DAILY rows, so the two disagree about what a correlation is. **Both
+  are weekly in P4** (agreed 2026-09-25).
 - `SPEARMAN_METRICS` is a hardcoded list including the dropped SharpTwo/skew
   metrics; we use the registry.
 

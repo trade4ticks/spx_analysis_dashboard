@@ -308,6 +308,190 @@ def case_the_page_is_wired_up():
           "the page or its API is not registered")
 
 
+
+# ── P2: what the page computes ──────────────────────────────────────────────
+#
+# The SHIPPED functions, executed. These are the definitions the user settled
+# and they are the ones a portfolio is read from, so they are checked as
+# arithmetic rather than by looking at a table and finding it plausible.
+
+JS_DRIVER = r"""
+const fs = require('fs');
+global.document = { addEventListener: () => {} };
+global.Alpine = { data: () => {} };
+const core = fs.readFileSync(process.argv[1], 'utf8');
+const page = fs.readFileSync(process.argv[2], 'utf8');
+const tail = `
+  const out = {};
+  const sessions = [];
+  for (let d = new Date('2023-01-02'); d < new Date('2023-04-01');
+       d.setUTCDate(d.getUTCDate() + 1)) {
+    const wd = d.getUTCDay();
+    if (wd !== 0 && wd !== 6) sessions.push(d.toISOString().slice(0, 10));
+  }
+  // A WEEKLY ROLL: open Monday, close the next Monday, over and over.
+  const op = [], cl = [], pnl = [];
+  for (let k = 0; k < 8; k++) {
+    const a = new Date('2023-01-02'); a.setUTCDate(a.getUTCDate() + k * 7);
+    const b = new Date('2023-01-02'); b.setUTCDate(b.getUTCDate() + (k + 1) * 7);
+    op.push(a.toISOString().slice(0, 10));
+    cl.push(b.toISOString().slice(0, 10));
+    pnl.push(k % 2 ? -100 : 300);
+  }
+  const cols = { date_opened: op, date_closed: cl, pnl: pnl,
+                 days_in_trade: op.map(() => 7),
+                 vix_level: op.map((_, i) => (i < 3 ? null : 15 + i)) };
+  const all = [...op.keys()];
+
+  // HALF-OPEN DEPLOYMENT: one position at a time, never two on a roll day.
+  const conc = obConcurrency(cols, all, sessions);
+  out.peak = conc.peak;
+  out.counts = [...new Set(conc.counts)].sort();
+  out.sameSession = conc.sameSession;
+
+  // qty scales P/L and the capital behind it.
+  const scaled = Object.assign({}, cols, { pnl: cols.pnl.map(v => v * 3) });
+  out.total1 = obStats(cols, all).total_pnl;
+  out.total3 = obStats(scaled, all).total_pnl;
+  out.capital = bpTotalCapital([{ qty: 3, capital: 10000 },
+                                { qty: 1, capital: 25000 }]);
+
+  // The deployed series sums across strategies; the peak of the sum is not
+  // the sum of the peaks unless they peak together.
+  const s1 = obDeployedSeries(conc, sessions, 10000);
+  out.seriesPeak = Math.max(...s1);
+  const doubled = s1.map(v => v * 2);
+  out.sumPeak = Math.max(...doubled.map((v, i) => v + s1[i] * 0));
+
+  // Sharpe: the old app's definition, over days that HAD a close.
+  out.sharpe = obSharpe(cols, all);
+  const byDay = new Map();
+  for (const i of all) byDay.set(cl[i], (byDay.get(cl[i]) || 0) + pnl[i]);
+  const v = [...byDay.values()];
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  let ss = 0; for (const x of v) ss += (x - mean) * (x - mean);
+  out.sharpeWant = mean / Math.sqrt(ss / (v.length - 1)) * Math.sqrt(252);
+  out.sharpeDays = v.length;
+
+  // The registry drives the filters: OFF contributes no spec, ON does.
+  const reg = [{ key: 'vix', column: 'vix_level', type: 'range', min: 9, max: 80 },
+               { key: 'dow', column: 'day_of_week', type: 'categorical' }];
+  out.specsOff = bpSpecs({ vix: { on: false, lo: 9, hi: 80 } }, reg, null).length;
+  const specsOn = bpSpecs({ vix: { on: true, lo: 9, hi: 80 } }, reg, null);
+  out.specsOn = specsOn.length;
+  out.specColumn = specsOn[0].column;
+  // A filter on a late-starting metric drops the trades with no value.
+  out.filtered = obApplyFilters(cols, op.length, specsOn).length;
+  // The date range narrows on the ENTRY date.
+  const dated = bpSpecs({}, reg, { start: op[2], end: op[5] });
+  out.dateKind = dated[0].kind + ':' + dated[0].column;
+  out.dateFiltered = obApplyFilters(cols, op.length, dated).length;
+
+  // Union and intersection of two spans.
+  const ps = [{ date_min: '2023-01-01', date_max: '2023-06-30' },
+              { date_min: '2023-03-01', date_max: '2023-12-31' }];
+  out.union = bpSpan(ps, 'union').start + '..' + bpSpan(ps, 'union').end;
+  out.inter = bpSpan(ps, 'intersection').start + '..' + bpSpan(ps, 'intersection').end;
+  globalThis.__out = out;
+`;
+eval(core + String.fromCharCode(10) + page + String.fromCharCode(10) + tail);
+process.stdout.write(JSON.stringify(globalThis.__out));
+"""
+
+
+def case_p2_arithmetic():
+    """qty, capital, half-open deployment, Sharpe, and the registry filters."""
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the shipped page JS was NOT run")
+        return
+    core = ROOT / "static" / "js" / "backtest_core.js"
+    page = ROOT / "static" / "js" / "backtest_portfolio.js"
+    p = subprocess.run(["node", "-e", JS_DRIVER, str(core), str(page)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        FAILS.append(f"the page JS did not run: {p.stderr.strip()[:300]}")
+        return
+    out = json.loads(p.stdout)
+
+    # HALF-OPEN: a weekly roll is ONE position, including on the day it rolls.
+    check(out["peak"] == 1,
+          f"a weekly roll peaks at {out['peak']} concurrent positions; "
+          f"half-open [open, close) means the position closing and the one "
+          f"opening on the same day are never both counted")
+    check(out["counts"] == [0, 1] or out["counts"] == [1],
+          f"the roll's daily counts are {out['counts']}, expected 1 "
+          f"throughout (0 only after the final close)")
+    check(out["sameSession"] == 0,
+          f"{out['sameSession']} weekly trades were counted as intraday")
+
+    # qty scales P/L linearly and multiplies the capital behind it.
+    check(out["total3"] == out["total1"] * 3,
+          f"qty 3 gave {out['total3']} against {out['total1']} at qty 1")
+    check(out["capital"] == 55000,
+          f"portfolio capital {out['capital']}, expected 3x10,000 + 1x25,000 "
+          f"= 55,000 — qty multiplies the capital behind the position")
+
+    # Sharpe is the old app's, and it is over days that had a close.
+    check(out["sharpe"] is not None
+          and abs(out["sharpe"] - out["sharpeWant"]) < 1e-9,
+          f"Sharpe {out['sharpe']} does not match mean/stdev x sqrt(252) over "
+          f"P/L summed by close date ({out['sharpeWant']})")
+    check(out["sharpeDays"] == 8,
+          f"Sharpe used {out['sharpeDays']} observations for 8 closes; the "
+          f"days between closes must NOT be zero-filled (that is the old "
+          f"app's definition, kept deliberately)")
+
+    # The registry drives the filters, and a late metric costs trades.
+    check(out["specsOff"] == 0 and out["specsOn"] == 1
+          and out["specColumn"] == "vix_level",
+          f"an off filter produced {out['specsOff']} specs and an on one "
+          f"{out['specsOn']} on {out['specColumn']!r}")
+    check(out["filtered"] == 5,
+          f"filtering on a metric with three null values kept "
+          f"{out['filtered']} of 8; a trade with no value cannot satisfy it")
+    check(out["dateKind"] == "date:date_opened",
+          f"the portfolio date range applies to {out['dateKind']}, not the "
+          f"entry date — a trade belongs to the window it was opened in")
+    check(out["dateFiltered"] == 4,
+          f"the date range kept {out['dateFiltered']} of 8")
+
+    # Union and intersection.
+    check(out["union"] == "2023-01-01..2023-12-31",
+          f"union is {out['union']}")
+    check(out["inter"] == "2023-03-01..2023-06-30",
+          f"intersection is {out['inter']}")
+
+
+def case_the_page_computes_nothing_of_its_own():
+    """Every statistic comes from the shared core, not from this page.
+
+    The portfolio's whole claim is that a strategy reads the same on both
+    pages. A statistic reimplemented here would break that quietly, and the
+    cheapest way for it to happen is someone adding "just one more column".
+    """
+    js = (ROOT / "static" / "js" / "backtest_portfolio.js").read_text(encoding="utf-8")
+    for fn in ("obStats", "obExtraStats", "obConcurrency", "obApplyFilters",
+               "obSharpe", "obDeployedSeries"):
+        check(f"{fn}(" in js, f"the page does not call {fn}")
+        check(f"function {fn}" not in js,
+              f"the page defines its own {fn}; it must come from "
+              f"backtest_core.js, which /oo-backtest reads too")
+    core = (ROOT / "static" / "js" / "backtest_core.js").read_text(encoding="utf-8")
+    oo = (ROOT / "static" / "js" / "oo_backtest.js").read_text(encoding="utf-8")
+    for fn in ("obStats", "obExtraStats", "obConcurrency", "obApplyFilters"):
+        check(f"function {fn}" in core, f"{fn} is not in the shared core")
+        check(f"function {fn}" not in oo,
+              f"{fn} is still defined in oo_backtest.js as well as the core")
+    html = (ROOT / "templates" / "backtest_portfolio.html").read_text(encoding="utf-8")
+    check("js/backtest_core.js" in html,
+          "the portfolio page does not load the shared calculations")
+    oo_html = (ROOT / "templates" / "oo_backtest.html").read_text(encoding="utf-8")
+    check("js/backtest_core.js" in oo_html,
+          "the OO page does not load the shared calculations it now depends on")
+
+
 CASES = [
     ("payload survives the cache", case_payload_survives_the_cache),
     ("dates and nulls survive",    case_dates_and_nulls_survive),
@@ -316,6 +500,8 @@ CASES = [
     ("a broken entry is survived", case_a_broken_entry_is_survived),
     ("one load path",              case_the_router_reuses_one_path),
     ("the page is wired up",       case_the_page_is_wired_up),
+    ("P2 arithmetic",              case_p2_arithmetic),
+    ("no second implementation",   case_the_page_computes_nothing_of_its_own),
 ]
 
 

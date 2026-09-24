@@ -66,6 +66,39 @@
     .bp-phase b { color:var(--text); }
     .bp-load { font-size:11px; color:var(--muted); }
     .bp-load .warn { color:var(--warning); }
+
+    /* The filter editor: one strategy at a time. A panel per strategy, all
+       open at once, would be ten metrics times however many strategies on a
+       page whose job is the comparison between them. */
+    .bp-filters { padding:8px; border-top:1px solid var(--border);
+                  background:rgba(0,0,0,.14); }
+    .bp-frow { display:flex; align-items:center; gap:6px; margin-bottom:5px; }
+    .bp-flab { flex:1; min-width:0; font-size:11px; color:var(--text);
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .bp-flab.off { color:var(--dim); }
+    .bp-cats { display:flex; flex-wrap:wrap; gap:3px; }
+    .bp-cat { font-size:10px; padding:2px 6px; border-radius:3px; cursor:pointer;
+              border:1px solid var(--border); color:var(--dim); }
+    .bp-cat.on { border-color:var(--accent); color:var(--accent); }
+
+    /* The summary table. TOTAL is the row the page exists for, so it is
+       marked rather than merely last. */
+    .bp-table { width:100%; border-collapse:collapse; font-size:11px;
+                font-variant-numeric:tabular-nums; }
+    .bp-table th { font-size:10px; color:var(--dim); text-transform:uppercase;
+                   letter-spacing:.3px; font-weight:600; text-align:right;
+                   padding:4px 6px; border-bottom:1px solid var(--border);
+                   white-space:nowrap; }
+    .bp-table th.l, .bp-table td.l { text-align:left; }
+    .bp-table td { padding:4px 6px; border-bottom:1px solid rgba(255,255,255,.04);
+                   white-space:nowrap; text-align:right; color:var(--text); }
+    .bp-table tr.total td { border-top:2px solid var(--border); font-weight:700;
+                            background:rgba(52,152,219,.07); }
+    .bp-table td.pos { color:var(--accent); }
+    .bp-table td.neg { color:#e84393; }
+    .bp-tname { display:flex; align-items:center; gap:6px; }
+    .bp-note-row td { padding:0 6px 6px; color:var(--dim); font-size:10px; }
+    .bp-scroll { overflow-x:auto; }
   </style>
 </head>
 <body class="page" x-data="backtestPortfolio">
@@ -110,6 +143,24 @@
         </div>
       </div>
 
+      <div class="ob-card" x-show="loaded.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Date range</span>
+          <span class="ob-card-sub" x-text="span() ? (span().start + ' to ' + span().end) : ''"></span>
+        </div>
+        <div class="ob-card-body">
+          <select class="ob-sel" x-model="rangeMode" @change="onRangeMode()">
+            <option value="union">Union - every trade, from the earliest start</option>
+            <option value="intersection">Intersection - only where all overlap</option>
+          </select>
+          <div class="ob-note" style="margin-top:6px">
+            Union uses everything, and its early stretch has fewer strategies
+            in it. Intersection compares like with like and throws the rest
+            away. Either way a trade belongs to the window it was OPENED in.
+          </div>
+        </div>
+      </div>
+
       <div class="ob-card" x-show="chosen.length" x-cloak>
         <div class="ob-card-hdr">
           <span class="ob-card-title">Allocation</span>
@@ -134,6 +185,61 @@
             <input class="bp-num" type="number" min="0" step="500"
                    x-model.number="c.capital" @change="normalise(c)">
             <span class="bp-x" @click="remove(i)" title="Remove">×</span>
+          </div>
+        </template>
+        <template x-for="c in chosen" :key="'f' + c.id">
+          <div>
+            <div class="bp-strat" style="padding-top:0">
+              <span style="width:10px"></span>
+              <span class="bp-grow">
+                <span class="bp-meta" x-text="c.name + ' - ' + filterBadge(c)"></span>
+              </span>
+              <button class="bp-btn" style="font-size:10px;padding:2px 8px"
+                      @click="toggleEdit(c.id)"
+                      x-text="editing === c.id ? 'Done' : 'Filters'"></button>
+            </div>
+            <div class="bp-filters" x-show="editing === c.id" x-cloak>
+              <template x-for="m in registry" :key="m.key">
+                <div>
+                  <div class="bp-frow">
+                    <input type="checkbox" x-model="c.filters[m.key].on"
+                           @change="onFilterChange()">
+                    <span class="bp-flab" :class="c.filters[m.key].on ? '' : 'off'"
+                          x-text="m.label"></span>
+                    <template x-if="m.type === 'range'">
+                      <span style="display:flex;gap:4px">
+                        <input class="bp-num" style="width:62px" type="number"
+                               :step="m.step" x-model.number="c.filters[m.key].lo"
+                               @change="onFilterChange()">
+                        <input class="bp-num" style="width:62px" type="number"
+                               :step="m.step" x-model.number="c.filters[m.key].hi"
+                               @change="onFilterChange()">
+                      </span>
+                    </template>
+                  </div>
+                  <template x-if="m.type === 'categorical'">
+                    <div class="bp-cats" style="margin:0 0 6px 22px">
+                      <template x-for="cat in categoriesFor(c, m)" :key="String(cat.value)">
+                        <span class="bp-cat"
+                              :class="isChosenCategory(c, m, cat.value) ? 'on' : ''"
+                              @click="toggleCategory(c, m, cat.value)"
+                              x-text="cat.label"></span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <div class="ob-row">
+                <button class="bp-btn" style="font-size:10px;padding:2px 8px"
+                        @click="resetFilters(c)">Clear this strategy's filters</button>
+              </div>
+              <div class="ob-note" style="margin-top:6px">
+                The same metrics the single-backtest page filters on, from the
+                same registry. A filter drops trades with no value for it -
+                metrics start at different dates, and the table says what that
+                costs.
+              </div>
+            </div>
           </div>
         </template>
         <div class="ob-card-body">
@@ -198,25 +304,89 @@
         </div>
       </template>
 
+      <div class="ob-card" x-show="rows.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Portfolio summary</span>
+          <span class="ob-card-sub">P/L dated by close &middot; deployment is overnight capital</span>
+        </div>
+        <div class="ob-card-body bp-scroll">
+          <table class="bp-table">
+            <thead>
+              <tr>
+                <th class="l">strategy</th>
+                <th>trades</th><th>win %</th><th>total P/L</th><th>avg P/L</th>
+                <th>avg win</th><th>avg loss</th><th>PF</th><th>max DD</th>
+                <th>calmar</th>
+                <th title="mean/stdev of P/L summed by CLOSE DATE, times sqrt(252). Days without a close are not zero-filled, so this annualises a sample that is not daily and reads higher than a daily-return Sharpe. Dollars, no risk-free rate. Kept as the old app computed it.">sharpe *</th>
+                <th>avg ann P/L</th><th>ann ret %</th><th>avg P/L %</th>
+                <th>avg days</th><th>peak deployed</th>
+              </tr>
+            </thead>
+            <template x-for="r in rows" :key="r.key">
+              <tbody>
+                <tr :class="r.total ? 'total' : ''">
+                  <td class="l">
+                    <span class="bp-tname">
+                      <span class="bp-swatch" :style="'background:' + r.color"></span>
+                      <span x-text="r.name"></span>
+                    </span>
+                  </td>
+                  <td x-text="cell(r, 'n')"></td>
+                  <td x-text="cell(r, 'win')"></td>
+                  <td :class="cellSign(r, 'total')" x-text="cell(r, 'total')"></td>
+                  <td :class="cellSign(r, 'avg')" x-text="cell(r, 'avg')"></td>
+                  <td x-text="cell(r, 'avgWin')"></td>
+                  <td x-text="cell(r, 'avgLoss')"></td>
+                  <td x-text="cell(r, 'pf')"></td>
+                  <td :class="cellSign(r, 'dd')" x-text="cell(r, 'dd')"></td>
+                  <td :class="cellSign(r, 'calmar')" x-text="cell(r, 'calmar')"></td>
+                  <td :class="cellSign(r, 'sharpe')" x-text="cell(r, 'sharpe')"></td>
+                  <td :class="cellSign(r, 'annual')" x-text="cell(r, 'annual')"></td>
+                  <td :class="cellSign(r, 'annualPct')" x-text="cell(r, 'annualPct')"></td>
+                  <td :class="cellSign(r, 'avgPct')" x-text="cell(r, 'avgPct')"></td>
+                  <td x-text="cell(r, 'days')"></td>
+                  <td x-text="cell(r, 'peak')"></td>
+                </tr>
+                <tr class="bp-note-row" x-show="rowNote(r)" x-cloak>
+                  <td colspan="16" class="l" x-text="rowNote(r)"></td>
+                </tr>
+              </tbody>
+            </template>
+          </table>
+          <div class="ob-note" style="margin-top:8px">
+            * Sharpe is the old app's: P/L summed by close date, mean/stdev
+            times the square root of 252, with days that had no close not
+            zero-filled. It ranks these rows against each other and is not
+            comparable with a published Sharpe. TOTAL's <b>ann ret %</b>
+            divides by the portfolio's PEAK DEPLOYED capital - the peak of the
+            summed series, which is lower than the sum of the per-strategy
+            peaks unless they all peak together - and its <b>avg P/L %</b>
+            pools per-trade percentages, each against its own strategy's
+            capital.
+          </div>
+        </div>
+      </div>
+
       <!-- WHAT THIS PHASE IS. Stated on the page, not only in the commit:
            a main column with nothing in it reads as a page that broke. -->
       <div class="ob-card">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Phase 1 of 7 — loading</span>
+          <span class="ob-card-title">Phase 2 of 7 — allocation and filters</span>
         </div>
         <div class="ob-card-body">
           <div class="bp-phase">
-            This phase carries the data and nothing else: strategies load,
-            their trades are in the browser, and qty and capital are
-            collected. <b>Nothing is computed from them yet</b> — the numbers
-            above are trade counts and dates, straight from the load.<br><br>
-            Next: <b>P2</b> the per-strategy filters from the shared metric
-            registry and the summary table with its TOTAL row; <b>P3</b>
-            equity, drawdown and capital deployed; <b>P4</b> the correlation
-            work; <b>P5</b> saved portfolio profiles; <b>P6</b> distribution,
-            overlap and rolling risk.<br><br>
-            P/L is dated by <b>close</b>, the same basis as the
-            single-backtest page, so a strategy reads the same on both.
+            Strategies load, qty and capital allocate, the shared metric
+            registry filters each one, and the summary table totals them.
+            Every figure comes from the same code the single-backtest page
+            uses, so a strategy reads the same on both.<br><br>
+            Next: <b>P3</b> equity, drawdown and capital deployed; <b>P4</b>
+            the correlation work, with both correlations weekly; <b>P5</b>
+            saved portfolio profiles; <b>P6</b> distribution, overlap and
+            rolling risk.<br><br>
+            P/L is dated by <b>close</b>. Deployment is <b>half-open</b> —
+            a position is capital at risk on the sessions it is held through
+            and not on the one it closes on, so a weekly roll reads one
+            position and not two on the day it hands over.
           </div>
         </div>
       </div>
@@ -226,6 +396,11 @@
   {#- NOT `defer` — Alpine is deferred in the head, so a deferred bundle here
       would register the component after alpine:init has already fired. See
       the note in equities_scan.html; gated in check_rendered_assets.py. -#}
+  {#- The calculations both backtest pages share — filtering, the
+      summary figures, the equity curve, concurrency. Before the
+      bundle and not deferred: they are top-level declarations it
+      reads at load. See static/js/backtest_core.js. -#}
+  <script src={{ asset('js/backtest_core.js') }}></script>
   <script src={{ asset('js/backtest_portfolio.js') }}></script>
 </body>
 </html>

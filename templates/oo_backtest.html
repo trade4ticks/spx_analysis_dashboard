@@ -145,6 +145,11 @@
 
   <!-- NOT deferred: must register the alpine:init listener before the deferred
        Alpine bundle starts (see scripts/check_rendered_assets.py). -->
+  {#- The calculations both backtest pages share — filtering, the
+      summary figures, the equity curve, concurrency. Before the
+      bundle and not deferred: they are top-level declarations it
+      reads at load. See static/js/backtest_core.js. -#}
+  <script src={{ asset('js/backtest_core.js') }}></script>
   <script src={{ asset('js/oo_backtest.js') }}></script>
 </head>
 

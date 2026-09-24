@@ -55,6 +55,8 @@ from app.oo_backtest.registry import REGISTRY, registry_with_coverage  # noqa: E
 from app.routers.oo_backtest import _parse  # noqa: E402
 
 JS = ROOT / "static" / "js" / "oo_backtest.js"
+# The shared half, loaded first by the page and by every driver here.
+CORE = ROOT / "static" / "js" / "backtest_core.js"
 
 FAILS: list[str] = []
 # Parts this host cannot run (no node, no sibling checkout of the source app).
@@ -84,7 +86,11 @@ HELPERS = {
 DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
@@ -117,7 +123,7 @@ def pandas_codes(metric_key: str, column: str, values: list) -> list[int]:
 
 
 def run_js(job: dict) -> dict:
-    p = subprocess.run(["node", "-e", DRIVER, str(JS)], input=json.dumps(job),
+    p = subprocess.run(["node", "-e", DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         raise RuntimeError(p.stderr.strip())
@@ -614,7 +620,11 @@ def check_real_mesosim() -> None:
 STATS_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
@@ -627,7 +637,7 @@ process.stdout.write(JSON.stringify(out));
 
 
 def run_stats_js(job: dict) -> dict:
-    p = subprocess.run(["node", "-e", STATS_DRIVER, str(JS)], input=json.dumps(job),
+    p = subprocess.run(["node", "-e", STATS_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         raise RuntimeError(p.stderr.strip())
@@ -717,7 +727,11 @@ def check_stats_parity() -> None:
 SECTION_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
@@ -801,7 +815,7 @@ def check_section_parity() -> None:
     job["sparse"] = {"cols": {"v": [18.5, 45.0, 18.2], "pnl": [100.0, -50.0, 20.0]}, "idx": [0, 1, 2],
                      "metric": vix_m, "column": "v"}
 
-    p = subprocess.run(["node", "-e", SECTION_DRIVER, str(JS)], input=json.dumps(job),
+    p = subprocess.run(["node", "-e", SECTION_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         check(False, f"section driver ran ({p.stderr.strip()[:300]})")
@@ -871,7 +885,11 @@ def check_section_parity() -> None:
 AUTO_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
@@ -959,7 +977,7 @@ def check_auto_bins() -> None:
     for k, v in nice_cases.items():
         cases[k] = v
         job[k] = {"values": v, "auto": nice, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]}
-    p = subprocess.run(["node", "-e", AUTO_DRIVER, str(JS)], input=json.dumps(job),
+    p = subprocess.run(["node", "-e", AUTO_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         check(False, f"auto-bin driver ran ({p.stderr.strip()[:300]})")
@@ -1014,7 +1032,11 @@ const fs = require('fs');
 let factory;
 global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
 global.Alpine = { data: (_n, f) => { factory = f; } };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 
@@ -1131,7 +1153,7 @@ def check_surface_ranking_ui() -> None:
                "suggested_name": "t", "market": {"joined": True, "spx_sessions": []}}
     reg = json.loads(json.dumps(REGISTRY))
     from app.oo_backtest import surface
-    p = subprocess.run(["node", "-e", RANK_DRIVER, str(JS)],
+    p = subprocess.run(["node", "-e", RANK_DRIVER, str(JS), str(CORE)],
                        input=json.dumps({"rows": rows, "rows2": rows2, "catalog": catalog, "payload": payload, "registry": reg,
                                          "groups": surface.FAMILY_GROUPS, "other": surface.OTHER_GROUP,
                                          "formLabels": surface.FORM_LABELS}),
@@ -1211,7 +1233,10 @@ const fs = require('fs');
 let factory;
 global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
 global.Alpine = { data: (_n, f) => { factory = f; } };
-eval(fs.readFileSync(process.argv[1], 'utf8') + ';globalThis.OBD = OB_DATA;');
+// The shared calculations first, in the SAME eval: `obNull` is a const,
+// which does not leak from one eval to the next.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8') + ';globalThis.OBD = OB_DATA;');
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = { valuesCalls: [] };
 global.fetch = async (url, init) => {
@@ -1340,7 +1365,7 @@ def check_surface_rows() -> None:
     rank_rows = [{"column": "z_iv_30d_atm", "family": "iv", "form": "z", "tenor": None, "wing": None, "n": 50, "bars": 50,
                   "spearman": 0.3, "spearman_p": 0.01, "spearman_p_bh": 0.02, "pearson": 0.2, "pearson_p": 0.1, "pearson_p_bh": 0.2}]
     reg = json.loads(json.dumps(REGISTRY))
-    p = subprocess.run(["node", "-e", ROWS_DRIVER, str(JS)],
+    p = subprocess.run(["node", "-e", ROWS_DRIVER, str(JS), str(CORE)],
                        input=json.dumps({"registry": reg, "payload": payload, "payload2": payload2, "values": values,
                                          "catalogBody": body, "rankRows": rank_rows}),
                        capture_output=True, text=True, encoding="utf-8")
@@ -1411,7 +1436,11 @@ def check_surface_rows() -> None:
 DEPLOY_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const out = {};
 for (const [key, t] of Object.entries(job)) {
@@ -1427,6 +1456,15 @@ process.stdout.write(JSON.stringify(out, (k, v) => (v === Infinity ? 'Infinity' 
 def _weekdays(lo: str, hi: str, drop=()) -> list[str]:
     days = pd.bdate_range(lo, hi)
     return [d.strftime("%Y-%m-%d") for d in days if d.strftime("%Y-%m-%d") not in set(drop)]
+
+
+def _weekly_handover() -> dict:
+    """Enter every Friday, close the next Friday. Always exactly one open."""
+    fridays = [d.strftime("%Y-%m-%d")
+               for d in pd.date_range("2021-01-08", "2021-12-31", freq="W-FRI")]
+    return {"date_opened": fridays[:-1], "date_closed": fridays[1:],
+            "pnl": [10.0] * (len(fridays) - 1),
+            "days_in_trade": [7] * (len(fridays) - 1)}
 
 
 def check_deployment_and_extra_stats() -> None:
@@ -1463,10 +1501,17 @@ def check_deployment_and_extra_stats() -> None:
     subset = [i for i in range(len(trades)) if rng.random() < 0.5]
 
     def brute(idx):
+        # HALF-OPEN [open, close). The measure is OVERNIGHT capital: a
+        # position is deployed on the sessions it is held through and not on
+        # the one it closes on. Written here as the spec, not ported from the
+        # JS -- a strategy entering every Friday and closing the next Friday
+        # must read a constant 1, not 2 on Fridays.
         lo = min(cols["date_opened"][i] for i in idx)
         hi = max(cols["date_closed"][i] for i in idx)
         days = [d for d in sessions if lo <= d <= hi]
-        return days, [sum(1 for i in idx if cols["date_opened"][i] <= d <= cols["date_closed"][i]) for d in days]
+        return days, [sum(1 for i in idx
+                          if cols["date_opened"][i] <= d < cols["date_closed"][i])
+                      for d in days]
 
     def extra(idx, capital, peak):
         df = pd.DataFrame({k: [cols[k][i] for i in idx] for k in cols})
@@ -1496,9 +1541,23 @@ def check_deployment_and_extra_stats() -> None:
            "nolosses": {"cols": {"date_opened": ["2021-01-04", "2021-02-01"], "date_closed": ["2021-01-05", "2021-02-02"],
                                  "pnl": [5.0, 7.0], "days_in_trade": [1, 1]}, "sessions": sessions, "capital": 1000},
            "nosessions": {"cols": cols, "sessions": [], "capital": 10000},
+           # THE HAND-OVER. Enter every Friday, close the next Friday: one
+           # position is held at all times, and the Friday a trade closes is
+           # the Friday the next one opens. Counting the close day as well
+           # drew 2 every Friday -- the same position counted twice on the
+           # day it changes hands -- which is what half-open fixes.
+           "handover": {"cols": _weekly_handover(), "sessions": sessions,
+                        "capital": 10000},
+           # NOTHING HELD OVERNIGHT: a 0DTE log. Zero is the right answer for
+           # capital held through a close, and the pane has to say so rather
+           # than draw a flat line and let it be discovered.
+           "intraday": {"cols": {"date_opened": ["2021-03-01", "2021-03-02", "2021-03-03"],
+                                 "date_closed": ["2021-03-01", "2021-03-02", "2021-03-03"],
+                                 "pnl": [12.0, -4.0, 8.0], "days_in_trade": [0, 0, 0]},
+                        "sessions": sessions, "capital": 10000},
            "meso": {"cols": mc, "sessions": m_sessions, "capital": 10000},
            "meso_planted": {"cols": planted, "sessions": m_sessions, "capital": 10000}}
-    p = subprocess.run(["node", "-e", DEPLOY_DRIVER, str(JS)], input=json.dumps(job),
+    p = subprocess.run(["node", "-e", DEPLOY_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         check(False, f"deployment driver ran ({p.stderr.strip()[:300]})")
@@ -1533,6 +1592,27 @@ def check_deployment_and_extra_stats() -> None:
     check(got["nosessions"]["conc"]["days"] == [] and got["nosessions"]["conc"]["peak"] == 0,
           "no session list (market not joined): an empty series, no invented calendar")
 
+    # HALF-OPEN, the two cases that name what it means.
+    hv = got["handover"]["conc"]
+    # Every session carries exactly one, EXCEPT the last: the series runs to
+    # the final close, and on that day the last trade is gone with nothing
+    # opened behind it. Zero there is the same rule, not an exception to it.
+    check(hv["peak"] == 1 and set(hv["counts"][:-1]) == {1} and hv["counts"][-1] == 0,
+          f"weekly hand-over: peak {hv['peak']}, counts {sorted(set(hv['counts']))} "
+          f"(last {hv['counts'][-1]}) — one position is held at all times, and "
+          f"the Friday one closes is the Friday the next opens; counting the "
+          f"close day draws 2 there")
+    check(hv["sameSession"] == 0,
+          f"{hv['sameSession']} hand-over trades were counted as intraday")
+
+    it = got["intraday"]["conc"]
+    check(it["peak"] == 0 and not any(it["counts"]),
+          f"a log that never holds overnight reports peak {it['peak']}; by this "
+          f"measure -- capital still at risk at the close -- it deploys none")
+    check(it["sameSession"] == 3 and it["counted"] == 3,
+          f"the intraday trades are not counted as such ({it['sameSession']} of "
+          f"{it['counted']}), so the pane could not explain its flat zero line")
+
     m, pl = got["meso"]["conc"], got["meso_planted"]["conc"]
     check(mp["notes"]["open_positions"] == 2 and mp["n"] == 4 and m["days"][-1] == "2023-12-12"
           and all(d <= "2023-12-12" for d in m["days"]) and m["unclosed"] == 0,
@@ -1554,7 +1634,11 @@ const fs = require('fs');
 let factory;
 global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
 global.Alpine = { data: (_n, f) => { factory = f; } };
-eval(fs.readFileSync(process.argv[1], 'utf8'));
+// The shared calculations, then the page: the bundle's functions are
+// top-level declarations that read them, exactly as the browser loads
+// the two script tags.
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
 const job = JSON.parse(fs.readFileSync(0, 'utf8'));
 const c = factory();
 c.$nextTick = f => f && f();
@@ -1626,7 +1710,7 @@ def check_component_filters() -> None:
     payload = {"n": 6, "columns": cols, "date_min": "2021-01-04", "date_max": "2021-06-21", "notes": {},
                "suggested_name": "t", "market": {"joined": True}}
     reg = json.loads(json.dumps(REGISTRY))
-    p = subprocess.run(["node", "-e", COMPONENT_DRIVER, str(JS)], input=json.dumps({"registry": reg, "payload": payload}),
+    p = subprocess.run(["node", "-e", COMPONENT_DRIVER, str(JS), str(CORE)], input=json.dumps({"registry": reg, "payload": payload}),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
         check(False, f"component driver ran ({p.stderr.strip()[:300]})")

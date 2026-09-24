@@ -64,192 +64,14 @@ function obBinIndex(v, bins) {
   return lo;
 }
 
-/* Non-null numeric extent of a column, or null when it has no values. */
-function obExtent(values) {
-  let lo = Infinity, hi = -Infinity, n = 0;
-  for (const v of values || []) {
-    if (v === null || v === undefined || Number.isNaN(v)) continue;
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
-    n++;
-  }
-  return n ? { min: lo, max: hi, n } : null;
-}
 
-/* Distinct non-null values, sorted. */
-function obDistinct(values) {
-  const s = new Set();
-  for (const v of values || []) if (v !== null && v !== undefined) s.add(v);
-  return [...s].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-}
 
-const obNull = v => v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v));
 
-/* Row indices passing every ACTIVE filter. A filter is only passed in when it
- * narrows something -- an untouched range lets null values through, a
- * narrowed one drops them (a trade with no VIX9D cannot be "VIX9D 12-20").
- *   {kind:'date',  column, from, to}   ISO strings, inclusive
- *   {kind:'range', column, lo, hi}     inclusive, as filter_dataframe had it
- *   {kind:'set',   column, allowed}    a Set of permitted values */
-function obApplyFilters(cols, n, specs) {
-  const idx = [];
-  outer:
-  for (let i = 0; i < n; i++) {
-    for (const f of specs) {
-      const col = cols[f.column];
-      const v = col ? col[i] : null;
-      if (f.kind === 'range') {
-        if (obNull(v) || v < f.lo || v > f.hi) continue outer;
-      } else if (f.kind === 'set') {
-        if (!f.allowed.has(v)) continue outer;
-      } else if (f.kind === 'date') {
-        if (obNull(v) || (f.from && v < f.from) || (f.to && v > f.to)) continue outer;
-      }
-    }
-    idx.push(i);
-  }
-  return idx;
-}
 
-/* Order for anything cumulative: by close date, ties kept in payload order
- * (open date, then file order). A STABLE sort -- pandas' default sort in the
- * source app's stats is not, so its max drawdown could differ across runs
- * when several trades close the same day. */
-function obByClose(cols, idx) {
-  const dc = cols.date_closed;
-  return idx.slice().sort((a, b) => (dc[a] < dc[b] ? -1 : dc[a] > dc[b] ? 1 : a - b));
-}
 
-/* The summary figures, as utils/stats.py calculate_stats defines them --
- * including its quirk that a zero-P/L trade counts as a LOSS for Avg Loss
- * (losses are pnl <= 0) but not as a win. */
-function obStats(cols, idx) {
-  const n = idx.length;
-  const empty = { num_trades: 0, win_pct: 0, avg_pnl: 0, total_pnl: 0, avg_days_in_trade: 0,
-                  max_drawdown: 0, avg_win_pnl: 0, avg_loss_pnl: 0, max_winner: 0, max_loser: 0 };
-  if (!n) return empty;
-  const pnl = cols.pnl, dit = cols.days_in_trade || [];
-  let total = 0, wins = 0, winSum = 0, losses = 0, lossSum = 0, maxW = -Infinity, maxL = Infinity;
-  let ditSum = 0, ditN = 0;
-  for (const i of idx) {
-    const p = pnl[i];
-    total += p;
-    if (p > 0) { wins++; winSum += p; } else { losses++; lossSum += p; }
-    if (p > maxW) maxW = p;
-    if (p < maxL) maxL = p;
-    if (!obNull(dit[i])) { ditSum += dit[i]; ditN++; }
-  }
-  const eq = obEquity(cols, idx);
-  return {
-    num_trades: n,
-    win_pct: wins / n * 100,
-    avg_pnl: total / n,
-    total_pnl: total,
-    avg_days_in_trade: ditN ? ditSum / ditN : 0,
-    max_drawdown: eq.maxDD ? eq.maxDD.drawdown : 0,
-    avg_win_pnl: wins ? winSum / wins : 0,
-    avg_loss_pnl: losses ? lossSum / losses : 0,
-    max_winner: maxW,
-    max_loser: maxL,
-  };
-}
 
-/* Cumulative P/L, running peak and drawdown per trade in close order, as
- * calculations.py calculate_drawdown. maxDD is the deepest point (first
- * occurrence), or null when the curve never falls below its peak. */
-function obEquity(cols, idx) {
-  const order = obByClose(cols, idx);
-  const pnl = cols.pnl, dc = cols.date_closed;
-  const points = [];
-  let cum = 0, peak = -Infinity, maxDD = null;
-  for (const i of order) {
-    cum += pnl[i];
-    if (cum > peak) peak = cum;
-    const dd = cum - peak;
-    const pt = { row: i, date: dc[i], pnl: pnl[i], cumulative: cum, peak, drawdown: dd };
-    points.push(pt);
-    if (dd < 0 && (maxDD === null || dd < maxDD.drawdown)) maxDD = pt;
-  }
-  return { points, maxDD };
-}
 
-/* Concurrent open positions per SPX session, over the span of the given
- * trades (first entry to last exit). A trade is open on every session from
- * its entry date to its exit date, both inclusive -- day granularity, so a
- * trade closed at 10:00 and one opened at 15:30 the same day count as two.
- * `sessions` is the sorted ISO list from the server; days outside the span are
- * dropped. A trade with no exit date is in no count (the parser excludes
- * still-open positions; this is the backstop, and it is counted, not hidden).
- * offSession counts trades whose entry or exit date is not in the list.
- * Returns { days, counts, peak, peakDay, offSession, unclosed }. */
-function obConcurrency(cols, idx, sessions) {
-  const out = { days: [], counts: [], peak: 0, peakDay: null, offSession: 0, unclosed: 0 };
-  if (!sessions || !sessions.length || !idx.length) return out;
-  const dOpen = cols.date_opened, dClose = cols.date_closed;
-  let lo = null, hi = null;
-  for (const i of idx) {
-    if (!dClose[i]) continue;
-    if (lo === null || dOpen[i] < lo) lo = dOpen[i];
-    if (hi === null || dClose[i] > hi) hi = dClose[i];
-  }
-  if (lo === null) { out.unclosed = idx.length; return out; }
-  // first index with sessions[k] >= d  /  > d
-  const lower = d => { let a = 0, b = sessions.length; while (a < b) { const m = (a + b) >> 1; if (sessions[m] < d) a = m + 1; else b = m; } return a; };
-  const upper = d => { let a = 0, b = sessions.length; while (a < b) { const m = (a + b) >> 1; if (sessions[m] <= d) a = m + 1; else b = m; } return a; };
-  const k0 = lower(lo), k1 = upper(hi);          // span is sessions[k0 .. k1-1]
-  const diff = new Array(Math.max(0, k1 - k0) + 1).fill(0);
-  const known = new Set(sessions);
-  for (const i of idx) {
-    if (!dClose[i]) { out.unclosed++; continue; }
-    if (!known.has(dOpen[i]) || !known.has(dClose[i])) out.offSession++;
-    const a = lower(dOpen[i]) - k0, b = upper(dClose[i]) - k0;   // sessions [a, b)
-    if (b > a) { diff[a]++; diff[b]--; }
-  }
-  let run = 0;
-  for (let k = 0; k < k1 - k0; k++) {
-    run += diff[k];
-    out.days.push(sessions[k0 + k]);
-    out.counts.push(run);
-    if (run > out.peak) { out.peak = run; out.peakDay = sessions[k0 + k]; }
-  }
-  return out;
-}
 
-/* The five figures beyond stats.py's ten.
- *   years            (last exit - first entry) / 365.25 over these trades
- *   avg_annual_pnl   total P/L / years
- *   calmar           avg annual P/L / |max drawdown $|   (null with no drawdown)
- *   profit_factor    gross wins / |gross losses|         (Infinity with wins and
- *                                                         no losses, null with neither)
- *   avg_annual_return_pct  avg annual P/L / (peak concurrency x capital) x 100
- *   avg_pnl_pct            avg P/L / capital x 100
- * The two capital figures are null when capital is not a positive number.
- * `stats` is obStats' result; `peak` is obConcurrency's. */
-function obExtraStats(cols, idx, stats, capital, peak) {
-  const out = { years: null, avg_annual_pnl: null, calmar: null, profit_factor: null,
-                avg_annual_return_pct: null, avg_pnl_pct: null };
-  if (!idx.length) return out;
-  let lo = null, hi = null, gw = 0, gl = 0;
-  for (const i of idx) {
-    const o = cols.date_opened[i], c = cols.date_closed[i], p = cols.pnl[i];
-    if (o && (lo === null || o < lo)) lo = o;
-    if (c && (hi === null || c > hi)) hi = c;
-    if (p > 0) gw += p; else if (p < 0) gl += p;
-  }
-  const years = lo && hi ? (obDay(hi) - obDay(lo)) / 365.25 : 0;
-  if (years > 0) {
-    out.years = years;
-    out.avg_annual_pnl = stats.total_pnl / years;
-    if (stats.max_drawdown < 0) out.calmar = out.avg_annual_pnl / Math.abs(stats.max_drawdown);
-  }
-  out.profit_factor = gl < 0 ? gw / Math.abs(gl) : (gw > 0 ? Infinity : null);
-  const cap = typeof capital === 'number' && capital > 0 ? capital : null;
-  if (cap) {
-    out.avg_pnl_pct = stats.avg_pnl / cap * 100;
-    if (out.avg_annual_pnl !== null && peak > 0) out.avg_annual_return_pct = out.avg_annual_pnl / (peak * cap) * 100;
-  }
-  return out;
-}
 
 
 
@@ -520,15 +342,7 @@ function obOLS(xs, ys) {
   return { n, slope, intercept: my - slope * mx, r, r2: r === null ? null : r * r };
 }
 
-/* Days since the epoch for an ISO date, for a linear x axis (no date adapter). */
-function obDay(iso) { return Date.parse(iso + 'T00:00:00Z') / 86400000; }
-function obIsoDay(d) { return new Date(Math.round(d) * 86400000).toISOString().slice(0, 10); }
 
-function obMoney(v, digits = 0) {
-  if (obNull(v)) return '—';
-  const a = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-  return (v < 0 ? '-$' : '$') + a;
-}
 
 /* "SPX Iron Condor 45DTE (1,284 trades, 2021-01-04 – 2026-03-13)" */
 function obSavedLabel(s) {
@@ -1556,7 +1370,9 @@ document.addEventListener('alpine:init', () => {
       const conc = OB_DATA.conc;
       this.extra = obExtraStats(OB_DATA.columns, OB_DATA.idx, this.stats, this.capital(), conc ? conc.peak : 0);
       this.deploy = conc && { peak: conc.peak, peakDay: conc.peakDay, offSession: conc.offSession,
-                              unclosed: conc.unclosed, days: conc.days.length, hasSessions: OB_DATA.sessions.length > 0 };
+                              unclosed: conc.unclosed, sameSession: conc.sameSession,
+                              counted: conc.counted, days: conc.days.length,
+                              hasSessions: OB_DATA.sessions.length > 0 };
       this.renderDeployment();
     },
 
@@ -1596,6 +1412,17 @@ document.addEventListener('alpine:init', () => {
       if (!d) return '';
       if (!d.hasSessions) return 'No session list — market data not joined';
       const parts = [];
+      // A LOG THAT NEVER HOLDS OVERNIGHT reads as a flat zero line, which
+      // looks like a broken pane. It is not: this pane measures capital held
+      // THROUGH a close, and an intraday strategy holds none.
+      if (d.counted && d.sameSession === d.counted) {
+        parts.push(`Every trade opens and closes in one session — nothing is `
+                 + `held overnight, so nothing is deployed by this measure `
+                 + `(it counts capital still at risk at the close)`);
+      } else if (d.sameSession) {
+        parts.push(`${d.sameSession} of ${d.counted} trades open and close in `
+                 + `one session and are not deployed overnight`);
+      }
       if (d.offSession) parts.push(`${d.offSession} trade${d.offSession === 1 ? '' : 's'} open or close on a day with no SPX session`);
       if (d.unclosed) parts.push(`${d.unclosed} trade${d.unclosed === 1 ? '' : 's'} with no exit date, not counted`);
       return parts.join(' · ');
