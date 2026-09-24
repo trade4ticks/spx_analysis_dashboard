@@ -53,7 +53,10 @@ written with `PUT /strategies/{id}/capital`, which leaves `updated_at` (the list
 alone. **Deployment** (a registry `pane`: its own card, on the Day of Week row beside that
 section's card, not inside it) counts open positions per
 **SPX session** from the rollup (`market.session_days`, sent as `market.spx_sessions`),
-entry and exit day both inclusive. Every session in the span is a point, so a stretch with
+**half-open `[entry, exit)`** — overnight capital, so a position is counted on the
+sessions it is held through and not on the one it closes on (changed 2026-09-25; see the
+Backtest Portfolio section for why, and note it lowers peak concurrency and therefore Avg
+Annual Return %). Every session in the span is a point, so a stretch with
 nothing open is a run of zeros. One stepped line; the right axis is the left × capital,
 pinned to the same range, not a second trace. Still-open MesoSim positions are excluded by
 the parser and so contribute nothing (gate-checked against the v3.1 fixture). Trades
