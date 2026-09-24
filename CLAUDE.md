@@ -225,6 +225,44 @@ arriving prints still say where the market is.
 wrong one is what moves money). The ladder hatching and the drag label now
 mark only what is known to cross, for the same reason.
 
+## The topbar nav: six categories (2026-09-24)
+
+One partial, `templates/_nav.html`, included by all 17 page templates — it is
+the only file with nav markup, so this was one edit rather than seventeen.
+Seventeen links in a row became six disclosure menus: **SPX · Factor · Equity
+· Scalp · Backtest · Research**.
+
+- **A category name is a button, not a link.** It has no page of its own, and
+  the alternatives are inventing a landing page or promoting one child.
+- **`nav_active` is unchanged and is the KEY, not the href.** Every page
+  passes the same string it always did, so no page template and no route
+  moved. The three Equities pages are on the other service and their key
+  (`/equities-live`) is deliberately not their path there (`/`), which is why
+  an item carries `live` separately; the href is still built from
+  `request.url.hostname` and `live_port` (the box is reached by both Tailscale
+  IP and name).
+- **Plain JS (`static/js/nav.js`), not Alpine**: every page has its own
+  component on `<body>`, and a nested one here would be a second thing for
+  every page's gates to know about. The W3C *disclosure navigation* pattern —
+  `aria-expanded` on the button, ordinary links Tab reaches — not
+  `role="menu"`, which takes links out of the tab order and is for
+  application commands.
+- **The bubbling guard is load-bearing.** The category listener sits on an
+  element containing the button, so a key the button handled arrives again
+  with focus already in the menu: Down opened the menu, landed on the first
+  page and stepped straight to the second, and **every arrow moved two**.
+  `if (e.target === b) return;`. Only a browser could see it — found by
+  driving the keyboard in headless Edge, and the gate now checks the guard is
+  still there.
+- The current page's category wears the accent; the page is marked again
+  inside its menu, with a `::after` dot so it is not marked by colour alone.
+
+Gate: `scripts/check_nav.py` renders every page and asks a person's
+questions — is this page's key in exactly one category, is that category the
+marked one, is the page marked once inside it, are the names buttons, do the
+hrefs go anywhere, and does the nav link to any key no page claims (which is
+what a renamed route leaves behind).
+
 ## Equities Scalp: the filter pane's ranges (2026-09-23)
 
 **`col_ranges` is keyed two ways, deliberately.** The pivot's columns are

@@ -106,6 +106,10 @@ GATES = [
     _s("check_alpine_refs.py",
        note="every Alpine call resolves to a component member"),
     _s("check_asset_versions.py", note="static assets are content-hashed"),
+    # One partial, seventeen pages. A page that falls out of the nav is
+    # unreachable while every route still answers, so nothing else notices.
+    _s("check_nav.py",
+       note="every page is in exactly one category, and marked in it"),
     # Renders each page with the REAL asset() and looks at the OUTPUT. The
     # four gates above it all passed while a template shipped a script tag
     # with an empty src — none of them looked at rendered markup.

@@ -1,18 +1,30 @@
 {#-
-  Shared topbar nav. Included by every page, which sets its own href first:
+  Shared topbar nav. Included by every page, which sets its own key first:
 
       {% set nav_active = "/factor-analysis" %}{% include "_nav.html" %}
 
-  Before this partial the same 10 links were hand-copied into all 10 page
+  Before this partial the same links were hand-copied into all 10 page
   templates (verified identical apart from which link carried "on"), so
   adding or renaming an entry meant 10 edits and a missed copy drifted
   silently.
+
+  SIX CATEGORIES, EACH A DISCLOSURE MENU (2026-09-24). Seventeen links in one
+  row had outgrown the topbar. A category NAME IS NOT A LINK -- it is a
+  button that opens its menu -- because a name like "Scalp" has no page of
+  its own, and giving it one would mean inventing a landing page nobody asked
+  for or picking a favourite child.
+
+  `nav_active` IS UNCHANGED AND IS THE KEY, not the href: every page keeps
+  the string it already passes, so no page template and no route moved for
+  this. The three Equities pages live on their own service and their key
+  ("/equities-live") is deliberately not their path there ("/"), which is why
+  the item carries `live` separately.
 
   WHITESPACE CONTRACT - this file is byte-sensitive:
     * the comment above closes with the whitespace-trimming marker, so
       output begins exactly at the nav tag, at column 0. The including
       page supplies the leading indent.
-    * inner lines carry their own literal indent (6 spaces for links,
+    * inner lines carry their own literal indent (6 spaces for a category,
       4 for the closing tag), matching the markup this replaced.
     * NO trailing newline after the closing tag - the page supplies it.
 
@@ -20,43 +32,60 @@
   the comment early and dumps the rest of the text into the page.
   Re-run scripts/check_template_render.py after touching this file.
 -#}<nav class="topbar-nav">
-{%- for href, label in [
-      ("/",                     "Dashboard"),
-      ("/heatmap",              "Heatmap"),
-      ("/today",                "Today"),
-      ("/factor-analysis",      "Factor Analysis"),
-      ("/ticker-analysis",      "Ticker Analysis"),
-      ("/equity-iv",            "Equity IV"),
-      ("/equities-scalp",       "Equities Scalp"),
-      ("/factor-signals",       "Factor Signals"),
-      ("/factor-trades",        "Factor Trades"),
-      ("/ai-explorer",          "AI Explorer"),
-      ("/research",             "Research"),
-      ("/research2",            "Research 2"),
-      ("/backtest-iv-analysis", "Backtest IV"),
-      ("/oo-backtest",          "OO/Mesosim Backtest"),
+{%- set nav_cats = [
+      {"name": "SPX", "items": [
+          {"key": "/",                     "label": "Dashboard"},
+          {"key": "/heatmap",              "label": "Heatmap"},
+          {"key": "/today",                "label": "Today"}]},
+      {"name": "Factor", "items": [
+          {"key": "/factor-analysis",      "label": "Factor Analysis"},
+          {"key": "/factor-signals",       "label": "Factor Signals"},
+          {"key": "/factor-trades",        "label": "Factor Trades"}]},
+      {"name": "Equity", "items": [
+          {"key": "/equity-iv",            "label": "Equity IV"},
+          {"key": "/ticker-analysis",      "label": "Ticker Analysis"}]},
+      {"name": "Scalp", "items": [
+          {"key": "/equities-scalp",       "label": "Equities Scalp"},
+          {"key": "/equities-live",        "label": "Equities Live",
+           "live": "/",
+           "title": "A separate service on port " ~ live_port ~ " — if it crashes it does not take these with it"},
+          {"key": "/wall",                 "label": "Equities Wall",
+           "live": "/wall",
+           "title": "A wall of small live tapes — watching only, no order entry"},
+          {"key": "/equities-scan",        "label": "Equities Scan",
+           "live": "/scan",
+           "title": "The quietness grid — same service as Equities Live, because the feed allows one connection"}]},
+      {"name": "Backtest", "items": [
+          {"key": "/oo-backtest",          "label": "OO/Mesosim Backtest"},
+          {"key": "/backtest-iv-analysis", "label": "Backtest IV"}]},
+      {"name": "Research", "items": [
+          {"key": "/ai-explorer",          "label": "AI Explorer"},
+          {"key": "/research",             "label": "Research"},
+          {"key": "/research2",            "label": "Research 2"}]},
     ] %}
-      <a class="nav-link{% if href == nav_active %} on{% endif %}" href="{{ href }}">{{ label }}</a>
+{%- for cat in nav_cats %}
+{%- set here = cat["items"] | selectattr("key", "equalto", nav_active) | list | length > 0 %}
+      <div class="nav-cat{% if here %} on{% endif %}">
+        <button type="button" class="nav-cat-btn" aria-expanded="false"
+                aria-controls="nav-menu-{{ loop.index }}"{% if here %} aria-current="true"{% endif %}>{{ cat["name"] }}</button>
+        <div class="nav-menu" id="nav-menu-{{ loop.index }}">
+{%- for item in cat["items"] %}
+          {#- The Equities pages ride their OWN SERVICE on their own port, so
+              their href is built from the request's host rather than
+              hardcoded: the box is reached both by Tailscale IP and by name,
+              and a baked-in address works from exactly one of them.
+              `live_port` is a global both apps set, so the two never
+              disagree about where it is. -#}
+          <a class="nav-link{% if item["key"] == nav_active %} on{% endif %}"
+             href="{% if item.get("live") %}//{{ request.url.hostname }}:{{ live_port }}{{ item["live"] }}{% else %}{{ item["key"] }}{% endif %}"
+             {%- if item.get("title") %} title="{{ item["title"] }}"{% endif %}
+             {%- if item["key"] == nav_active %} aria-current="page"{% endif %}>{{ item["label"] }}</a>
 {%- endfor %}
-      {#- Equities Live runs as its OWN SERVICE ON ITS OWN PORT, so its link
-          carries one. Built from the request's host rather than hardcoded:
-          the box is reached both by Tailscale IP and by name, and a baked-in
-          address works from exactly one of them. `live_port` is a global both
-          apps set, so the two never disagree about where it is. -#}
-      <a class="nav-link{% if nav_active == "/equities-live" %} on{% endif %}"
-         href="//{{ request.url.hostname }}:{{ live_port }}/"
-         title="A separate service on port {{ live_port }} — if it crashes it does not take these with it">Equities Live</a>
-      {#- Equities Scan rides the SAME service as the tape, and not for tidiness:
-          the market-data account permits one upstream websocket, so the scan
-          holds its symbols on the tape's connection. Same port, same host
-          expression, for the same reason. -#}
-      <a class="nav-link{% if nav_active == "/equities-scan" %} on{% endif %}"
-         href="//{{ request.url.hostname }}:{{ live_port }}/scan"
-         title="The quietness grid — same service as Equities Live, because the feed allows one connection">Equities Scan</a>
-      {#- Equities Wall: the same service again, and a third tier on the same
-          upstream socket. Watching only — nothing on that page reaches a
-          broker. -#}
-      <a class="nav-link{% if nav_active == "/wall" %} on{% endif %}"
-         href="//{{ request.url.hostname }}:{{ live_port }}/wall"
-         title="A wall of small live tapes — watching only, no order entry">Equities Wall</a>
+        </div>
+      </div>
+{%- endfor %}
     </nav>
+    {#- Opens the menus, and closes them on Escape or a click elsewhere. A
+        plain script rather than Alpine: this partial is included by every
+        page, and not every page's component would be the one to own it. -#}
+    <script src={{ asset('js/nav.js') }}></script>

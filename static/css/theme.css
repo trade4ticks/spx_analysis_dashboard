@@ -84,6 +84,41 @@ body {
 .nav-link:hover { color: var(--text); background: var(--surface); }
 .nav-link.on { color: var(--accent); }
 
+/* ── Nav categories: seventeen pages behind six buttons ──────────────────
+   A category name is a BUTTON, not a link: it has no page of its own, and
+   the alternative is inventing a landing page or promoting one child. The
+   category holding the current page wears the accent, and the page itself
+   is marked again inside the menu — the two answer different questions
+   ("where am I" from a closed bar, "which one" from an open menu). */
+.nav-cat { position: relative; }
+.nav-cat-btn {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border: 0; border-radius: 4px; background: none;
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  color: var(--dim); cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.nav-cat-btn::after { content: "\25BE"; font-size: 9px; opacity: .65; }
+.nav-cat-btn:hover { color: var(--text); background: var(--surface); }
+.nav-cat-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.nav-cat.on > .nav-cat-btn { color: var(--accent); }
+.nav-cat.open > .nav-cat-btn { color: var(--text); background: var(--surface); }
+.nav-menu {
+  display: none; position: absolute; top: calc(100% + 5px); left: 0;
+  flex-direction: column; gap: 1px; min-width: 186px; padding: 4px;
+  background: var(--raised); border: 1px solid var(--border);
+  border-radius: 5px; box-shadow: 0 8px 20px rgba(0, 0, 0, .5);
+  /* Above every other layer this stylesheet raises (the highest is 200) —
+     a menu that opens behind the controls strip reads as one that did not
+     open at all. */
+  z-index: 300;
+}
+.nav-cat.open > .nav-menu { display: flex; }
+.nav-menu .nav-link { display: block; white-space: nowrap; }
+/* Marked by more than colour: the dot survives a colourblind reader, a
+   screenshot in greyscale, and the accent being restyled. */
+.nav-menu .nav-link.on::after { content: " \2022"; }
+
 /* ── Global controls strip ───────────────────────────────────────────────── */
 .ctrl-strip {
   background: var(--surface);
