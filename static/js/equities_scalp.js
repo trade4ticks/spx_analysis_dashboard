@@ -1704,6 +1704,28 @@ document.addEventListener('alpine:init', () => {
           const dflt = (this.meta.filters && this.meta.filters.defaults || {})[k];
           if (v != null && v !== dflt) q.set(k, String(v));
         }
+        // THE PANE'S OWN CONSTRAINTS, which used to live only in the browser.
+        //
+        // Every piece of this worked except the sending: the pane pushed a
+        // constraint, the chip appeared, the number was accepted, and the
+        // request went out without it -- so the row count never moved and
+        // rows below the threshold stayed on screen. `> 0.40` and `> 40`
+        // behaved identically because neither was ever asked about.
+        //
+        // It was invisible until the pane's ranges were fixed (2026-09-23),
+        // because until then every database-read metric had no range and its
+        // two buttons were disabled, so no constraint could be added at all.
+        // The one metric that escaped that -- $ vol/min, the derived one --
+        // has a named slider of its own, and sliders were always sent.
+        //
+        // A constraint with no number yet is NOT sent: the server answers a
+        // non-numeric threshold with a 400, and an empty input is a filter
+        // being typed, not a filter being asked for.
+        const clauses = this.custom
+          .filter(c => c.value != null && c.value !== '' && isFinite(c.value))
+          .map(c => `${c.key}:${c.op}:${c.value}`);
+        if (clauses.length) q.set('filters', clauses.join(','));
+
         const j = await scGetJson('/api/equities-scalp/candidates?' + q);
         if (j.error) { this.candError = j.error; this.cand = null; }
         else {

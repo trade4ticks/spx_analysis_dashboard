@@ -1284,9 +1284,45 @@ async def check_filter_pane_ranges() -> int:
             fails += 1
             break
 
+    # ── and screening on one actually runs ──────────────────────────────
+    #
+    # The range is what ENABLES the pane's two buttons; this is what happens
+    # when they are pressed. Both halves have now been broken separately: the
+    # range was missing (2026-09-23) and then the constraint was never sent
+    # (2026-09-24, in the browser — see check_scalp_filters.py). This side
+    # asserts the endpoint's half: a constraint naming a metric that is on no
+    # column set runs, is reported as active rather than inert, and rejects.
+    unchosen = "off_mid_bps"
+    loose = await _cand(filters=f"{unchosen}:min:-1e9")
+    if unchosen not in (loose["rows"][0]["values"] if loose["rows"] else {}):
+        print(f"  screening on {unchosen} did not pull it into the table; "
+              f"'filterable' and 'visible' are supposed to be one set")
+        fails += 1
+    custom = [c for c in loose["constraints"] if c.get("source") == "custom"]
+    if len(custom) != 1 or loose["inert_filters"]:
+        print(f"  a constraint on {unchosen} was not reported active: "
+              f"{custom}, inert={loose['inert_filters']}")
+        fails += 1
+
+    tight = await _cand(filters=f"{unchosen}:min:1e9")
+    if tight["n_pass"] != 0:
+        print(f"  a threshold above every value left {tight['n_pass']} rows "
+              f"passing — the constraint was accepted and not applied")
+        fails += 1
+    tag = f"{unchosen}:min:1e+09"
+    if tight["rejected"].get(tag) != tight["n_total"]:
+        print(f"  the rejection count for {tag} is "
+              f"{tight['rejected'].get(tag)}, not {tight['n_total']}; the "
+              f"pane cannot say what its filter cost")
+        fails += 1
+    if loose["n_pass"] != (await _cand())["n_pass"]:
+        print("  a constraint that excludes nothing changed the pass count")
+        fails += 1
+
     if not fails:
         print(f"  filter pane: {len(have_values)} of {len(listed)} listed "
-              f"metrics screenable by name, the all-null one excluded")
+              f"metrics screenable by name, the all-null one excluded; "
+              f"screening on an unchosen one runs and rejects")
     return fails
 
 

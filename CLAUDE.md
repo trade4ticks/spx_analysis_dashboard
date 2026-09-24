@@ -263,25 +263,43 @@ marked one, is the page marked once inside it, are the names buttons, do the
 hrefs go anywhere, and does the nav link to any key no page claims (which is
 what a renamed route leaves behind).
 
-## Equities Scalp: the filter pane's ranges (2026-09-23)
+## Equities Scalp: the filter pane (2026-09-23/24)
 
-**`col_ranges` is keyed two ways, deliberately.** The pivot's columns are
-filed under their ROLE key (`noise`, `ratio`, `price`) with ranges taken from
-the rows the table is drawn from; every metric the date holds is also filed
-under its OWN NAME, from one grouped aggregate over the date
+**Two defects in a row, the first concealing the second.** Worth reading
+together, because the second was invisible until the first was fixed.
+
+**1. The ranges (2026-09-23).** `col_ranges` is keyed two ways, deliberately:
+the pivot's columns under their ROLE key (`noise`, `ratio`, `price`), with
+ranges taken from the rows the table is drawn from; and every metric the date
+holds under its OWN NAME, from one grouped aggregate over the date
 (`min`/`max`/`percentile_cont(0.5)`/`count`). The pane lists metrics by name
-(from `/meta`, queried live) and looks each one up by name.
+(from `/meta`, queried live) and looks each one up by name. Before this, only
+the role-keyed columns had ranges, so every metric row read **"not on this
+date"** with its ≥/≤ buttons disabled, and the only working row was the
+DERIVED one (`$ vol/min`), whose key is its own. Live since `c6f4741`, which
+introduced the pane — nothing to do with the metric cull, though the symptom
+invites that reading. A metric that is present but entirely null still gets
+no range and says so in the same words: there is nothing to screen on either
+way.
 
-The bug this fixes: only the pivoted, role-keyed columns had ranges, so every
-metric row in the pane read **"not on this date"** with its two buttons
-disabled, and the only row that worked was the DERIVED one (`$ vol/min`),
-whose key is its own. Live since `c6f4741`, which introduced the pane —
-nothing to do with the metric cull, though the symptom invites that reading.
-A metric that is present but entirely null still gets no range, and says so
-in the same words: there is nothing to screen on either way. Reproduced and
-gated with no database in `scalp_dryrun.check_filter_pane_ranges`, which
-asks the page's own question — for each metric `/meta` lists, is there a
-range under that exact key.
+**2. The constraints were never sent (2026-09-24).** `loadCandidates()` built
+the query without `filters`, so a pane constraint lived only in the browser:
+the chip appeared, the number was accepted, and the count never moved —
+`> 0.40` and `> 40` behaved identically because neither was asked about. The
+endpoint's half was complete all along (parses `filters`, pulls the named
+metric into the pivot, evaluates it in the same loop as the sliders, reports
+it inert if it could not run). It was hidden by defect 1: with every ≥/≤
+button disabled, no pane constraint could be created — and `$ vol/min`, the
+one metric that escaped, has a named SLIDER, and sliders were always sent.
+
+**Gates, one per half.** `scalp_dryrun.check_filter_pane_ranges` asks the
+page's own question — for each metric `/meta` lists, is there a range under
+that exact key — and then that screening on an unchosen metric runs, is
+reported active rather than inert, and rejects.
+`scripts/check_scalp_filters.py` drives the SHIPPED page JS in node with the
+network stubbed and reads the URL it builds; a source check would have passed
+against the broken version, since the word "filters" appears throughout the
+file.
 
 ## Equities Wall (`/wall`, in progress — 2026-09-22)
 

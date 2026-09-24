@@ -131,6 +131,10 @@ GATES = [
        live_flag=True),
     _s("check_scalp_fills.py", note="the Schwab statement parser"),
     _s("check_scalp_metrics.py", note="no hardcoded metric names"),
+    # The pane accepted a constraint, chipped it, and never sent it. Only
+    # driving the shipped page JS can see what the request carried.
+    _s("check_scalp_filters.py", can_skip=True,
+       note="pane constraints reach the request"),
     # Replay reads PARQUET, so its gate fabricates a session instead: which
     # minute a trade lands in, where the print/candle switch falls, and
     # whether the payload is valid JSON are all decidable without the store.
