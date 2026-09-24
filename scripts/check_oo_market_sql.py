@@ -293,6 +293,7 @@ async def run(dsn: str) -> None:
         await check_planted(pool)
         await check_end_to_end(pool)
         await check_saved_strategies(pool)
+        await check_portfolio_profiles(pool)
         await check_surface(pool)
     finally:
         await pool.close()
@@ -614,6 +615,98 @@ async def check_saved_strategies(pool) -> None:
     check(await store.delete_strategy(pool, a["id"]) is True, "delete removes the row")
     check(await store.delete_strategy(pool, a["id"]) is False and await store.load_strategy_file(pool, a["id"]) is None,
           "a deleted id deletes nothing twice and loads as missing")
+
+
+async def check_portfolio_profiles(pool) -> None:
+    """Saved portfolio profiles: a combination, validated on the way in.
+
+    A profile POINTS AT saved strategies and carries the numbers applied to
+    them. What matters here is that what comes out is what a page can use --
+    a store whose rows have to be re-validated by every reader is not a
+    store -- and that a name collision is an answer rather than an
+    overwrite.
+    """
+    print("portfolio profiles")
+    from app.oo_backtest import portfolio_store as ps
+
+    body = {
+        "strategies": [
+            {"id": 1, "qty": 2, "capital": 25000,
+             "filters": {"vix": {"on": True, "lo": 12, "hi": 30},
+                         "day_of_week": {"on": True, "allowed": [0, 4]}}},
+            {"id": 2, "qty": 1, "capital": 10000, "filters": {}},
+        ],
+        "range_mode": "intersection",
+        "roll_weeks": 13,
+    }
+    a = await ps.save_profile(pool, name="  live   book ", notes="two",
+                              payload=body)
+    check(a["name"] == "live book" and a["n_strategies"] == 2,
+          f"the name was not collapsed, or the count is wrong: {a}")
+
+    # A NAME COLLISION IS AN ANSWER. Two portfolios called "live book" where
+    # one silently replaced the other is a combination nobody can reproduce.
+    try:
+        await ps.save_profile(pool, name="live book", notes="dup", payload=body)
+        check(False, "a duplicate profile name was accepted silently")
+    except ps.NameTaken as exc:
+        check(exc.existing_id == a["id"],
+              f"the collision named id {exc.existing_id}, not {a['id']} -- "
+              f"the page offers to replace THAT one")
+
+    b = await ps.save_profile(pool, name="live book", notes="replaced",
+                              payload=body, replace=True)
+    check(b["id"] == a["id"] and b["notes"] == "replaced",
+          f"replace made a second row: {b['id']} vs {a['id']}")
+
+    got = await ps.load_profile(pool, a["id"])
+    check(got["payload"] == ps.clean_payload(body),
+          f"the payload changed through the store: {got['payload']}")
+    check(got["payload"]["strategies"][0]["filters"]["day_of_week"]["allowed"]
+          == [0, 4],
+          "a categorical filter's chosen values did not survive")
+    check(got["payload"]["range_mode"] == "intersection"
+          and got["payload"]["roll_weeks"] == 13,
+          f"the page settings did not survive: {got['payload']}")
+
+    # VALIDATED ON THE WAY IN, with a reason.
+    bad = [
+        ({"strategies": []}, "empty"),
+        ({"strategies": [{"id": 0}]}, "a zero id"),
+        ({"strategies": [{"id": 1}, {"id": 1}]}, "the same strategy twice"),
+        ({"strategies": [{"id": 1, "qty": 0}]}, "a zero quantity"),
+        ({"strategies": [{"id": 1, "capital": -5}]}, "negative capital"),
+        ({"strategies": [{"id": 1}], "range_mode": "sideways"}, "a bad range mode"),
+        ({"strategies": [{"id": 1, "filters": {"vix": {"lo": "wide"}}}]},
+         "a non-numeric bound"),
+    ]
+    for payload, what in bad:
+        try:
+            await ps.save_profile(pool, name=f"bad {what}", notes="",
+                                  payload=payload)
+            check(False, f"{what} was accepted into a profile")
+        except ValueError:
+            pass
+
+    # The filter map holds NO METRIC NAMES of its own: a key the registry no
+    # longer has is stored as given, because the registry owns that list and
+    # a second copy here would drift from it.
+    odd = await ps.save_profile(
+        pool, name="future metric", notes="",
+        payload={"strategies": [{"id": 3, "qty": 1, "capital": 1,
+                                 "filters": {"not_a_metric_yet":
+                                             {"on": False, "lo": 0, "hi": 1}}}]})
+    back = await ps.load_profile(pool, odd["id"])
+    check("not_a_metric_yet" in back["payload"]["strategies"][0]["filters"],
+          "an unknown metric key was dropped; the registry decides what "
+          "exists, not this table")
+
+    lst = await ps.list_profiles(pool)
+    check([x["name"] for x in lst][:1] == ["future metric"],
+          f"profiles are not newest-updated first: {[x['name'] for x in lst]}")
+    check(await ps.delete_profile(pool, odd["id"]) is True
+          and await ps.delete_profile(pool, odd["id"]) is False,
+          "delete did not report whether it removed anything")
 
 
 async def check_end_to_end(pool) -> None:

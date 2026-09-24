@@ -238,7 +238,8 @@ read as a specification, not a template.
 **Phases:** P1 scaffold + load — done; P2 filters, allocation, summary
 table with TOTAL row — done; P3 equity/drawdown/capital deployed/monthly
 P&L — done; P4 correlation — done; P5 saved
-profiles; P6 distribution, overlap, rolling risk (Sharpe/Sortino); P7 docs.
+profiles — done; P6 distribution, overlap, rolling risk (Sharpe/Sortino); P7
+docs.
 
 **One core, two pages.** `static/js/backtest_core.js` holds every shared
 calculation — `obApplyFilters`, `obStats`, `obEquity`, `obExtraStats`,
@@ -336,6 +337,29 @@ divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
 nothing to lay out and the numbers want to be readable; shade is the month's
 size against the biggest month, the same opacity rule the bar charts use, and
 year totals carry a bar beside them. Everything is dated by CLOSE.
+
+**P5: profiles are POINTERS, not snapshots.** A profile
+(`backtest_portfolio_profiles`, JSONB) holds the strategy ids with their qty,
+capital and filters, plus the range mode and rolling window — no trades and
+no parse, so the saved strategy stays the one source of its file and
+re-saving it there is picked up on the next profile load. The cost is stated
+rather than discovered: `GET /profiles/{id}` reports which ids no longer
+exist, and the page says "2 strategies have been deleted since" instead of
+quietly loading a smaller portfolio. A name collision is a **409 carrying the
+existing id**, so the page offers to replace THAT profile rather than asking
+for a name it already knows is taken. The payload is validated into shape on
+the way in (ids, positive qty, non-negative capital, registry-shaped
+filters); **filter keys are stored as given** — the registry owns which
+metrics exist and a second list here would drift from it.
+
+**Two bugs P5's browser check caught, both invisible to source reading.**
+`loadProfile()` held `busy` while calling `load()`, and `load()` refuses to
+run while busy (its double-click guard) — so a profile restored every setting
+and then fetched nothing. And `rangeOf(m)` returned `null` for a torn-down
+panel, which Alpine evaluates once more on the way out: the expression error
+does not stop the page, it leaves the rest of that render pass stale, which
+is how a filter panel took the summary table down with it. `rangeOf` now
+always returns a shape with a `missing` flag.
 
 **P4's decisions.** **Both correlations are weekly** — the old app's matrix
 was weekly and its rolling pairwise was daily, so the two disagreed about

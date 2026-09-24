@@ -189,6 +189,50 @@
     <!-- ── the sidebar: what is in the portfolio ─────────────────────── -->
     <div class="ob-side">
 
+      <!-- PROFILES FIRST, as the old app had the sidebar: pick the
+           combination, then adjust it below. -->
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Portfolio profiles</span>
+          <span class="ob-card-sub" x-text="profileSub()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-pick">
+            <select class="ob-sel" x-model.number="profilePick">
+              <option value="0">Saved combinations…</option>
+              <template x-for="pf in profiles" :key="pf.id">
+                <option :value="pf.id" x-text="profileLabel(pf)"></option>
+              </template>
+            </select>
+            <button class="bp-btn" @click="loadProfile()"
+                    :disabled="!profilePick || busy">Load</button>
+          </div>
+          <div class="ob-row">
+            <input class="ob-sel" style="flex:1;min-width:0" x-model="profileName"
+                   placeholder="Name this combination">
+            <button class="bp-btn" @click="saveProfile(false)"
+                    :disabled="!chosen.length || busy">Save</button>
+            <button class="bp-btn" @click="deleteProfile()"
+                    :disabled="!profilePick || busy">Delete</button>
+          </div>
+          <template x-if="profileMsg">
+            <div class="ob-note" style="margin-top:6px" x-text="profileMsg"></div>
+          </template>
+          <template x-if="profileClash">
+            <div class="ob-row">
+              <span class="ob-err" x-text="profileClash.detail"></span>
+              <button class="bp-btn" @click="saveProfile(true)">Replace it</button>
+              <button class="bp-btn" @click="profileClash = null">Cancel</button>
+            </div>
+          </template>
+          <div class="ob-note" style="margin-top:6px">
+            A profile holds the strategies, their qty, capital and filters,
+            and the date-range mode — not the trades. Re-save a strategy on
+            the other page and the next load picks up the new file.
+          </div>
+        </div>
+      </div>
+
       <div class="ob-card">
         <div class="ob-card-hdr">
           <span class="ob-card-title">Strategies</span>
@@ -327,7 +371,7 @@
                   <span class="bp-fstate" x-text="stateOf(m)"></span>
                 </label>
 
-                <template x-if="m.type === 'range' && rangeOf(m)">
+                <template x-if="m.type === 'range' && !rangeOf(m).missing">
                   <div>
                     <div class="ob-range-vals">
                       <span x-text="fmtVal(m, rangeOf(m).lo)"></span>
@@ -347,7 +391,7 @@
                   </div>
                 </template>
 
-                <template x-if="m.type === 'range' && !rangeOf(m)">
+                <template x-if="m.type === 'range' && rangeOf(m).missing">
                   <div class="ob-dim" x-text="noValueNote(m)"></div>
                 </template>
 
@@ -713,7 +757,7 @@
            a main column with nothing in it reads as a page that broke. -->
       <div class="ob-card">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Phase 4 of 7 — correlation</span>
+          <span class="ob-card-title">Phase 5 of 7 — saved profiles</span>
         </div>
         <div class="ob-card-body">
           <div class="bp-phase">
@@ -724,8 +768,10 @@
             a strategy reads the same on both — and the charts are built in
             the same pass as the table, from the same filtered trades, so
             they cannot disagree with the numbers above them.<br><br>
-            Next: <b>P5</b> saved portfolio profiles; <b>P6</b> distribution,
-            overlap and rolling risk metrics.<br><br>
+            A combination — the strategies, their qty, capital and filters,
+            and the date-range mode — saves and loads by name.<br><br>
+            Next: <b>P6</b> distribution, trade overlap and the rolling risk
+            metrics (Sharpe/Sortino/win rate); <b>P7</b> docs.<br><br>
             P/L is dated by <b>close</b>. Deployment is <b>half-open</b> —
             a position is capital at risk on the sessions it is held through
             and not on the one it closes on, so a weekly roll reads one

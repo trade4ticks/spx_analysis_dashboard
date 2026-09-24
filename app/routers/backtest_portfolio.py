@@ -38,7 +38,7 @@ import time
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.db import get_pool
-from app.oo_backtest import market, store
+from app.oo_backtest import market, portfolio_store, store
 from app.oo_backtest.registry import registry_with_coverage
 from app.routers.oo_backtest import _analyze, load_parsed
 
@@ -141,3 +141,60 @@ async def load_portfolio(body: dict = Body(...), pool=Depends(get_pool)):
         "load": {"seconds": total, "n": len(out), "from_cache": cached,
                  "parsed": len(out) - cached},
     }
+
+
+# ── saved profiles ──────────────────────────────────────────────────────────
+#
+# A profile names saved strategies and carries the numbers applied to them;
+# it holds no trades, so the strategy stays the one source of its file and a
+# re-saved strategy is picked up on the next load. See portfolio_store.
+
+
+@router.get("/profiles")
+async def list_profiles(pool=Depends(get_pool)):
+    return {"profiles": await portfolio_store.list_profiles(pool)}
+
+
+@router.post("/profiles")
+async def save_profile(body: dict = Body(...), pool=Depends(get_pool)):
+    """{"name", "notes", "replace", "payload": {strategies, range_mode, ...}}"""
+    try:
+        saved = await portfolio_store.save_profile(
+            pool, name=body.get("name"), notes=body.get("notes", ""),
+            payload=body.get("payload"), replace=bool(body.get("replace")))
+    except portfolio_store.NameTaken as exc:
+        # 409, with the id, so the page can offer to replace THAT one rather
+        # than asking the user to retype a name it already knows.
+        raise HTTPException(409, {"detail": str(exc),
+                                  "existing_id": exc.existing_id})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"profile": saved}
+
+
+@router.get("/profiles/{profile_id}")
+async def get_profile(profile_id: int, pool=Depends(get_pool)):
+    """The profile, and WHICH OF ITS STRATEGIES STILL EXIST.
+
+    A profile points at saved strategies; one of them can have been deleted
+    since. Reported here rather than left for the page to discover, because a
+    four-strategy portfolio that quietly loads as three is a set of numbers
+    nobody can reproduce.
+    """
+    prof = await portfolio_store.load_profile(pool, profile_id)
+    if prof is None:
+        raise HTTPException(404, f"No profile with id {profile_id}.")
+    live = {s["id"]: s for s in await store.list_strategies(pool)}
+    missing, present = [], []
+    for s in prof["payload"]["strategies"]:
+        (present if s["id"] in live else missing).append(s["id"])
+    prof["missing"] = missing
+    prof["names"] = {str(i): live[i]["name"] for i in present}
+    return {"profile": prof}
+
+
+@router.delete("/profiles/{profile_id}")
+async def delete_profile(profile_id: int, pool=Depends(get_pool)):
+    if not await portfolio_store.delete_profile(pool, profile_id):
+        raise HTTPException(404, f"No profile with id {profile_id}.")
+    return {"deleted": profile_id}

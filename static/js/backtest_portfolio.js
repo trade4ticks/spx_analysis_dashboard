@@ -197,9 +197,143 @@ document.addEventListener('alpine:init', () => {
     corr: { names: [], matrix: [], pairs: [], weeks: 0, metrics: [] },
     pairA: 0, pairB: 0,
     rollWeeks: 26,
+    profiles: [],
+    profilePick: 0,
+    profileName: '',
+    profileMsg: '',
+    profileClash: null,
 
     async init() {
-      await Promise.all([this.loadSaved(), this.loadRegistry()]);
+      await Promise.all([this.loadSaved(), this.loadRegistry(),
+                         this.loadProfiles()]);
+    },
+
+    // ── saved profiles ──────────────────────────────────────────────────
+    //
+    // A profile is a POINTER at saved strategies plus the numbers applied to
+    // them. It holds no trades, so the strategy on the other page stays the
+    // one source of its file — and a strategy deleted since is reported by
+    // name on load rather than quietly leaving a smaller portfolio.
+    async loadProfiles() {
+      try {
+        const r = await fetch('/api/backtest-portfolio/profiles');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        this.profiles = (await r.json()).profiles || [];
+      } catch (e) {
+        this.profileMsg = 'Could not read the profiles: ' + e;
+      }
+    },
+
+    profileLabel(pf) {
+      const n = pf.n_strategies;
+      return `${pf.name} · ${n} strateg${n === 1 ? 'y' : 'ies'}`;
+    },
+
+    profileSub() {
+      return this.profiles.length ? `${this.profiles.length} saved` : 'none saved';
+    },
+
+    /* What the page IS, in the shape the store takes. Built from the live
+     * rows rather than from anything cached, so what is saved is what is on
+     * screen. */
+    profilePayload() {
+      return {
+        strategies: this.chosen.map(c => ({
+          id: c.id, qty: c.qty, capital: c.capital, filters: c.filters,
+        })),
+        range_mode: this.rangeMode,
+        roll_weeks: this.rollWeeks,
+      };
+    },
+
+    async saveProfile(replace) {
+      const name = (this.profileName || '').trim();
+      if (!name) { this.profileMsg = 'Give the combination a name first.'; return; }
+      this.busy = true;
+      this.profileMsg = '';
+      this.profileClash = null;
+      try {
+        const r = await fetch('/api/backtest-portfolio/profiles', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, replace: !!replace,
+                                 payload: this.profilePayload() }),
+        });
+        const b = await r.json();
+        if (r.status === 409) {
+          // The name exists. Offer to replace THAT one rather than asking
+          // for a new name the page already knows is taken.
+          this.profileClash = b.detail || { detail: 'That name is taken.' };
+          return;
+        }
+        if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
+        await this.loadProfiles();
+        this.profilePick = b.profile.id;
+        this.profileMsg = `Saved "${b.profile.name}".`;
+      } catch (e) {
+        this.profileMsg = 'Not saved: ' + (e.message || e);
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    async loadProfile() {
+      if (!this.profilePick) return;
+      this.busy = true;
+      this.profileMsg = '';
+      let ok = false;
+      try {
+        const r = await fetch(`/api/backtest-portfolio/profiles/${this.profilePick}`);
+        const b = await r.json();
+        if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
+        const pf = b.profile;
+        const missing = new Set(pf.missing || []);
+        this.chosen = pf.payload.strategies
+          .filter(s => !missing.has(s.id))
+          .map(s => ({
+            id: s.id, name: (pf.names || {})[String(s.id)] || `#${s.id}`,
+            qty: s.qty, capital: s.capital,
+            savedCapital: null, filters: s.filters || {},
+          }));
+        for (const c of this.chosen) this.ensureFilters(c.id);
+        this.rangeMode = pf.payload.range_mode || 'union';
+        this.rollWeeks = pf.payload.roll_weeks || 26;
+        this.profileName = pf.name;
+        this.editing = 0;
+        this.profileMsg = missing.size
+          ? `Loaded "${pf.name}" — ${missing.size} strateg`
+            + `${missing.size === 1 ? 'y has' : 'ies have'} been deleted since `
+            + `and could not be loaded.`
+          : `Loaded "${pf.name}".`;
+        ok = true;
+      } catch (e) {
+        this.profileMsg = 'Not loaded: ' + (e.message || e);
+      } finally {
+        // RELEASED BEFORE THE LOAD. `load()` refuses to run while `busy` is
+        // set -- it is the guard against a second click -- so fetching the
+        // trades from inside this busy window restored every setting and
+        // then quietly fetched nothing. The profile read is finished here;
+        // the trade load takes the flag again on its own.
+        this.busy = false;
+      }
+      if (ok) await this.load();
+    },
+
+    async deleteProfile() {
+      const pf = this.profiles.find(x => x.id === this.profilePick);
+      if (!pf) return;
+      this.busy = true;
+      try {
+        const r = await fetch(`/api/backtest-portfolio/profiles/${pf.id}`,
+                              { method: 'DELETE' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        this.profilePick = 0;
+        await this.loadProfiles();
+        this.profileMsg = `Deleted "${pf.name}".`;
+      } catch (e) {
+        this.profileMsg = 'Not deleted: ' + (e.message || e);
+      } finally {
+        this.busy = false;
+      }
     },
 
     async loadSaved() {
@@ -445,7 +579,8 @@ document.addEventListener('alpine:init', () => {
         return n === all ? `all ${n} kept` : `${n} of ${all} kept`;
       }
       const r = this.rangeOf(m);
-      return r ? `${this.fmtVal(m, r.lo)} – ${this.fmtVal(m, r.hi)}` : 'no values';
+      return r.missing ? 'no values'
+        : `${this.fmtVal(m, r.lo)} – ${this.fmtVal(m, r.hi)}`;
     },
 
     /* The slider's bounds come from THIS STRATEGY'S OWN VALUES, not from the
@@ -453,14 +588,22 @@ document.addEventListener('alpine:init', () => {
      * ever saw 12–31 is a control whose useful travel is a third of its
      * length. The registry supplies the step and the formatting. */
     rangeOf(m) {
+      // NEVER NULL. The panel binds :min, :max and :step from this, and
+      // Alpine evaluates those bindings once more as the x-if around them is
+      // torn down -- with the row already gone. Returning a shape with
+      // `missing` set means no binding can dereference nothing; an
+      // expression error there does not stop the page, it just leaves the
+      // rest of that render pass stale, which is how a filter panel took the
+      // summary table down with it.
+      const blank = { min: 0, max: 1, step: 1, lo: 0, hi: 1, n: 0, missing: true };
       const c = this.editingRow();
-      if (!c) return null;
+      if (!c) return blank;
       const ext = this.extentOf(c, m);
-      if (!ext) return null;
+      if (!ext) return blank;
       const f = c.filters[m.key];
       const lo = (f && isFinite(f.lo)) ? f.lo : ext.min;
       const hi = (f && isFinite(f.hi)) ? f.hi : ext.max;
-      return { min: ext.min, max: ext.max, step: m.step || 0.01,
+      return { missing: false, min: ext.min, max: ext.max, step: m.step || 0.01,
                lo: Math.max(ext.min, Math.min(lo, ext.max)),
                hi: Math.max(ext.min, Math.min(hi, ext.max)), n: ext.n };
     },
@@ -480,7 +623,7 @@ document.addEventListener('alpine:init', () => {
 
     setLo(m, v) {
       const c = this.editingRow(), r = this.rangeOf(m);
-      if (!c || !r) return;
+      if (!c || r.missing) return;
       const f = c.filters[m.key];
       f.lo = Math.min(Number(v), r.hi);
       f.on = true;
@@ -489,7 +632,7 @@ document.addEventListener('alpine:init', () => {
 
     setHi(m, v) {
       const c = this.editingRow(), r = this.rangeOf(m);
-      if (!c || !r) return;
+      if (!c || r.missing) return;
       const f = c.filters[m.key];
       f.hi = Math.max(Number(v), r.lo);
       f.on = true;
@@ -519,7 +662,7 @@ document.addEventListener('alpine:init', () => {
 
     rangeSummary(m) {
       const r = this.rangeOf(m);
-      if (!r) return '';
+      if (r.missing) return '';
       return `${bpFmtInt(r.n)} trades have a value · `
            + `${this.fmtVal(m, r.min)} to ${this.fmtVal(m, r.max)} in this log`;
     },

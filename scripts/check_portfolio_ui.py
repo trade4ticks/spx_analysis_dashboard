@@ -132,6 +132,45 @@ window.fetch = async (u) => ({ok: true, json: async () => {
   return {};
 }});
 
+// A profile store, in memory, behaving like the endpoints: 409 on a name
+// that exists, and a load that reports which strategies are gone.
+window.__profiles = [];
+const realFetch = window.fetch;
+window.fetch = async (u, init) => {
+  const url = String(u);
+  if (url.includes('/profiles')) {
+    const m = url.match(/profiles\/(\d+)/);
+    if (init && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      const clash = window.__profiles.find(p => p.name === body.name);
+      if (clash && !body.replace) {
+        return { ok: false, status: 409, json: async () => (
+          { detail: { detail: 'A profile named "' + body.name + '" already exists.',
+                      existing_id: clash.id } }) };
+      }
+      const rec = clash || { id: window.__profiles.length + 1, name: body.name };
+      rec.payload = body.payload;
+      rec.n_strategies = body.payload.strategies.length;
+      if (!clash) window.__profiles.push(rec);
+      return { ok: true, status: 200, json: async () => ({ profile: rec }) };
+    }
+    if (init && init.method === 'DELETE') {
+      window.__profiles = window.__profiles.filter(p => String(p.id) !== m[1]);
+      return { ok: true, status: 200, json: async () => ({ deleted: +m[1] }) };
+    }
+    if (m) {
+      const rec = window.__profiles.find(p => String(p.id) === m[1]);
+      // Strategy 2 is "deleted": the page must say so, not quietly load one.
+      const missing = rec.payload.strategies.map(s => s.id).filter(i => i === 99);
+      return { ok: true, status: 200, json: async () => ({ profile: {
+        ...rec, missing, names: { '1': 'monthly', '2': 'weekly' } } }) };
+    }
+    return { ok: true, status: 200, json: async () => (
+      { profiles: JSON.parse(JSON.stringify(window.__profiles)) }) };
+  }
+  return realFetch(u, init);
+};
+
 window.addEventListener('load', () => setTimeout(async () => {
   const out = [];
   // A BACKSTOP REPORTER. If the driver hangs on an await that never settles,
@@ -160,8 +199,10 @@ window.addEventListener('load', () => setTimeout(async () => {
   // assigning to the component -- writing `pick` directly raced x-model,
   // which re-synced the select and wrote its old value back, so the second
   // Add did nothing. Driving the control is the point of this file.
+  const selectBy = (text) => [...document.querySelectorAll('.ob-side select')]
+    .find(el => el.options[0] && el.options[0].textContent.includes(text));
   const choose = async (id) => {
-    const sel = document.querySelector('.ob-side select');
+    const sel = selectBy('Add a saved strategy');
     sel.value = String(id);
     // BOTH EVENTS: Alpine's x-model listens for `change` on a <select>, not
     // `input`, so dispatching only the latter left `pick` at 0 and the Add
@@ -339,6 +380,60 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('sorted by strength',
      rhos.every((v, i) => i === 0 || rhos[i - 1] >= v - 1e-12), true);
 
+  // ── P5: PROFILES ──────────────────────────────────────────────────
+  // Saved and reloaded by CLICKING, with the filters and the allocation it
+  // was saved with.
+  cc.chosen[0].qty = 4;
+  cc.normalise(cc.chosen[0]);
+  await wait(80);
+  const nameBox = [...document.querySelectorAll('.ob-side input')]
+    .find(el => el.placeholder && el.placeholder.startsWith('Name'));
+  nameBox.value = 'live book';
+  nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(40);
+  const saveBtn = side().find(b => b.textContent.trim() === 'Save');
+  saveBtn.click();
+  await wait(150);
+  ok('the profile saved', window.__profiles.length, 1);
+  ok('it carried the quantity', window.__profiles[0].payload.strategies[0].qty, 4);
+  ok('it carried the filters',
+     !!window.__profiles[0].payload.strategies[1].filters.day_of_week, true);
+  ok('it carried the range mode',
+     window.__profiles[0].payload.range_mode, cc.rangeMode);
+
+  // A SECOND SAVE UNDER THE SAME NAME ASKS, it does not overwrite.
+  saveBtn.click();
+  await wait(150);
+  ok('a duplicate name asks first', !!cc.profileClash, true);
+  ok('and names the profile it would replace',
+     cc.profileClash.existing_id, 1);
+  side().find(b => /replace it/i.test(b.textContent)).click();
+  await wait(150);
+  ok('replacing clears the prompt', cc.profileClash, null);
+  ok('and does not make a second profile', window.__profiles.length, 1);
+
+  // RELOADING RESTORES THE COMBINATION.
+  cc.chosen = [];
+  cc.rows = [];
+  await wait(80);
+  const pfSel = selectBy('Saved combinations');
+  // selectedIndex, not .value: picking the option a person would pick is
+  // faithful whatever the ids are, and assigning .value silently does
+  // nothing when the option list has not rendered yet -- which left the
+  // model null and the Load button disabled.
+  pfSel.selectedIndex = 1;
+  pfSel.dispatchEvent(new Event('input', { bubbles: true }));
+  pfSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await wait(60);
+  ok('choosing a profile sets the model', cc.profilePick, window.__profiles[0].id);
+  side().find(b => b.textContent.trim() === 'Load').click();
+  await wait(300);
+  ok('the profile loaded its strategies', cc.chosen.length, 2);
+  ok('with the quantity it was saved with', cc.chosen[0].qty, 4);
+  ok('with its names, not ids', cc.chosen[0].name, 'monthly');
+  ok('and the table came back', document.querySelectorAll('.bp-table tr.total').length, 1);
+  ok('the profile load fetched the trades too', cc.rows.length > 0, true);
+
   // FULL NUMBERS. $31k beside $7,853 cannot be compared at a glance, which
   // is the whole job of a summary table. Checked without a regex: every
   // backslash in this driver has to survive a Python string on the way in,
@@ -414,11 +509,18 @@ def main() -> int:
                 print(f"  FAIL  the console is not clean: {parts[1]}")
                 fails += 1
             continue
+        if len(parts) < 4:
+            # A NOTE rather than an assertion: the driver can report context
+            # ("what the page said when it failed") and a strict parser here
+            # turned that into an IndexError instead of printing it.
+            print(f"  {line.strip()}")
+            continue
         status, name, got, want = parts[0], parts[1], parts[2], parts[3]
         if status != "ok":
             print(f"  FAIL  {name}: {got} (want {want})")
             fails += 1
-    n = len(_html.unescape(m.group(1)).strip().splitlines()) - 1
+    n = sum(1 for ln in _html.unescape(m.group(1)).strip().splitlines()
+            if ln.startswith("ok|") or ln.startswith("FAIL|"))
     print(f"portfolio UI: {n} clicked assertions, failures: {fails}")
     return 1 if fails else 0
 
