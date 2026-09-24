@@ -354,3 +354,109 @@ function obMonthlyPnl(cols, idx) {
   }
   return out;
 }
+
+
+/* ── correlation, weekly ─────────────────────────────────────────────────
+ *
+ * WEEKLY, NOT DAILY, and deliberately: strategies close on their own
+ * schedules, so a daily series is mostly zeros and a correlation of mostly
+ * zeros measures how often two strategies happened to close on the same day
+ * rather than whether they move together. The old Dash app resampled its
+ * matrix to weeks for exactly that reason -- and then computed its ROLLING
+ * pairwise correlation daily, so the two disagreed about what a correlation
+ * was. Both are weekly here (agreed 2026-09-25).
+ *
+ * The week is the one pandas' 'W' gives: the SUNDAY ending it, so the
+ * buckets match the old app's.
+ */
+function obWeekEnding(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + (7 - d.getUTCDay()) % 7);   // forward to Sunday
+  return d.toISOString().slice(0, 10);
+}
+
+
+/* Weekly P/L for one set of trades: Map(week-ending -> summed P/L). */
+function obWeeklyPnl(cols, idx) {
+  const out = new Map();
+  for (const i of idx) {
+    const d = cols.date_closed[i];
+    if (!d) continue;
+    const k = obWeekEnding(d);
+    out.set(k, (out.get(k) || 0) + cols.pnl[i]);
+  }
+  return out;
+}
+
+
+/* Several strategies' weekly series aligned on one week axis.
+ *
+ * ZERO-FILLED, then weeks where EVERY strategy is zero are dropped -- the
+ * old app's rule. A week in which nothing closed anywhere is not evidence
+ * that two strategies agree; keeping those weeks pulls every correlation
+ * toward +1 by padding both series with matching zeros. */
+function obAlignWeekly(series) {
+  const weeks = [...new Set(series.flatMap(s => [...s.keys()]))].sort();
+  const cols = series.map(s => weeks.map(w => s.get(w) || 0));
+  const keep = weeks.map((_, i) => cols.some(c => c[i] !== 0));
+  return {
+    weeks: weeks.filter((_, i) => keep[i]),
+    cols: cols.map(c => c.filter((_, i) => keep[i])),
+  };
+}
+
+
+function obPearson(xs, ys) {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 3) return null;
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) { sx += xs[i]; sy += ys[i]; }
+  const mx = sx / n, my = sy / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const a = xs[i] - mx, b = ys[i] - my;
+    num += a * b; dx += a * a; dy += b * b;
+  }
+  return (dx > 0 && dy > 0) ? num / Math.sqrt(dx * dy) : null;
+}
+
+
+/* Ranks with TIES AVERAGED, as scipy and pandas do it. Ties are not rare
+ * here -- a metric like Day of Week has five distinct values across
+ * thousands of trades -- and ranking them 1..n in arbitrary order would
+ * manufacture an ordering the data does not have. */
+function obRank(values) {
+  const idx = values.map((v, i) => i).sort((a, b) => values[a] - values[b]);
+  const out = new Array(values.length);
+  let i = 0;
+  while (i < idx.length) {
+    let j = i;
+    while (j + 1 < idx.length && values[idx[j + 1]] === values[idx[i]]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) out[idx[k]] = avg;
+    i = j + 1;
+  }
+  return out;
+}
+
+
+function obSpearman(xs, ys) {
+  const n = Math.min(xs.length, ys.length);
+  if (n < 3) return null;
+  return obPearson(obRank(xs.slice(0, n)), obRank(ys.slice(0, n)));
+}
+
+
+/* Rolling Pearson over a window of OBSERVATIONS (weeks here). Returns one
+ * value per position from `window - 1` on; earlier positions are null so the
+ * series stays aligned with its x axis rather than being silently shifted. */
+function obRollingCorr(xs, ys, window) {
+  const out = new Array(xs.length).fill(null);
+  if (window < 3) return out;
+  for (let end = window - 1; end < xs.length; end++) {
+    const a = xs.slice(end - window + 1, end + 1);
+    const b = ys.slice(end - window + 1, end + 1);
+    out[end] = obPearson(a, b);
+  }
+  return out;
+}

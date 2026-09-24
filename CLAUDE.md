@@ -237,10 +237,8 @@ read as a specification, not a template.
 
 **Phases:** P1 scaffold + load — done; P2 filters, allocation, summary
 table with TOTAL row — done; P3 equity/drawdown/capital deployed/monthly
-P&L — done; P4
-correlation (BOTH correlations weekly — the old app's matrix was weekly and
-its rolling pairwise was daily); P5 saved profiles; P6 distribution, overlap,
-rolling risk (Sharpe/Sortino); P7 docs.
+P&L — done; P4 correlation — done; P5 saved
+profiles; P6 distribution, overlap, rolling risk (Sharpe/Sortino); P7 docs.
 
 **One core, two pages.** `static/js/backtest_core.js` holds every shared
 calculation — `obApplyFilters`, `obStats`, `obEquity`, `obExtraStats`,
@@ -338,6 +336,34 @@ divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
 nothing to lay out and the numbers want to be readable; shade is the month's
 size against the biggest month, the same opacity rule the bar charts use, and
 year totals carry a bar beside them. Everything is dated by CLOSE.
+
+**P4's decisions.** **Both correlations are weekly** — the old app's matrix
+was weekly and its rolling pairwise was daily, so the two disagreed about
+what a correlation is. Strategies close on their own schedules, so a daily
+series is mostly zeros and correlating mostly zeros measures how often two
+strategies happened to close on the same day. The week is the SUNDAY ending
+it, matching pandas' `'W'`, so the buckets are the old app's. Weeks where
+every strategy is flat are dropped: matching zeros would pull every pair
+toward +1. The matrix is Pearson; **Metric vs P/L is Spearman** (rank, ties
+averaged, blank under ten values) because a monotone but non-linear relation
+is what a metric usually has. That table pools every strategy's filtered
+trades, which mixes strategies that traded at different times — it says what
+the PORTFOLIO's P/L moved with, not what any one strategy's did, and the note
+under it says so. The rolling chart draws every pair over a window of WEEKS
+(13/26/52) with the selected pair in white.
+
+**The filter panel is the TOP of the main column**, above the summary — the
+old app's arrangement: configure, then read the results below. I first put it
+underneath and justified it by wanting the table visible while filtering;
+making the table sticky had already solved that, so the justification did not
+hold. **When a brief says to match a layout, match it** and raise conflicts
+before building.
+
+**Numbers are never abbreviated.** `$31,247`, not `$31k` — in the table, the
+monthly grid, the year totals, the axis ticks and the tooltips. Two rows that
+abbreviate at different thresholds cannot be compared at a glance, which is
+the whole job of a summary table; if something stops fitting, widen it. The
+UI gate asserts no `$…k` or `$…M` appears anywhere on the page.
 
 **Switching a categorical filter on keeps everything.** `bpSpecs` skips a set
 filter with no members (matching the old app), so "on with nothing chosen"

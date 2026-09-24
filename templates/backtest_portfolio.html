@@ -152,13 +152,33 @@
     .bp-months th { color:var(--dim); font-weight:600; padding:2px 5px;
                     text-transform:uppercase; letter-spacing:.3px; }
     .bp-months td { padding:0; }
-    .bp-mcell { width:52px; height:22px; display:flex; align-items:center;
+    /* Wide enough for a full figure ($14,206), not an abbreviated one. */
+    .bp-mcell { min-width:74px; height:22px; display:flex; align-items:center;
                 justify-content:center; border-radius:2px; margin:1px;
-                color:var(--text); }
+                padding:0 4px; color:var(--text); }
     .bp-mcell.empty { color:var(--border); }
     .bp-ycell { padding-left:10px; white-space:nowrap; }
     .bp-ybar { display:inline-block; height:9px; border-radius:2px;
                vertical-align:middle; margin-right:6px; min-width:1px; }
+    .bp-months td:last-child { font-variant-numeric:tabular-nums; }
+
+    /* ── P4: correlation ──────────────────────────────────────────────
+       The matrix is a small table, the same treatment the monthly grid
+       gets: blue together, pink apart, opacity by strength. */
+    .bp-matrix { border-collapse:collapse; font-size:11px;
+                 font-variant-numeric:tabular-nums; }
+    .bp-matrix th { color:var(--dim); font-size:10px; font-weight:600;
+                    padding:3px 8px; white-space:nowrap; text-align:right; }
+    .bp-matrix th.l { text-align:left; }
+    .bp-matrix td { padding:1px; }
+    .bp-mx { min-width:64px; height:24px; display:flex; align-items:center;
+             justify-content:center; border-radius:2px; color:var(--text); }
+    .bp-corrgrid { display:grid; gap:10px;
+                   grid-template-columns:minmax(320px, 1fr) minmax(320px, 1fr); }
+    @media (max-width: 1100px) { .bp-corrgrid { grid-template-columns:1fr; } }
+    .bp-sel { background:var(--raised); border:1px solid var(--border);
+              color:var(--text); font-size:11px; padding:3px 6px;
+              border-radius:4px; color-scheme:dark; }
   </style>
 </head>
 <body class="page" x-data="backtestPortfolio">
@@ -279,6 +299,82 @@
                 x-text="' — first load of a file parses it; the next is from cache'"></span>
         </span>
       </div>
+
+      <!-- THE FILTER PANEL IS THE TOP OF THE MAIN COLUMN, where the old
+           app had it: configure the portfolio, then read the results
+           beneath it. The sidebar is ~400px and permanent, which is why
+           filter editing is not there; the summary below is STICKY, so its
+           numbers stay on screen while a slider moves up here. -->
+      {#- x-if, NOT x-show: x-show leaves the panel in the document with
+          display:none, so every expression inside it still evaluates -- for
+          a strategy that is not being edited, which is `null`. It also keeps
+          ten metric cells and their sliders alive for nothing. -#}
+      <template x-if="editing">
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="bp-swatch" :style="'background:' + editingColor()"></span>
+          <span class="ob-card-title" x-text="editingName() + ' - filters'"></span>
+          <span class="ob-card-sub" x-text="editingSummary()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-fgrid">
+            <template x-for="m in registry" :key="m.key">
+              <div class="bp-fcell" :class="isOn(m) ? 'on' : ''">
+                <label class="bp-fhead">
+                  <input type="checkbox" :checked="isOn(m)"
+                         @change="setOn(m, $event.target.checked)">
+                  <span class="bp-flab" x-text="m.label"></span>
+                  <span class="bp-fstate" x-text="stateOf(m)"></span>
+                </label>
+
+                <template x-if="m.type === 'range' && rangeOf(m)">
+                  <div>
+                    <div class="ob-range-vals">
+                      <span x-text="fmtVal(m, rangeOf(m).lo)"></span>
+                      <span x-text="fmtVal(m, rangeOf(m).hi)"></span>
+                    </div>
+                    <div class="ob-dual">
+                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
+                             :step="rangeOf(m).step" :value="rangeOf(m).lo"
+                             @input="setLo(m, $event.target.value)"
+                             :aria-label="m.label + ' minimum'">
+                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
+                             :step="rangeOf(m).step" :value="rangeOf(m).hi"
+                             @input="setHi(m, $event.target.value)"
+                             :aria-label="m.label + ' maximum'">
+                    </div>
+                    <div class="ob-dim" x-text="rangeSummary(m)"></div>
+                  </div>
+                </template>
+
+                <template x-if="m.type === 'range' && !rangeOf(m)">
+                  <div class="ob-dim" x-text="noValueNote(m)"></div>
+                </template>
+
+                <template x-if="m.type === 'categorical'">
+                  <div class="ob-checks">
+                    <template x-for="cat in categoriesFor(editingRow(), m)"
+                              :key="String(cat.value)">
+                      <label class="ob-check">
+                        <input type="checkbox"
+                               :checked="isChosenCategory(editingRow(), m, cat.value)"
+                               @change="toggleCategory(editingRow(), m, cat.value)">
+                        <span x-text="cat.label"></span>
+                      </label>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <div class="ob-row">
+            <button class="bp-btn" @click="resetFilters(editingRow())">Clear these filters</button>
+            <button class="bp-btn" @click="editing = 0">Close</button>
+            <span class="ob-note" x-text="editingCost()"></span>
+          </div>
+        </div>
+      </div>
+      </template>
 
       <div class="ob-card" x-show="loaded.length" x-cloak>
         <div class="ob-card-hdr">
@@ -485,87 +581,139 @@
         </div>
       </div>
 
-      <!-- THE FILTER PANEL LIVES HERE, not in the sidebar.
-           The sidebar is ~400px and permanent; filter editing is occasional
-           and wants width. So it opens in the main column, under the summary
-           table - which is STICKY, so every number stays on screen while a
-           slider moves. Watching the table move IS the filtering. -->
-      {#- x-if, NOT x-show: x-show leaves the panel in the document with
-          display:none, so every expression inside it still evaluates -- for
-          a strategy that is not being edited, which is `null`. It also keeps
-          ten metric cells and their sliders alive for nothing. -#}
-      <template x-if="editing">
-      <div class="ob-card">
+      <div class="ob-card" x-show="corr.metrics.length" x-cloak>
         <div class="ob-card-hdr">
-          <span class="bp-swatch" :style="'background:' + editingColor()"></span>
-          <span class="ob-card-title" x-text="editingName() + ' - filters'"></span>
-          <span class="ob-card-sub" x-text="editingSummary()"></span>
+          <span class="ob-card-title">Metric vs P/L</span>
+          <span class="ob-card-sub">Spearman, pooled across strategies</span>
         </div>
-        <div class="ob-card-body">
-          <div class="bp-fgrid">
-            <template x-for="m in registry" :key="m.key">
-              <div class="bp-fcell" :class="isOn(m) ? 'on' : ''">
-                <label class="bp-fhead">
-                  <input type="checkbox" :checked="isOn(m)"
-                         @change="setOn(m, $event.target.checked)">
-                  <span class="bp-flab" x-text="m.label"></span>
-                  <span class="bp-fstate" x-text="stateOf(m)"></span>
-                </label>
-
-                <template x-if="m.type === 'range' && rangeOf(m)">
-                  <div>
-                    <div class="ob-range-vals">
-                      <span x-text="fmtVal(m, rangeOf(m).lo)"></span>
-                      <span x-text="fmtVal(m, rangeOf(m).hi)"></span>
-                    </div>
-                    <div class="ob-dual">
-                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
-                             :step="rangeOf(m).step" :value="rangeOf(m).lo"
-                             @input="setLo(m, $event.target.value)"
-                             :aria-label="m.label + ' minimum'">
-                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
-                             :step="rangeOf(m).step" :value="rangeOf(m).hi"
-                             @input="setHi(m, $event.target.value)"
-                             :aria-label="m.label + ' maximum'">
-                    </div>
-                    <div class="ob-dim" x-text="rangeSummary(m)"></div>
-                  </div>
-                </template>
-
-                <template x-if="m.type === 'range' && !rangeOf(m)">
-                  <div class="ob-dim" x-text="noValueNote(m)"></div>
-                </template>
-
-                <template x-if="m.type === 'categorical'">
-                  <div class="ob-checks">
-                    <template x-for="cat in categoriesFor(editingRow(), m)"
-                              :key="String(cat.value)">
-                      <label class="ob-check">
-                        <input type="checkbox"
-                               :checked="isChosenCategory(editingRow(), m, cat.value)"
-                               @change="toggleCategory(editingRow(), m, cat.value)">
-                        <span x-text="cat.label"></span>
-                      </label>
-                    </template>
-                  </div>
-                </template>
-              </div>
-            </template>
-          </div>
-          <div class="ob-row">
-            <button class="bp-btn" @click="resetFilters(editingRow())">Clear these filters</button>
-            <button class="bp-btn" @click="editing = 0">Close</button>
-            <span class="ob-note" x-text="editingCost()"></span>
+        <div class="ob-card-body bp-scroll">
+          <table class="bp-matrix">
+            <thead>
+              <tr><th class="l">metric</th><th>rho</th><th>trades</th></tr>
+            </thead>
+            <tbody>
+              <template x-for="m in corr.metrics" :key="m.key">
+                <tr>
+                  <th class="l" x-text="m.label"></th>
+                  <td>
+                    <div class="bp-mx" :style="'background:' + metricRow(m).bg"
+                         x-text="metricRow(m).text"></div>
+                  </td>
+                  <td style="text-align:right;padding-right:8px;color:var(--dim)"
+                      x-text="m.n.toLocaleString()"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="ob-note" style="margin-top:8px">
+            Rank correlation between each metric at ENTRY and the trade's P/L,
+            over the filtered trades of every strategy pooled. Pooling mixes
+            strategies that traded at different times, so this says what the
+            PORTFOLIO's P/L moved with — not what any one strategy's did. Ties
+            are averaged, and a metric with fewer than ten values is left
+            blank rather than given a number nobody should read.
           </div>
         </div>
       </div>
-      </template>
+
+      <div class="ob-card" x-show="corr.names.length > 1" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Strategy correlation</span>
+          <span class="ob-card-sub" x-text="corrSub()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-corrgrid">
+            <div class="bp-scroll">
+              <table class="bp-matrix">
+                <thead>
+                  <tr>
+                    <th class="l"></th>
+                    <template x-for="(nm, j) in corr.names" :key="'h' + j">
+                      <th x-text="nm"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(nm, i) in corr.names" :key="'r' + i">
+                    <tr>
+                      <th class="l" x-text="nm"></th>
+                      <template x-for="(n2, j) in corr.names" :key="'c' + i + '_' + j">
+                        <td>
+                          <div class="bp-mx" :style="'background:' + corrCell(i, j).bg"
+                               x-text="corrCell(i, j).text"></div>
+                        </td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div class="ob-row" style="margin-top:0">
+                <span class="ob-lbl">pair</span>
+                <select class="bp-sel" x-model.number="pairA" @change="onPair()">
+                  <template x-for="(nm, i) in corr.names" :key="'a' + i">
+                    <option :value="i" x-text="nm"></option>
+                  </template>
+                </select>
+                <select class="bp-sel" x-model.number="pairB" @change="onPair()">
+                  <template x-for="(nm, i) in corr.names" :key="'b' + i">
+                    <option :value="i" x-text="nm"></option>
+                  </template>
+                </select>
+                <span class="ob-note" x-text="pairSub()"></span>
+              </div>
+              <div class="bp-chart" style="height:220px">
+                <canvas id="bp-sc-chart" role="img"
+                        aria-label="Weekly P/L of one strategy against another"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="ob-note" style="margin-top:6px">
+            Pearson on <b>weekly</b> P/L, dated by close. Weekly because
+            strategies close on their own schedules: a daily series is mostly
+            zeros, and correlating mostly zeros measures how often two
+            strategies happened to close on the same day. Weeks where nothing
+            closed anywhere are dropped for the same reason — matching zeros
+            would pull every pair toward +1.
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card" x-show="corr.pairs.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Rolling correlation</span>
+          <span class="ob-card-sub">
+            <select class="bp-sel" x-model.number="rollWeeks" @change="onRoll()">
+              <option value="13">13 weeks</option>
+              <option value="26">26 weeks</option>
+              <option value="52">52 weeks</option>
+            </select>
+          </span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-chart" style="height:220px">
+            <canvas id="bp-roll-chart" role="img"
+                    aria-label="Rolling correlation for every pair of strategies"></canvas>
+          </div>
+          <div class="bp-legend">
+            <template x-for="pr in corr.pairs" :key="pr.label">
+              <span class="bp-leg" x-text="pr.label"></span>
+            </template>
+          </div>
+          <div class="ob-note" style="margin-top:6px">
+            Every pair, over a window of <b>weeks</b> — the same basis as the
+            matrix, so the two cannot disagree about what a correlation is.
+            The pair chosen above is drawn in white.
+          </div>
+        </div>
+      </div>
 
       <!-- WHAT THIS PHASE IS. Stated on the page, not only in the commit:
            a main column with nothing in it reads as a page that broke. -->
       <div class="ob-card">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Phase 3 of 7 — the curves</span>
+          <span class="ob-card-title">Phase 4 of 7 — correlation</span>
         </div>
         <div class="ob-card-body">
           <div class="bp-phase">
@@ -576,9 +724,8 @@
             a strategy reads the same on both — and the charts are built in
             the same pass as the table, from the same filtered trades, so
             they cannot disagree with the numbers above them.<br><br>
-            Next: <b>P4</b> the correlation work, with both correlations
-            weekly; <b>P5</b> saved portfolio profiles; <b>P6</b>
-            distribution, overlap and rolling risk.<br><br>
+            Next: <b>P5</b> saved portfolio profiles; <b>P6</b> distribution,
+            overlap and rolling risk metrics.<br><br>
             P/L is dated by <b>close</b>. Deployment is <b>half-open</b> —
             a position is capital at risk on the sessions it is held through
             and not on the one it closes on, so a weekly roll reads one

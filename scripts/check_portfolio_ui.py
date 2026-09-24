@@ -134,6 +134,18 @@ window.fetch = async (u) => ({ok: true, json: async () => {
 
 window.addEventListener('load', () => setTimeout(async () => {
   const out = [];
+  // A BACKSTOP REPORTER. If the driver hangs on an await that never settles,
+  // the page produces nothing and the gate can only say "it did not get that
+  // far" -- which is what it said, twice, while the real answer was one
+  // unresolved promise away.
+  setTimeout(() => {
+    if (document.getElementById('report')) return;
+    const pre = document.createElement('pre');
+    pre.id = 'report';
+    pre.textContent = out.concat(['FAIL|the driver did not finish|hung|done',
+      'errs|' + (window.__errs.slice(0, 3).join(' ~ ') || 'clean')]).join(String.fromCharCode(10));
+    document.body.appendChild(pre);
+  }, 3000);
   try {
   const ok = (k, got, want) => out.push(
     (String(got) === String(want) ? 'ok|' : 'FAIL|') + k + '|' + got + '|' + want);
@@ -194,6 +206,14 @@ window.addEventListener('load', () => setTimeout(async () => {
      document.querySelector('.bp-fgrid').offsetHeight > 0, true);
   ok('the panel is in the main column',
      !!document.querySelector('.ob-main .bp-fgrid'), true);
+  // ABOVE THE SUMMARY, where the old app had it: configure, then read the
+  // results below. The table is sticky, so its numbers stay on screen while
+  // a control up here moves.
+  const panelCard = document.querySelector('.bp-fgrid').closest('.ob-card');
+  const sumCard = document.querySelector('.bp-summary');
+  ok('the panel sits ABOVE the summary',
+     !!(panelCard.compareDocumentPosition(sumCard)
+        & Node.DOCUMENT_POSITION_FOLLOWING), true);
   ok('no sliders in the sidebar',
      document.querySelectorAll('.ob-side .ob-dual').length, 0);
 
@@ -280,6 +300,58 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the card fits the sidebar',
      card.scrollWidth <= card.clientWidth + 1, true);
 
+  // ── P4: CORRELATION ───────────────────────────────────────────────
+  // Clear the day filter so both strategies are back in the portfolio.
+  dowCell.querySelector('.bp-fhead input').click();
+  await wait(200);
+  const cc = Alpine.$data(document.querySelector('[x-data]'));
+  ok('the matrix is square', cc.corr.matrix.length, cc.corr.names.length);
+  ok('its diagonal is 1', cc.corr.matrix[0][0], 1);
+  ok('it is symmetric',
+     Math.abs(cc.corr.matrix[0][1] - cc.corr.matrix[1][0]) < 1e-12, true);
+  ok('one pair for two strategies', cc.corr.pairs.length, 1);
+  ok('the correlation is a real number',
+     cc.corr.pairs[0].r !== null && Math.abs(cc.corr.pairs[0].r) <= 1, true);
+  ok('it is weekly, not daily', cc.corr.weeks > 0 && cc.corr.weeks < 250, true);
+
+  // The matrix agrees with the primitive computed straight from the series.
+  const wk = BP_DATA.weekly;
+  ok('the matrix equals obPearson on the same series',
+     Math.abs(cc.corr.matrix[0][1] - obPearson(wk.cols[0], wk.cols[1])) < 1e-12, true);
+  // Weeks where nothing closed anywhere are dropped.
+  ok('no all-zero weeks survive',
+     wk.cols[0].some((v, i) => v === 0 && wk.cols[1][i] === 0), false);
+
+  ok('the scatter drew', !!Chart.getChart('bp-sc-chart'), true);
+  ok('a point per week',
+     Chart.getChart('bp-sc-chart').data.datasets[0].data.length, wk.weeks.length);
+  ok('the rolling chart drew', !!Chart.getChart('bp-roll-chart'), true);
+  ok('a rolling line per pair',
+     Chart.getChart('bp-roll-chart').data.datasets.length, cc.corr.pairs.length);
+  ok('rolling is bounded to -1..1',
+     Chart.getChart('bp-roll-chart').options.scales.y.min, -1);
+
+  // The metric table ranks by |rho| and never invents one below ten values.
+  ok('metrics are listed', cc.corr.metrics.length > 0, true);
+  const thin = cc.corr.metrics.filter(m => m.n < 10 && m.rho !== null);
+  ok('no correlation from fewer than ten values', thin.length, 0);
+  const rhos = cc.corr.metrics.filter(m => m.rho !== null).map(m => Math.abs(m.rho));
+  ok('sorted by strength',
+     rhos.every((v, i) => i === 0 || rhos[i - 1] >= v - 1e-12), true);
+
+  // FULL NUMBERS. $31k beside $7,853 cannot be compared at a glance, which
+  // is the whole job of a summary table. Checked without a regex: every
+  // backslash in this driver has to survive a Python string on the way in,
+  // and two attempts at an escaped one broke the page instead.
+  const money = [...document.querySelectorAll('.bp-table td, .bp-mcell, .bp-ycell')]
+    .map(el => el.textContent.trim())
+    .filter(t => t.startsWith('$') || t.startsWith('-$'));
+  const abbreviated = money.filter(t => t.endsWith('k') || t.endsWith('M'));
+  ok('no abbreviated money on the page', abbreviated.length, 0);
+  const totalCell = document.querySelector('.bp-table tr.total td:nth-child(4)')
+    .textContent.trim();
+  ok('big totals carry separators',
+     totalCell.length < 6 || totalCell.includes(','), true);
   } catch (e) {
     // A THROW IS A FINDING, not a lost run: without this the page simply
     // never reports and the gate can only say "it did not get that far".
@@ -315,7 +387,7 @@ def main() -> int:
             shot = sys.argv[sys.argv.index("--shot") + 1]
             subprocess.run(
                 [browser, "--headless=new", "--disable-gpu",
-                 "--window-size=1600,2400", f"--screenshot={shot}",
+                 "--window-size=1600,3800", f"--screenshot={shot}",
                  "--virtual-time-budget=6000", tmp.as_uri()],
                 capture_output=True, timeout=180)
             print(f"  wrote {shot}")

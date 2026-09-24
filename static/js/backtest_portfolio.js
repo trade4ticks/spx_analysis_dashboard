@@ -33,7 +33,14 @@ const BP_DATA = {
 /* Chart.js instances. Outside Alpine for the same reason the trades are: a
  * chart is not state a template reads, and a reactive proxy around one is a
  * proxy around every point in it. */
-const BP_CHARTS = { eq: null, dd: null, cap: null };
+const BP_CHARTS = { eq: null, dd: null, cap: null, sc: null, roll: null };
+
+/* A hex colour at an opacity, for the rolling lines. */
+function obRgbaFrom(hex, a) {
+  const h = (hex || '#3498db').replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
 
 const BP_BLUE = '#3498db';
 const BP_PINK = '#e84393';
@@ -55,12 +62,15 @@ function bpFmtInt(n) {
   return (n == null || !isFinite(n)) ? '—' : Math.round(n).toLocaleString();
 }
 
+/* FULL VALUES, ALWAYS. No $31k beside $7,853: two rows of a table that
+ * abbreviate at different thresholds cannot be compared at a glance, which
+ * is the entire job of a summary table. The same goes for the monthly grid,
+ * the year totals, the axis ticks and the tooltips -- if something stops
+ * fitting, widen it. */
 function bpFmtMoney(v) {
   if (v == null || !isFinite(v)) return '—';
-  const a = Math.abs(v);
-  if (a >= 1e6) return (v < 0 ? '-$' : '$') + (a / 1e6).toFixed(1) + 'M';
-  if (a >= 1e4) return (v < 0 ? '-$' : '$') + (a / 1e3).toFixed(0) + 'k';
-  return (v < 0 ? '-$' : '$') + Math.round(a).toLocaleString();
+  const a = Math.round(Math.abs(v)).toLocaleString('en-US');
+  return (v < 0 ? '-$' : '$') + a;
 }
 
 function bpFmtNum(v, dp = 2) {
@@ -182,6 +192,11 @@ document.addEventListener('alpine:init', () => {
     // curves it lives in reactive state.
     months: { years: [], labels: [], cells: {}, totals: {}, max: 0 },
     deploy: { peak: 0, peakDay: null, sessions: 0 },
+    // P4. Small enough to be reactive; the weekly series they are built from
+    // is not, and lives in BP_DATA.
+    corr: { names: [], matrix: [], pairs: [], weeks: 0, metrics: [] },
+    pairA: 0, pairB: 0,
+    rollWeeks: 26,
 
     async init() {
       await Promise.all([this.loadSaved(), this.loadRegistry()]);
@@ -274,6 +289,8 @@ document.addEventListener('alpine:init', () => {
       BP_DATA.scaled = {};
       BP_DATA.extents = {};
       BP_DATA.curves = {};
+      BP_DATA.weekly = null;
+      this.corr = { names: [], matrix: [], pairs: [], weeks: 0, metrics: [] };
       this.months = { years: [], labels: [], cells: {}, totals: {}, max: 0 };
       this.loadNote = '';
       this.error = '';
@@ -589,7 +606,12 @@ document.addEventListener('alpine:init', () => {
       const sessions = [...new Set(this.loaded.flatMap(
         p => (p.market && p.market.spx_sessions) || []))].sort();
 
-      const pooled = { date_opened: [], date_closed: [], pnl: [], days_in_trade: [] };
+      const pooled = { date_opened: [], date_closed: [], pnl: [], days_in_trade: [],
+                       // The metric columns ride along so the metric/P-L
+                       // correlations below read the same filtered trades the
+                       // table counted, rather than re-deriving them.
+                       cols: {}, idx: [] };
+      for (const m of this.registry) pooled.cols[m.column] = [];
       const pctParts = [];          // per-trade P/L %, each against its own capital
       let deployed = new Array(sessions.length).fill(0);
 
@@ -607,10 +629,15 @@ document.addEventListener('alpine:init', () => {
         for (let i = 0; i < deployed.length; i++) deployed[i] += series[i];
 
         for (const i of idx) {
+          pooled.idx.push(pooled.pnl.length);
           pooled.date_opened.push(p.columns.date_opened[i]);
           pooled.date_closed.push(p.columns.date_closed[i]);
           pooled.pnl.push(cols.pnl[i]);
           pooled.days_in_trade.push(p.columns.days_in_trade[i]);
+          for (const m of this.registry) {
+            const src = p.columns[m.column];
+            pooled.cols[m.column].push(src ? src[i] : null);
+          }
           if (capital > 0) pctParts.push(cols.pnl[i] / capital * 100);
         }
 
@@ -690,10 +717,70 @@ document.addEventListener('alpine:init', () => {
         sessions: sessions.length,
       };
       this.buildMonths(pooled);
+      this.buildCorrelations(rows, pooled);
       this.tick++;
       // After the reactive state, so the template's cards exist to draw into
       // on the first pass.
       this.$nextTick(() => this.renderCharts());
+    },
+
+    /* P4: how the strategies move together, and what moves P/L.
+     *
+     * WEEKLY throughout -- see obAlignWeekly. Built from the same filtered
+     * indices as the table, so a filter narrows the correlations too.
+     */
+    buildCorrelations(rows, pooled) {
+      const live = rows.filter(r => !r.total && r.n > 0);
+      const series = [];
+      for (const r of live) {
+        const c = this.chosen.find(x => x.id === r.id);
+        const cols = c && this.scaledCols(c);
+        series.push(cols ? obWeeklyPnl(cols, r.idx) : new Map());
+      }
+      const aligned = obAlignWeekly(series);
+      BP_DATA.weekly = { weeks: aligned.weeks, cols: aligned.cols,
+                         names: live.map(r => r.name),
+                         colors: live.map(r => r.color) };
+
+      // The matrix, and the pair list the scatter and the rolling chart read.
+      const n = live.length;
+      const matrix = [];
+      const pairs = [];
+      for (let i = 0; i < n; i++) {
+        const row = [];
+        for (let j = 0; j < n; j++) {
+          const r = (i === j) ? 1 : obPearson(aligned.cols[i], aligned.cols[j]);
+          row.push(r);
+          if (j > i) pairs.push({ i, j, r, label: `${live[i].name} / ${live[j].name}` });
+        }
+        matrix.push(row);
+      }
+      if (this.pairA >= n || this.pairB >= n || this.pairA === this.pairB) {
+        this.pairA = 0;
+        this.pairB = n > 1 ? 1 : 0;
+      }
+
+      // METRIC vs P/L, Spearman, over the POOLED filtered trades. Pooling
+      // mixes strategies that traded at different times, so this says what
+      // the portfolio's P/L moved with -- not what any one strategy's did.
+      // Stated under the table rather than left to be assumed.
+      const metrics = [];
+      for (const m of this.registry) {
+        if (m.type !== 'range') continue;
+        const xs = [], ys = [];
+        for (const i of pooled.idx) {
+          const v = pooled.cols[m.column] ? pooled.cols[m.column][i] : null;
+          if (obNull(v)) continue;
+          xs.push(v);
+          ys.push(pooled.pnl[i]);
+        }
+        metrics.push({ key: m.key, label: m.label, n: xs.length,
+                       rho: xs.length >= 10 ? obSpearman(xs, ys) : null });
+      }
+      metrics.sort((a, b) => Math.abs(b.rho || 0) - Math.abs(a.rho || 0));
+
+      this.corr = { names: live.map(r => r.name), colors: live.map(r => r.color),
+                    matrix, pairs, weeks: aligned.weeks.length, metrics };
     },
 
     /* The monthly grid: P/L by close month, years down, months across. */
@@ -788,6 +875,63 @@ document.addEventListener('alpine:init', () => {
         data: cap, borderColor: BP_BLUE, backgroundColor: 'rgba(52,152,219,0.12)',
         fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 5,
         stepped: 'before' }] };
+      // THE PAIRWISE SCATTER: one point a week, the two strategies' P/L.
+      const w = BP_DATA.weekly;
+      if (w && w.cols.length > 1) {
+        const a = w.cols[this.pairA] || [], b = w.cols[this.pairB] || [];
+        const pts = a.map((v, i) => ({ x: v, y: b[i] }));
+        const money = {
+          type: 'linear', grid: { color: 'rgba(255,255,255,0.05)' },
+          border: { display: false },
+          ticks: { color: '#9a9a9a', font: { size: 10 }, maxTicksLimit: 6,
+                   callback: v => bpFmtMoney(v) },
+        };
+        this.draw('sc', 'bp-sc-chart', { datasets: [{
+            type: 'scatter', data: pts, pointRadius: 3, pointHoverRadius: 5,
+            backgroundColor: 'rgba(52,152,219,0.55)',
+            borderColor: 'rgba(52,152,219,0.9)', borderWidth: 0.5 }] },
+          { responsive: true, maintainAspectRatio: false, animation: false,
+            parsing: false,
+            scales: { x: money, y: money },
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+              title: () => '', label: it => `${w.names[this.pairA]} `
+                + `${bpFmtMoney(it.parsed.x)} · ${w.names[this.pairB]} `
+                + `${bpFmtMoney(it.parsed.y)}` } } } });
+
+        // ROLLING PAIRWISE CORRELATION, every pair, over a window of WEEKS.
+        const xs = w.weeks.map(d => obDay(d));
+        const sets = [];
+        for (const pr of this.corr.pairs) {
+          const r = obRollingCorr(w.cols[pr.i], w.cols[pr.j], this.rollWeeks);
+          sets.push({
+            label: pr.label,
+            data: r.map((v, i) => (v === null ? null : { x: xs[i], y: v })).filter(Boolean),
+            borderColor: pr.i === this.pairA && pr.j === this.pairB
+              ? BP_TOTAL : obRgbaFrom(w.colors[pr.i], 0.75),
+            borderWidth: pr.i === this.pairA && pr.j === this.pairB ? 1.8 : 1,
+            pointRadius: 0, pointHitRadius: 5, tension: 0, fill: false,
+          });
+        }
+        this.draw('roll', 'bp-roll-chart', { datasets: sets },
+          { responsive: true, maintainAspectRatio: false, animation: false,
+            parsing: false,
+            scales: {
+              x: { type: 'linear', grid: { color: 'rgba(255,255,255,0.05)' },
+                   border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            maxTicksLimit: 7,
+                            callback: v => obIsoDay(v).slice(0, 7) } },
+              y: { type: 'linear', min: -1, max: 1,
+                   grid: { color: 'rgba(255,255,255,0.05)' },
+                   border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            callback: v => v.toFixed(1) } },
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+              title: it => obIsoDay(it[0].parsed.x),
+              label: it => `${it.dataset.label}: ${it.parsed.y.toFixed(2)}` } } } });
+      }
+
       this.draw('cap', 'bp-cap-chart', capData,
                 base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
                      cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}));
@@ -850,6 +994,42 @@ document.addEventListener('alpine:init', () => {
       const biggest = Math.max(1, ...Object.values(this.months.totals).map(Math.abs));
       return { text: bpFmtMoney(v), w: Math.round(40 * Math.abs(v) / biggest),
                bg: v >= 0 ? BP_BLUE : BP_PINK };
+    },
+
+    // ── P4 readouts ─────────────────────────────────────────────────────
+    corrCell(i, j) {
+      void this.tick;
+      const r = this.corr.matrix[i] && this.corr.matrix[i][j];
+      if (r === null || r === undefined) return { text: '—', bg: 'transparent' };
+      // Blue for together, pink for apart, opacity by strength: the page's
+      // two colours, used the way every other chart here uses them.
+      const a = 0.10 + 0.60 * Math.abs(r);
+      const rgb = r >= 0 ? '52,152,219' : '232,67,147';
+      return { text: r.toFixed(2), bg: `rgba(${rgb},${a.toFixed(3)})` };
+    },
+
+    corrSub() {
+      void this.tick;
+      if (!this.corr.weeks) return '';
+      return `${this.corr.weeks} weeks · Pearson on weekly P/L`;
+    },
+
+    pairSub() {
+      void this.tick;
+      const p = this.corr.pairs.find(x => x.i === this.pairA && x.j === this.pairB);
+      return p && p.r !== null ? `r = ${p.r.toFixed(2)}` : '';
+    },
+
+    onPair() { this.renderCharts(); },
+
+    onRoll() { this.renderCharts(); },
+
+    metricRow(m) {
+      void this.tick;
+      if (m.rho === null) return { text: '—', bg: 'transparent', n: m.n };
+      const a = 0.10 + 0.60 * Math.abs(m.rho);
+      const rgb = m.rho >= 0 ? '52,152,219' : '232,67,147';
+      return { text: m.rho.toFixed(3), bg: `rgba(${rgb},${a.toFixed(3)})`, n: m.n };
     },
 
     savedSummary() {

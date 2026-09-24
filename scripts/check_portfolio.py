@@ -392,6 +392,36 @@ const tail = `
               { date_min: '2023-03-01', date_max: '2023-12-31' }];
   out.union = bpSpan(ps, 'union').start + '..' + bpSpan(ps, 'union').end;
   out.inter = bpSpan(ps, 'intersection').start + '..' + bpSpan(ps, 'intersection').end;
+  // ── P4 primitives ───────────────────────────────────────────────────
+  // A KNOWN ANSWER, not a self-consistency check: Pearson of a series with
+  // its own double is exactly 1, with its negative exactly -1.
+  const xs = [1, 2, 3, 4, 5, 6, 7, 8];
+  out.pearsonSelf = obPearson(xs, xs.map(v => v * 2));
+  out.pearsonNeg = obPearson(xs, xs.map(v => -v));
+  out.pearsonFlat = obPearson(xs, xs.map(() => 5));      // no variance
+  out.pearsonShort = obPearson([1, 2], [2, 4]);
+  // Spearman sees a monotone but non-linear relation as 1 where Pearson
+  // does not; that is the reason the metric table uses it.
+  const curved = xs.map(v => Math.exp(v));
+  out.spearmanCurved = obSpearman(xs, curved);
+  out.pearsonCurved = obPearson(xs, curved);
+  // Ties are averaged, as scipy does it.
+  out.ranks = obRank([10, 20, 20, 30]);
+  // The week is the SUNDAY ending it, matching pandas 'W'.
+  out.weekSat = obWeekEnding('2023-01-07');   // Saturday -> the 8th
+  out.weekSun = obWeekEnding('2023-01-08');   // Sunday   -> itself
+  out.weekMon = obWeekEnding('2023-01-09');   // Monday   -> the 15th
+  // Weeks where every strategy is flat are dropped.
+  const al = obAlignWeekly([
+    new Map([['2023-01-08', 100], ['2023-01-22', 50]]),
+    new Map([['2023-01-08', -20]]),
+  ]);
+  out.alignWeeks = al.weeks;
+  out.alignCols = al.cols;
+  // Rolling: nulls until the window fills, then a value per position.
+  const roll = obRollingCorr(xs, xs.map(v => v * 2), 4);
+  out.rollNulls = roll.filter(v => v === null).length;
+  out.rollLast = roll[roll.length - 1];
   globalThis.__out = out;
 `;
 eval(core + String.fromCharCode(10) + page + String.fromCharCode(10) + tail);
@@ -462,6 +492,33 @@ def case_p2_arithmetic():
           f"union is {out['union']}")
     check(out["inter"] == "2023-03-01..2023-06-30",
           f"intersection is {out['inter']}")
+
+    # ── P4 ──────────────────────────────────────────────────────────────
+    check(abs(out["pearsonSelf"] - 1) < 1e-12 and abs(out["pearsonNeg"] + 1) < 1e-12,
+          f"Pearson is not 1/-1 on a perfect pair: {out['pearsonSelf']}, "
+          f"{out['pearsonNeg']}")
+    check(out["pearsonFlat"] is None and out["pearsonShort"] is None,
+          f"a flat series or a two-point one produced a correlation "
+          f"({out['pearsonFlat']}, {out['pearsonShort']}) instead of nothing")
+    check(abs(out["spearmanCurved"] - 1) < 1e-12 and out["pearsonCurved"] < 0.9,
+          f"Spearman {out['spearmanCurved']} / Pearson {out['pearsonCurved']} "
+          f"on a monotone curve — the rank measure is why the metric table "
+          f"uses it")
+    check(out["ranks"] == [1, 2.5, 2.5, 4],
+          f"ties are not averaged: {out['ranks']} — a metric with five "
+          f"distinct values across thousands of trades is nearly all ties")
+    check(out["weekSat"] == "2023-01-08" and out["weekSun"] == "2023-01-08"
+          and out["weekMon"] == "2023-01-15",
+          f"the week is not the Sunday ending it: {out['weekSat']}, "
+          f"{out['weekSun']}, {out['weekMon']} — the old app's 'W' buckets")
+    check(out["alignWeeks"] == ["2023-01-08", "2023-01-22"],
+          f"aligned weeks {out['alignWeeks']}")
+    check(out["alignCols"] == [[100, 50], [-20, 0]],
+          f"alignment did not zero-fill the missing week: {out['alignCols']}")
+    check(out["rollNulls"] == 3 and abs(out["rollLast"] - 1) < 1e-12,
+          f"rolling correlation has {out['rollNulls']} leading nulls for a "
+          f"4-wide window and ends at {out['rollLast']}; the nulls keep it "
+          f"aligned with its x axis instead of silently shifting it")
 
 
 def case_the_page_computes_nothing_of_its_own():
