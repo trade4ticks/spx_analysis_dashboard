@@ -1,0 +1,231 @@
+{% import "_macros.html" as m %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Backtest Portfolio</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+  {#- The shell this page shares with /oo-backtest. Its sibling, not its
+      copy: see static/css/backtest.css. -#}
+  <link rel="stylesheet" href={{ asset('css/backtest.css') }}>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- Chart.js: the same build the other pages load. Unused in P1 (nothing
+       is charted yet) and loaded here so the page it becomes does not have
+       to change its head. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ── Backtest Portfolio — only what is this page's own ────────────────
+       The card, the sidebar layout, the type scale and the form controls
+       come from backtest.css, which /oo-backtest reads too. What is here is
+       the strategy row: several strategies, each with a colour, a quantity
+       and its own capital, which the single-strategy page has no use for. */
+
+    .bp-pick { display:flex; gap:6px; align-items:center; }
+    .bp-pick .ob-sel { flex:1; min-width:0; }
+
+    .bp-btn {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 10px; border-radius:4px; cursor:pointer;
+      white-space:nowrap;
+    }
+    .bp-btn:hover { border-color:var(--accent); color:var(--accent); }
+    .bp-btn:disabled { opacity:.45; cursor:default; border-color:var(--border); color:var(--text); }
+    .bp-btn.pri { border-color:var(--accent); color:var(--accent); }
+
+    /* One loaded strategy. The swatch is the only thing carrying its colour
+       in P1; from P3 the same colour is its line on every chart, which is
+       why the colour is assigned at load and not per chart. */
+    .bp-strat { display:flex; align-items:center; gap:8px; padding:7px 8px;
+                border-bottom:1px solid var(--border); }
+    .bp-strat:last-child { border-bottom:0; }
+    .bp-swatch { width:10px; height:10px; border-radius:2px; flex:none; }
+    .bp-name { font-size:12px; font-weight:600; color:var(--text);
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+    .bp-meta { font-size:10px; color:var(--dim); white-space:nowrap; }
+    .bp-grow { flex:1; min-width:0; }
+    .bp-num {
+      width:74px; background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:11px; padding:3px 6px; border-radius:4px; text-align:right;
+      font-variant-numeric:tabular-nums; color-scheme:dark;
+    }
+    .bp-x { color:var(--dim); cursor:pointer; font-size:13px; padding:0 2px; }
+    .bp-x:hover { color:var(--danger); }
+
+    .bp-head { display:flex; align-items:center; gap:8px; font-size:10px;
+               color:var(--dim); text-transform:uppercase; letter-spacing:.4px;
+               padding:4px 8px; border-bottom:1px solid var(--border); }
+
+    /* P1 says out loud what it does not do yet, on the page rather than only
+       in the commit: a page with an empty main column reads as broken. */
+    .bp-phase {
+      border:1px dashed var(--border); border-radius:5px; padding:14px;
+      color:var(--muted); font-size:12px; line-height:1.6;
+    }
+    .bp-phase b { color:var(--text); }
+    .bp-load { font-size:11px; color:var(--muted); }
+    .bp-load .warn { color:var(--warning); }
+  </style>
+</head>
+<body class="page" x-data="backtestPortfolio">
+  {% set nav_active = "/backtest-portfolio" %}{% include "_nav.html" %}
+
+  <div class="ob-body">
+
+    <!-- ── the sidebar: what is in the portfolio ─────────────────────── -->
+    <div class="ob-side">
+
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Strategies</span>
+          <span class="ob-card-sub" x-text="savedSummary()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-pick">
+            <select class="ob-sel" x-model.number="pick">
+              <option value="0">Add a saved strategy…</option>
+              <template x-for="s in addable()" :key="s.id">
+                <option :value="s.id" x-text="optionLabel(s)"></option>
+              </template>
+            </select>
+            <button class="bp-btn" @click="add()"
+                    :disabled="!pick || busy">Add</button>
+          </div>
+          <div class="ob-row">
+            <button class="bp-btn pri" @click="load()"
+                    :disabled="!chosen.length || busy"
+                    x-text="busy ? 'Loading…' : 'Load portfolio'"></button>
+            <button class="bp-btn" @click="clearAll()"
+                    :disabled="!chosen.length || busy">Clear</button>
+          </div>
+          <template x-if="error">
+            <div class="ob-err" style="margin-top:8px" x-text="error"></div>
+          </template>
+          <div class="ob-note" style="margin-top:8px">
+            Saved on the OO/Mesosim Backtest page. Loading re-uses that page's
+            parse, market join and columns, so a strategy reads the same here
+            as it does there.
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card" x-show="chosen.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Allocation</span>
+          <span class="ob-card-sub" x-text="allocSummary()"></span>
+        </div>
+        <div class="bp-head">
+          <span style="width:10px"></span>
+          <span class="bp-grow">strategy</span>
+          <span style="width:74px;text-align:right">qty</span>
+          <span style="width:74px;text-align:right">capital</span>
+          <span style="width:14px"></span>
+        </div>
+        <template x-for="(c, i) in chosen" :key="c.id">
+          <div class="bp-strat">
+            <span class="bp-swatch" :style="'background:' + colorOf(i)"></span>
+            <span class="bp-grow">
+              <span class="bp-name" x-text="c.name"></span><br>
+              <span class="bp-meta" x-text="rowMeta(c)"></span>
+            </span>
+            <input class="bp-num" type="number" min="1" step="1"
+                   x-model.number="c.qty" @change="normalise(c)">
+            <input class="bp-num" type="number" min="0" step="500"
+                   x-model.number="c.capital" @change="normalise(c)">
+            <span class="bp-x" @click="remove(i)" title="Remove">×</span>
+          </div>
+        </template>
+        <div class="ob-card-body">
+          <div class="ob-note">
+            qty scales P/L linearly. Capital seeds from the strategy's saved
+            value and is this page's until a profile saves it; portfolio
+            capital is the sum.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── the main column ───────────────────────────────────────────── -->
+    <div class="ob-main">
+
+      <div class="ob-status">
+        <span x-text="statusLine()"></span>
+        <span class="bp-load" x-show="loadNote" x-cloak>
+          <span x-text="loadNote"></span>
+          <span class="warn" x-show="slowLoad" x-cloak
+                x-text="' — first load of a file parses it; the next is from cache'"></span>
+        </span>
+      </div>
+
+      <div class="ob-card" x-show="loaded.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Loaded</span>
+          <span class="ob-card-sub" x-text="loadedSummary()"></span>
+        </div>
+        <div class="bp-head">
+          <span style="width:10px"></span>
+          <span class="bp-grow">strategy</span>
+          <span style="width:70px;text-align:right">trades</span>
+          <span style="width:170px;text-align:right">span</span>
+          <span style="width:120px;text-align:right">parse</span>
+        </div>
+        <template x-for="p in loaded" :key="p.saved.id">
+          <div class="bp-strat">
+            <span class="bp-swatch" :style="'background:' + p.color"></span>
+            <span class="bp-grow">
+              <span class="bp-name" x-text="p.saved.name"></span><br>
+              <span class="bp-meta" x-text="p.filename"></span>
+            </span>
+            <span class="bp-meta" style="width:70px;text-align:right"
+                  x-text="p.n.toLocaleString()"></span>
+            <span class="bp-meta" style="width:170px;text-align:right"
+                  x-text="spanOf(p)"></span>
+            <span class="bp-meta" style="width:120px;text-align:right"
+                  x-text="parseOf(p)"></span>
+          </div>
+        </template>
+      </div>
+
+      <template x-if="warnings().length">
+        <div class="ob-card">
+          <div class="ob-card-hdr"><span class="ob-card-title">Worth knowing</span></div>
+          <div class="ob-card-body">
+            <template x-for="w in warnings()" :key="w">
+              <div class="ob-note" x-text="w"></div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- WHAT THIS PHASE IS. Stated on the page, not only in the commit:
+           a main column with nothing in it reads as a page that broke. -->
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Phase 1 of 7 — loading</span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-phase">
+            This phase carries the data and nothing else: strategies load,
+            their trades are in the browser, and qty and capital are
+            collected. <b>Nothing is computed from them yet</b> — the numbers
+            above are trade counts and dates, straight from the load.<br><br>
+            Next: <b>P2</b> the per-strategy filters from the shared metric
+            registry and the summary table with its TOTAL row; <b>P3</b>
+            equity, drawdown and capital deployed; <b>P4</b> the correlation
+            work; <b>P5</b> saved portfolio profiles; <b>P6</b> distribution,
+            overlap and rolling risk.<br><br>
+            P/L is dated by <b>close</b>, the same basis as the
+            single-backtest page, so a strategy reads the same on both.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {#- NOT `defer` — Alpine is deferred in the head, so a deferred bundle here
+      would register the component after alpine:init has already fired. See
+      the note in equities_scan.html; gated in check_rendered_assets.py. -#}
+  <script src={{ asset('js/backtest_portfolio.js') }}></script>
+</body>
+</html>

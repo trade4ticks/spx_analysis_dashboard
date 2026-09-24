@@ -1,0 +1,66 @@
+/* The backtest pages' shared shell.
+ *
+ * ONE STYLESHEET, TWO PAGES. /oo-backtest analyses one saved strategy and
+ * /backtest-portfolio combines several; they are siblings, and the brief for
+ * the second asks that it look like one rather than like a separate app. The
+ * rules below were the first page's, inline in its template, and are now read
+ * by both -- a copy in the second page would look identical on the day it was
+ * written and drift from then on.
+ *
+ * WHAT BELONGS HERE: the shell. The sidebar-and-column layout, the card, the
+ * small type scale, the form controls, the stat grid. Anything that is about
+ * ONE page's own content -- the OO page's dual-range sliders, its sticky
+ * summary, the portfolio's strategy rows -- stays in that page's <style>,
+ * because moving it here would make this file a dumping ground and the next
+ * person would not know which rules are shared on purpose.
+ *
+ * The `.ob-` prefix is kept rather than renamed to something neutral: it is
+ * the name already in the first page's markup and its gates, and a rename
+ * would be a large diff across a page full of working expressions for no
+ * behaviour. New shared rules are welcome under it; the prefix means
+ * "backtest pages", not "the OO page".
+ */
+
+/* Sidebar ~25% with its own scroll, main column beside it with its own. */
+.ob-body {
+  flex:1; min-height:0; display:grid;
+  grid-template-columns:minmax(280px, 25%) 1fr;
+}
+.ob-side {
+  overflow-y:auto; padding:12px; border-right:1px solid var(--border);
+  background:var(--bg);
+}
+.ob-main { overflow-y:auto; padding:12px 14px; min-width:0; }
+
+.ob-card {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:6px; margin-bottom:10px;
+}
+.ob-card-hdr {
+  display:flex; align-items:center; gap:8px; padding:6px 10px;
+  border-bottom:1px solid var(--border); background:var(--raised);
+  border-top-left-radius:6px; border-top-right-radius:6px;
+}
+.ob-card-title { font-size:12px; font-weight:700; letter-spacing:.3px; }
+.ob-card-sub { font-size:10px; color:var(--dim); margin-left:auto; white-space:nowrap; }
+.ob-card-body { padding:10px; }
+.ob-card.ob-active { border-color:var(--accent); }
+
+.ob-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; }
+.ob-note { font-size:11px; color:var(--muted); }
+.ob-dim { font-size:11px; color:var(--dim); }
+.ob-err { font-size:11px; color:var(--danger); white-space:pre-wrap; }
+
+.ob-sel {
+  width:100%; background:var(--raised); border:1px solid var(--border); color:var(--text);
+  font-size:12px; padding:5px 8px; border-radius:4px; color-scheme:dark;
+}
+.ob-sel option { background:var(--raised); color:var(--text); }
+.ob-input {
+  width:100%; margin-top:4px; background:var(--raised); border:1px solid var(--border); color:var(--text);
+  font-size:12px; padding:5px 8px; border-radius:4px; font-family:inherit; resize:vertical; color-scheme:dark;
+}
+
+.ob-status { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin:0 2px 8px; }
+.ob-stats { display:grid; gap:8px; grid-template-columns:repeat(5, minmax(0,1fr)); }
+.ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }

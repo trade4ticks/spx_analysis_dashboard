@@ -225,6 +225,78 @@ arriving prints still say where the market is.
 wrong one is what moves money). The ladder hatching and the drag label now
 mark only what is known to cross, for the same reason.
 
+## Backtest Portfolio (`/backtest-portfolio`, in progress — 2026-09-24)
+
+Several SAVED strategies combined: per-strategy filters, qty and capital,
+and how the combination performs. Spec'd from the old Dash app
+(`Options-Backtest-Dashboard/pages/portfolio.py`, `utils/portfolio_calcs.py`)
+read as a specification, not a template.
+
+**Phases:** P1 scaffold + load — done; P2 filters, allocation, summary table
+with TOTAL row; P3 equity/drawdown/capital deployed; P4 correlation; P5
+saved profiles; P6 distribution, overlap, rolling risk; P7 docs.
+
+**Settled with the user (2026-09-24), not to be re-opened:**
+- **Our stat definitions win** over the old app's, unchanged — Max DD,
+  Calmar, all of them, exactly as the single-backtest page computes them.
+- **P/L is dated by CLOSE**, the same basis as the single page, so one
+  strategy reads identically on both. No accrual, no switch, no third basis.
+- **qty scales P/L linearly**, applied in the browser. Nothing server-side
+  multiplies a P/L — two places that scale is a portfolio silently squared.
+- **Capital** seeds from the strategy's saved `capital_per_position`,
+  overridable on the page; portfolio capital is the SUM of per-strategy
+  planned capital (× qty).
+- **Date range** defaults to the UNION of the loaded spans, with
+  intersection available.
+- **Sharpe** is kept from the old app, with the rolling Sharpe/Sortino
+  section (P6).
+- **Surface metrics are not in v1.**
+
+**The parse cache** (`app/oo_backtest/parsed_cache.py`). A 2,100-trade
+MesoSim log is ~57 MB and takes **3.4 s** to parse here; five strategies is
+17 s cold, and the VPS is about half this speed. So the PARSED FRAME is
+cached beside the file: encode 0.7 s, decode **0.04 s**, blob 379 KB (the
+gzipped source file is 4.5 MB), so a warm five-strategy load is ~0.2 s of
+parse work. **Keyed on `file_sha256` + a fingerprint of `data_loader.py`'s
+own source** — derived, not a constant to bump, because the failure it
+prevents is a stale parse that looks plausible. **Only the parse is cached**;
+the market join runs every time, since `index_ohlc` is backfilled and a
+frozen join would pin a trade's VIX to whatever the table held on first load.
+`df.attrs` travels with the columns — the parser's notes (open positions, the
+BacktestName, the data-quality flags) live there, and a cache that carried
+only columns dropped them silently. The gate compares **payloads**, not
+frames, because the payload is what reaches the browser.
+
+**One load path.** `/api/backtest-portfolio/load` enters
+`oo_backtest._analyze` with the cached frame; the OO page's own saved-load
+uses the same cache. A second parse/join/payload path would be two sets of
+trade numbers for one file. **One stylesheet**: `static/css/backtest.css`
+holds the shell (layout, card, type scale, controls, stat grid) both pages
+wear — moved out of `oo_backtest.html` inline CSS, verified by rendering the
+OO page before and after to an identical PNG.
+
+**Where the old app differs from us** (for P2; ours wins unless noted):
+- `avg_annual_pct` — old: `total_pnl / (planned_capital × qty) / years`,
+  ignoring concurrency. Ours divides by **peak deployed capital** (peak
+  concurrent × capital). The old figure reads ~5–8× higher at 5–8 concurrent
+  positions.
+- `years` — old measures **close-to-close**; ours **open-to-close**.
+- `calmar` — old is `avg_annual_pct / (|max_dd| / capital × 100)`, which is
+  algebraically **the same number as ours** (capital cancels). No conflict.
+- `sharpe` — `mean/std × √252` over days that HAD A CLOSE, not zero-filled
+  calendar days; at ~2 closes a week that annualisation is generous. Kept as
+  the old app had it, per the user.
+- Old has no Profit Factor, Avg Days, Max DD %, Avg P/L %; we have all four.
+- `capital_deployed` — old dedupes by OPEN DAY ("multiple rows on one entry
+  day are one slot") and uses a half-open interval `[open, close)`. Our
+  Deployment pane counts POSITIONS per SPX session with both ends inclusive.
+  Different numbers; decide in P3.
+- Strategy correlation — old uses **weekly** resampled P/L (deliberately, to
+  avoid the daily zero-fill artifact) but its rolling pairwise correlation
+  uses DAILY rows, so the two disagree about what a correlation is. Fix in P4.
+- `SPEARMAN_METRICS` is a hardcoded list including the dropped SharpTwo/skew
+  metrics; we use the registry.
+
 ## The topbar nav: six categories (2026-09-24)
 
 One partial, `templates/_nav.html`, included by all 17 page templates — it is

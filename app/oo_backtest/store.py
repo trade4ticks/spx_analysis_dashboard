@@ -85,6 +85,19 @@ def clean_notes(notes: str | None) -> str:
 ADD_CAPITAL_SQL = f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS capital_per_position DOUBLE PRECISION"
 CAPITAL_MAX = 1e9
 
+# The parsed frame, cached beside the file it came from. DERIVED DATA, never a
+# source of truth: `parsed_for_sha` and `parsed_fingerprint` say which file and
+# which parser produced it, and a miss on either re-parses. See
+# app/oo_backtest/parsed_cache.py for why it is the parsed frame and not the
+# joined one.
+ADD_PARSED_SQL = [
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS parsed_gz BYTEA",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS parsed_for_sha TEXT",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS parsed_fingerprint TEXT",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS parsed_rows INTEGER",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS parsed_at TIMESTAMPTZ",
+]
+
 
 def clean_capital(v) -> float | None:
     """None (use the page default) or a positive dollar amount."""
@@ -102,6 +115,42 @@ def clean_capital(v) -> float | None:
 async def ensure_table(conn) -> None:
     await conn.execute(CREATE_SQL)
     await conn.execute(ADD_CAPITAL_SQL)
+    for sql in ADD_PARSED_SQL:
+        await conn.execute(sql)
+
+
+async def read_parsed(pool, strategy_id: int, *, sha: str,
+                      fingerprint: str) -> bytes | None:
+    """The cached parse for this file and this parser, or None.
+
+    BOTH KEYS ARE CHECKED IN SQL rather than read back and compared here, so
+    a stale row simply does not match and the caller parses. There is no path
+    that returns a parse made by a different parser or from a different file.
+    """
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        return await conn.fetchval(
+            f"SELECT parsed_gz FROM {TABLE} WHERE id = $1 "
+            f"AND parsed_for_sha = $2 AND parsed_fingerprint = $3 "
+            f"AND parsed_gz IS NOT NULL",
+            strategy_id, sha, fingerprint)
+
+
+async def write_parsed(pool, strategy_id: int, *, sha: str, fingerprint: str,
+                       blob: bytes, rows: int) -> None:
+    """Store a parse. Never touches `updated_at` — the strategy did not change.
+
+    Guarded on the file's sha still matching: a save that replaced the file
+    while this parse was running must not have a parse of the OLD file filed
+    against it.
+    """
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        await conn.execute(
+            f"UPDATE {TABLE} SET parsed_gz = $2, parsed_for_sha = $3, "
+            f"parsed_fingerprint = $4, parsed_rows = $5, parsed_at = now() "
+            f"WHERE id = $1 AND file_sha256 = $3",
+            strategy_id, blob, sha, fingerprint, int(rows))
 
 
 def _row(r) -> dict:

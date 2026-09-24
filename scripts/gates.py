@@ -151,6 +151,11 @@ GATES = [
        note="JS binning == pd.cut; parsers; dev machine (node, source checkout)"),
     # Starts a throwaway Postgres and runs the shipped index_ohlc SQL: early
     # closes, 'NaN' bars, the prior-session row, the entry bar's open.
+    # The portfolio page loads SAVED strategies through a cached parse. The
+    # interesting failure is a cache that serves what the parser would no
+    # longer produce, so the gate compares payloads, not frames.
+    _s("check_portfolio.py",
+       note="a cached parse produces the same payload as a fresh one"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
 

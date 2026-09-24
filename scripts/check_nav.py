@@ -47,7 +47,7 @@ EXPECTED = [
     ("Equity", ["Equity IV", "Ticker Analysis"]),
     ("Scalp", ["Equities Scalp", "Equities Live", "Equities Wall",
                "Equities Scan"]),
-    ("Backtest", ["OO/Mesosim Backtest", "Backtest IV"]),
+    ("Backtest", ["OO/Mesosim Backtest", "Backtest Portfolio", "Backtest IV"]),
     ("Research", ["AI Explorer", "Research", "Research 2"]),
 ]
 # The pages that live on the OTHER service, and the path each one has THERE.

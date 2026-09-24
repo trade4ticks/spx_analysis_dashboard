@@ -18,7 +18,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp, oo_backtest
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp, oo_backtest, backtest_portfolio
 from app.routers import replay as replay_router
 
 BASE_DIR = Path(__file__).parent.parent  # project root
@@ -122,6 +122,11 @@ app.include_router(equities_scalp.router,   prefix="/api/equities-scalp")
 # OO/Mesosim Backtest: parses uploaded trade logs and stores saved ones. The
 # page filters in the browser, so nothing here answers a filter change.
 app.include_router(oo_backtest.router,      prefix="/api/oo-backtest")
+# Backtest Portfolio: several SAVED strategies combined. It carries its own
+# prefix in the router rather than taking one here, because it reuses
+# oo_backtest's parse/join/payload path and the two must not look like one
+# API split across two mount points.
+app.include_router(backtest_portfolio.router)
 
 # REPLAY reads PARQUET, not Postgres, and carries its own /api/replay
 # prefix rather than sitting under equities-scalp. It shares the page and
@@ -188,6 +193,11 @@ async def equities_scalp_page(request: Request):
 @app.get("/oo-backtest")
 async def oo_backtest_page(request: Request):
     return templates.TemplateResponse(request, "oo_backtest.html")
+
+
+@app.get("/backtest-portfolio")
+async def backtest_portfolio_page(request: Request):
+    return templates.TemplateResponse(request, "backtest_portfolio.html")
 
 
 @app.get("/backtest-iv-analysis")

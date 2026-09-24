@@ -46,7 +46,8 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from fastapi.responses import JSONResponse
 
 from app.db import get_pool
-from app.oo_backtest import data_loader, market, store, surface, surface_stats
+from app.oo_backtest import (data_loader, market, parsed_cache, store, surface,
+                             surface_stats)
 from app.oo_backtest.payload import assert_no_dropped_columns, trades_to_payload
 from app.oo_backtest.registry import registry_with_coverage
 
@@ -98,6 +99,26 @@ def _parse(content: bytes, filename: str) -> dict:
     return _payload(_parse_df(content, filename), filename, {"joined": False, "error": "not requested"})
 
 
+async def load_parsed(pool, meta: dict, content: bytes):
+    """A saved strategy's parsed frame, from the cache when it is current.
+
+    Shared with the Backtest Portfolio page, which loads several strategies
+    at once: at ~3 s a parse, five of them is the difference between a page
+    you adjust and one you wait for. A cache MISS still produces the right
+    answer, just slowly, so nothing here raises on its own account -- the
+    parse failure path below is the only one that refuses.
+    """
+    def _parse(c, n):
+        try:
+            return _parse_df(c, n)
+        except Exception:
+            log.exception("oo-backtest parse failed for saved %r", n)
+            raise
+    return await parsed_cache.load(
+        pool, strategy_id=meta["id"], sha=meta["file_sha256"],
+        content=content, filename=meta["filename"], parse=_parse)
+
+
 async def _parse_or_400(content: bytes, name: str):
     """Parse, turning a bad file into a 400 that names the problem."""
     if not content:
@@ -123,10 +144,18 @@ async def _parse_or_400(content: bytes, name: str):
         raise HTTPException(422, f"Could not parse {name}: {type(exc).__name__}: {exc}")
 
 
-async def _analyze(content: bytes, name: str, pool) -> dict:
+async def _analyze(content: bytes, name: str, pool, df=None) -> dict:
     """Parse + market join + payload: the ONE path both a fresh upload and a
-    saved strategy's load go through, so the two cannot drift apart."""
-    df = await _parse_or_400(content, name)
+    saved strategy's load go through, so the two cannot drift apart.
+
+    `df` lets a caller supply a frame it already has -- a saved strategy's
+    cached parse -- WITHOUT skipping the join or the payload build. Only the
+    parse is ever served from cache; the market join runs every time, because
+    `index_ohlc` is backfilled and a frozen join would pin a trade's VIX to
+    whatever the table held the first time it was loaded.
+    """
+    if df is None:
+        df = await _parse_or_400(content, name)
 
     # The trades are good even when market data is not. A failed join is
     # reported on the page -- the VIX and gap sections then show as skipped
@@ -196,8 +225,10 @@ async def load_saved(strategy_id: int, pool=Depends(get_pool)):
     if found is None:
         raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
     meta, content = found
-    payload = await _analyze(content, meta["filename"], pool)
+    df, cache_note = await load_parsed(pool, meta, content)
+    payload = await _analyze(content, meta["filename"], pool, df=df)
     payload["saved"] = meta
+    payload["parse"] = cache_note
     # The stored facts were computed when it was saved; a parser change since
     # can move them. Say so rather than show two different trade counts.
     if payload["n"] != meta["trade_count"]:
