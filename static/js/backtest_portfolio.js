@@ -27,7 +27,19 @@ const BP_DATA = {
   payloads: {},      // strategy id -> the server's payload
   scaled: {},        // strategy id -> { qty, cols } with pnl x qty
   extents: {},       // "id:metric" -> the observed range, for the sliders
+  curves: {},        // the drawn series, rebuilt on every recompute
 };
+
+/* Chart.js instances. Outside Alpine for the same reason the trades are: a
+ * chart is not state a template reads, and a reactive proxy around one is a
+ * proxy around every point in it. */
+const BP_CHARTS = { eq: null, dd: null, cap: null };
+
+const BP_BLUE = '#3498db';
+const BP_PINK = '#e84393';
+/* The portfolio's own line: white, over the strategies' colours. It is the
+ * answer the page exists for, so it is not one of eight hues competing. */
+const BP_TOTAL = '#e8ecf1';
 
 /* A bound snapped outward to the registry's step, so a slider's ends are
  * round numbers rather than whatever the extreme trade happened to be. */
@@ -166,6 +178,10 @@ document.addEventListener('alpine:init', () => {
     slowLoad: false,
     rangeMode: 'union',
     tick: 0,              // bumped whenever the rows are recomputed
+    // The monthly grid is small and IS read by the template, so unlike the
+    // curves it lives in reactive state.
+    months: { years: [], labels: [], cells: {}, totals: {}, max: 0 },
+    deploy: { peak: 0, peakDay: null, sessions: 0 },
 
     async init() {
       await Promise.all([this.loadSaved(), this.loadRegistry()]);
@@ -257,6 +273,8 @@ document.addEventListener('alpine:init', () => {
       BP_DATA.payloads = {};
       BP_DATA.scaled = {};
       BP_DATA.extents = {};
+      BP_DATA.curves = {};
+      this.months = { years: [], labels: [], cells: {}, totals: {}, max: 0 };
       this.loadNote = '';
       this.error = '';
       this.editing = 0;
@@ -383,7 +401,16 @@ document.addEventListener('alpine:init', () => {
     setOn(m, on) {
       const c = this.editingRow();
       if (!c) return;
-      c.filters[m.key].on = !!on;
+      const f = c.filters[m.key];
+      f.on = !!on;
+      // SWITCHING A CATEGORICAL ON KEEPS EVERYTHING, then you untick what
+      // you do not want. On with nothing chosen is INERT -- bpSpecs skips a
+      // set filter with no members, matching the old app -- so the cell
+      // would read as an active filter that changes nothing, which is the
+      // failure the scalp page's inert-filter line exists to prevent.
+      if (f.on && m.type === 'categorical' && !f.allowed.length) {
+        f.allowed = this.categoriesFor(c, m).map(x => x.value);
+      }
       this.recompute();
     },
 
@@ -394,7 +421,11 @@ document.addEventListener('alpine:init', () => {
       if (!f || !f.on) return 'off';
       if (m.type === 'categorical') {
         const n = (f.allowed || []).length;
-        return n ? `${n} kept` : 'none kept';
+        const all = this.categoriesFor(c, m).length;
+        // Nothing chosen does not filter (see setOn), and says so rather
+        // than implying it keeps nothing.
+        if (!n) return 'nothing chosen — not filtering';
+        return n === all ? `all ${n} kept` : `${n} of ${all} kept`;
       }
       const r = this.rangeOf(m);
       return r ? `${this.fmtVal(m, r.lo)} – ${this.fmtVal(m, r.hi)}` : 'no values';
@@ -585,7 +616,7 @@ document.addEventListener('alpine:init', () => {
 
         rows.push({
           key: 'k' + c.id, id: c.id, name: c.name, color: p.color,
-          total: false,
+          total: false, idx,
           n: idx.length, nAll: p.n,
           dropped: p.n - idx.length,
           cost: bpCoverageCost(p.columns, p.n, c.filters, this.registry),
@@ -626,10 +657,201 @@ document.addEventListener('alpine:init', () => {
         });
       }
       this.rows = rows;
+
+      // ── what the charts draw ─────────────────────────────────────────
+      //
+      // Built HERE, in the same pass that builds the table, from the same
+      // filtered indices. A second pass that re-derived them could disagree
+      // with the numbers above it, which is the one thing a chart beside a
+      // table must not do.
+      const curves = { eq: [], dd: [], cap: [], sessions };
+      for (const r of rows) {
+        if (r.total) continue;
+        const c = this.chosen.find(x => x.id === r.id);
+        const cols = c && this.scaledCols(c);
+        if (!cols) continue;
+        curves.eq.push({ name: r.name, color: r.color,
+                         points: obDailyCurve(obEquity(cols, r.idx)) });
+      }
+      if (pooled.pnl.length) {
+        const peq = obEquity(pooled, [...pooled.pnl.keys()]);
+        const daily = obDailyCurve(peq);
+        curves.eq.push({ name: 'TOTAL', color: BP_TOTAL, points: daily, total: true });
+        curves.dd = daily;
+        curves.maxDD = peq.maxDD;
+      }
+      curves.cap = deployed;
+      BP_DATA.curves = curves;
+
+      const peakAt = deployed.indexOf(Math.max(...(deployed.length ? deployed : [0])));
+      this.deploy = {
+        peak: deployed.length ? Math.max(...deployed) : 0,
+        peakDay: peakAt >= 0 ? sessions[peakAt] : null,
+        sessions: sessions.length,
+      };
+      this.buildMonths(pooled);
       this.tick++;
+      // After the reactive state, so the template's cards exist to draw into
+      // on the first pass.
+      this.$nextTick(() => this.renderCharts());
+    },
+
+    /* The monthly grid: P/L by close month, years down, months across. */
+    buildMonths(pooled) {
+      const by = obMonthlyPnl(pooled, [...pooled.pnl.keys()]);
+      const years = [...new Set([...by.keys()].map(k => k.slice(0, 4)))].sort();
+      const cells = {}, totals = {};
+      let max = 0;
+      for (const [k, v] of by) {
+        cells[k] = v;
+        const y = k.slice(0, 4);
+        totals[y] = (totals[y] || 0) + v;
+        if (Math.abs(v) > max) max = Math.abs(v);
+      }
+      this.months = {
+        years, cells, totals, max,
+        labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+      };
+    },
+
+    // ── the charts ──────────────────────────────────────────────────────
+    //
+    // Chart.js, the same build and the same conventions as the other page:
+    // linear x in epoch days (no date adapter), thin lines, no point
+    // markers, hover only. An existing chart is UPDATED rather than
+    // rebuilt -- a new Chart on every filter change leaks canvases and
+    // throws away the zoom.
+    renderCharts() {
+      if (typeof Chart === 'undefined') return;
+      const c = BP_DATA.curves;
+      if (!c || !c.eq) return;
+      const axis = (money) => ({
+        type: 'linear',
+        grid: { color: 'rgba(255,255,255,0.05)' },
+        border: { display: false },
+        ticks: { color: '#9a9a9a', font: { size: 10 }, maxTicksLimit: money ? 6 : 7,
+                 callback: money ? (v => bpFmtMoney(v)) : (v => obIsoDay(v).slice(0, 7)) },
+      });
+      const span = (pts) => (pts && pts.length
+        ? { min: obDay(pts[0].date), max: obDay(pts[pts.length - 1].date) } : {});
+      const base = (label, xr) => ({
+        responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+        interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        scales: { x: { ...axis(false), ...xr }, y: axis(true) },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { title: it => obIsoDay(it[0].parsed.x), label } },
+        },
+      });
+
+      // EQUITY: a line per strategy plus the portfolio, sharing an axis.
+      const total = c.eq.find(s => s.total);
+      const xr = span(total ? total.points : (c.eq[0] && c.eq[0].points));
+      const eqData = { datasets: c.eq.map(sv => ({
+        label: sv.name,
+        data: sv.points.map(p => ({ x: obDay(p.date), y: p.cumulative })),
+        borderColor: sv.color,
+        borderWidth: sv.total ? 1.8 : 1,
+        pointRadius: 0, pointHitRadius: 5, tension: 0,
+        fill: sv.total ? 'origin' : false,
+        backgroundColor: sv.total ? 'rgba(232,236,241,0.06)' : undefined,
+        order: sv.total ? 0 : 1,
+      })) };
+      this.draw('eq', 'bp-eq-chart', eqData,
+                base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr));
+
+      // DRAWDOWN: the portfolio's only, with its deepest point marked.
+      const dd = c.dd || [];
+      const mark = c.maxDD
+        ? [{ x: obDay(c.maxDD.date), y: c.maxDD.drawdown }] : [];
+      const ddData = { datasets: [
+        { data: dd.map(p => ({ x: obDay(p.date), y: p.drawdown })),
+          borderColor: BP_PINK, backgroundColor: 'rgba(232,67,147,0.16)',
+          fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 5, tension: 0 },
+        { data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6,
+          pointBackgroundColor: BP_PINK, pointBorderColor: '#2d2d2d',
+          pointBorderWidth: 2, showLine: false },
+      ] };
+      this.draw('dd', 'bp-dd-chart', ddData,
+                base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
+                           + bpFmtMoney(it.parsed.y), xr));
+
+      // CAPITAL DEPLOYED: a step per session, since it changes at a close.
+      const cap = [];
+      for (let i = 0; i < c.sessions.length; i++) {
+        if (c.cap[i] || (i && c.cap[i - 1])) {
+          cap.push({ x: obDay(c.sessions[i]), y: c.cap[i] });
+        }
+      }
+      const capData = { datasets: [{
+        data: cap, borderColor: BP_BLUE, backgroundColor: 'rgba(52,152,219,0.12)',
+        fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 5,
+        stepped: 'before' }] };
+      this.draw('cap', 'bp-cap-chart', capData,
+                base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
+                     cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}));
+    },
+
+    draw(key, id, data, options) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const live = BP_CHARTS[key];
+      if (live && live.canvas === el) {
+        live.data = data;
+        live.options = options;
+        live.update('none');
+        return;
+      }
+      if (live) live.destroy();
+      BP_CHARTS[key] = new Chart(el.getContext('2d'), { type: 'line', data, options });
     },
 
     // ── readouts ────────────────────────────────────────────────────────
+    perfSub() {
+      void this.tick;
+      const t = this.rows.find(r => r.total);
+      if (!t) return '';
+      const dd = t.stats.max_drawdown;
+      return `${bpFmtMoney(t.stats.total_pnl)} total · deepest drawdown `
+           + `${bpFmtMoney(dd)}`;
+    },
+
+    deploySub() {
+      void this.tick;
+      if (!this.deploy.peak) return 'nothing held overnight';
+      return `peak ${bpFmtMoney(this.deploy.peak)}`
+           + (this.deploy.peakDay ? ` on ${this.deploy.peakDay}` : '');
+    },
+
+    monthsSub() {
+      void this.tick;
+      const n = Object.keys(this.months.cells).length;
+      return n ? `${n} months · biggest ${bpFmtMoney(this.months.max)}` : '';
+    },
+
+    /* One month's cell: text, and a blue/pink wash whose opacity is the
+     * month's size against the biggest month in the grid — the same rule the
+     * bar charts on the other page use, so the two read alike. */
+    monthCell(year, i) {
+      void this.tick;
+      const key = `${year}-${String(i + 1).padStart(2, '0')}`;
+      const v = this.months.cells[key];
+      if (v === undefined) return { text: '·', bg: 'transparent', empty: true, title: `${key}: no closes` };
+      const a = this.months.max ? 0.12 + 0.68 * (Math.abs(v) / this.months.max) : 0.12;
+      const rgb = v >= 0 ? '52,152,219' : '232,67,147';
+      return { text: bpFmtMoney(v), bg: `rgba(${rgb},${a.toFixed(3)})`,
+               empty: false, title: `${key}: ${bpFmtMoney(v)}` };
+    },
+
+    yearBar(year) {
+      void this.tick;
+      const v = this.months.totals[year] || 0;
+      const biggest = Math.max(1, ...Object.values(this.months.totals).map(Math.abs));
+      return { text: bpFmtMoney(v), w: Math.round(40 * Math.abs(v) / biggest),
+               bg: v >= 0 ? BP_BLUE : BP_PINK };
+    },
+
     savedSummary() {
       return this.saved.length
         ? `${this.saved.length} saved · ${this.chosen.length} chosen`

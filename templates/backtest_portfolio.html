@@ -129,6 +129,36 @@
     .bp-tname { display:flex; align-items:center; gap:6px; }
     .bp-note-row td { padding:0 6px 6px; color:var(--dim); font-size:10px; }
     .bp-scroll { overflow-x:auto; }
+
+    /* ── P3: the curves ───────────────────────────────────────────────
+       Equity and drawdown SIDE BY SIDE, as the old app had them: the pair
+       is read together, and stacked they are two screens apart. They share
+       an x axis, so a dip in one lines up with the trough in the other. */
+    .bp-pair { display:grid; gap:10px; grid-template-columns:1fr 1fr; }
+    @media (max-width: 1100px) { .bp-pair { grid-template-columns:1fr; } }
+    .bp-chart { height:240px; position:relative; }
+    .bp-chart canvas { width:100% !important; height:100% !important; }
+    .bp-legend { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:10px;
+                 color:var(--dim); margin-top:6px; }
+    .bp-leg { display:flex; align-items:center; gap:5px; }
+
+    /* ── the monthly grid ─────────────────────────────────────────────
+       DOM, not canvas: twelve cells a year is nothing to lay out, and the
+       numbers want to be readable and selectable rather than hit-tested.
+       Colour is blue/pink by sign with opacity by size against the biggest
+       month, the same rule the bar charts use. */
+    .bp-months { border-collapse:collapse; font-size:10px;
+                 font-variant-numeric:tabular-nums; }
+    .bp-months th { color:var(--dim); font-weight:600; padding:2px 5px;
+                    text-transform:uppercase; letter-spacing:.3px; }
+    .bp-months td { padding:0; }
+    .bp-mcell { width:52px; height:22px; display:flex; align-items:center;
+                justify-content:center; border-radius:2px; margin:1px;
+                color:var(--text); }
+    .bp-mcell.empty { color:var(--border); }
+    .bp-ycell { padding-left:10px; white-space:nowrap; }
+    .bp-ybar { display:inline-block; height:9px; border-radius:2px;
+               vertical-align:middle; margin-right:6px; min-width:1px; }
   </style>
 </head>
 <body class="page" x-data="backtestPortfolio">
@@ -353,6 +383,108 @@
         </div>
       </div>
 
+      <div class="ob-card" x-show="rows.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Performance</span>
+          <span class="ob-card-sub" x-text="perfSub()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-pair">
+            <div>
+              <div class="ob-lbl">Equity — cumulative P/L</div>
+              <div class="bp-chart"><canvas id="bp-eq-chart" role="img"
+                   aria-label="Cumulative P/L per strategy and for the portfolio"></canvas></div>
+            </div>
+            <div>
+              <div class="ob-lbl">Drawdown — the portfolio's</div>
+              <div class="bp-chart"><canvas id="bp-dd-chart" role="img"
+                   aria-label="Portfolio drawdown from its running peak"></canvas></div>
+            </div>
+          </div>
+          <div class="bp-legend">
+            <template x-for="r in rows" :key="'leg' + r.key">
+              <span class="bp-leg">
+                <span class="bp-swatch" :style="'background:' + r.color"></span>
+                <span x-text="r.name"></span>
+              </span>
+            </template>
+          </div>
+          <div class="ob-note" style="margin-top:6px">
+            One point per close date; the drawdown keeps each day's WORST
+            reading, so the trough here is the Max DD in the table rather
+            than a shallower day-end version of it. Only the portfolio's
+            drawdown is drawn — one curve per strategy on the same axes is a
+            picture of nothing in particular.
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card" x-show="rows.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Capital deployed</span>
+          <span class="ob-card-sub" x-text="deploySub()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-chart" style="height:200px">
+            <canvas id="bp-cap-chart" role="img"
+                    aria-label="Capital deployed per SPX session across the portfolio"></canvas>
+          </div>
+          <div class="ob-note" style="margin-top:6px">
+            Each strategy's concurrent positions times its own capital, summed
+            per SPX session. <b>Half-open</b>: a position is deployed on the
+            sessions it is held through and not on the one it closes on, so
+            this is capital still at risk at the close. The peak is what
+            <b>ann ret %</b> divides by, and it is lower than the sum of the
+            per-strategy peaks unless they all peak on the same day.
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card" x-show="months.years.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Monthly P/L</span>
+          <span class="ob-card-sub" x-text="monthsSub()"></span>
+        </div>
+        <div class="ob-card-body bp-scroll">
+          <table class="bp-months">
+            <thead>
+              <tr>
+                <th></th>
+                <template x-for="mn in months.labels" :key="mn">
+                  <th x-text="mn"></th>
+                </template>
+                <th style="text-align:left;padding-left:10px">year</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="y in months.years" :key="y">
+                <tr>
+                  <th x-text="y"></th>
+                  <template x-for="(mn, i) in months.labels" :key="y + mn">
+                    <td>
+                      <div class="bp-mcell" :class="monthCell(y, i).empty ? 'empty' : ''"
+                           :style="'background:' + monthCell(y, i).bg"
+                           :title="monthCell(y, i).title"
+                           x-text="monthCell(y, i).text"></div>
+                    </td>
+                  </template>
+                  <td class="bp-ycell">
+                    <span class="bp-ybar"
+                          :style="'width:' + yearBar(y).w + 'px;background:' + yearBar(y).bg"></span>
+                    <span x-text="yearBar(y).text"></span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="ob-note" style="margin-top:8px">
+            Dated by close, like everything else here: a trade lands in the
+            month it was closed in, whatever month it was opened in. Shade is
+            the month's size against the biggest month in the grid.
+          </div>
+        </div>
+      </div>
+
       <!-- THE FILTER PANEL LIVES HERE, not in the sidebar.
            The sidebar is ~400px and permanent; filter editing is occasional
            and wants width. So it opens in the main column, under the summary
@@ -433,18 +565,20 @@
            a main column with nothing in it reads as a page that broke. -->
       <div class="ob-card">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Phase 2 of 7 — allocation and filters</span>
+          <span class="ob-card-title">Phase 3 of 7 — the curves</span>
         </div>
         <div class="ob-card-body">
           <div class="bp-phase">
-            Strategies load, qty and capital allocate, the shared metric
-            registry filters each one, and the summary table totals them.
-            Every figure comes from the same code the single-backtest page
-            uses, so a strategy reads the same on both.<br><br>
-            Next: <b>P3</b> equity, drawdown and capital deployed; <b>P4</b>
-            the correlation work, with both correlations weekly; <b>P5</b>
-            saved portfolio profiles; <b>P6</b> distribution, overlap and
-            rolling risk.<br><br>
+            Strategies load, qty and capital allocate, the registry filters
+            each one, the table totals them, and the curves draw: equity and
+            drawdown together, capital deployed, and P/L by month. Every
+            figure comes from the same code the single-backtest page uses, so
+            a strategy reads the same on both — and the charts are built in
+            the same pass as the table, from the same filtered trades, so
+            they cannot disagree with the numbers above them.<br><br>
+            Next: <b>P4</b> the correlation work, with both correlations
+            weekly; <b>P5</b> saved portfolio profiles; <b>P6</b>
+            distribution, overlap and rolling risk.<br><br>
             P/L is dated by <b>close</b>. Deployment is <b>half-open</b> —
             a position is capital at risk on the sessions it is held through
             and not on the one it closes on, so a weekly roll reads one

@@ -208,6 +208,69 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('and the row states its cost',
      /no value for an active filter/.test(document.body.textContent), true);
 
+  // ── P3: THE CURVES ────────────────────────────────────────────────
+  // Charts are canvases; what matters is that they were built, carry the
+  // data the table reports, and agree with it at the one number both show.
+  const eq = Chart.getChart('bp-eq-chart');
+  const dd = Chart.getChart('bp-dd-chart');
+  const cap = Chart.getChart('bp-cap-chart');
+  ok('the equity chart exists', !!eq, true);
+  ok('a line per strategy plus the portfolio', eq && eq.data.datasets.length, 3);
+  ok('the last dataset is the portfolio',
+     eq && eq.data.datasets[eq.data.datasets.length - 1].label, 'TOTAL');
+  // The curve ENDS at the portfolio's total P/L -- the table's own figure.
+  const tot = eq.data.datasets.find(d => d.label === 'TOTAL').data;
+  const tableTotal = document.querySelector('.bp-table tr.total td:nth-child(4)').textContent;
+  ok('the curve ends at the table total',
+     bpFmtMoney(tot[tot.length - 1].y), tableTotal);
+
+  ok('the drawdown chart exists', !!dd, true);
+  const ddPts = dd.data.datasets[0].data;
+  const trough = Math.min(...ddPts.map(p => p.y));
+  const tableDD = document.querySelector('.bp-table tr.total td:nth-child(9)').textContent;
+  // THE TROUGH IS THE TABLE'S MAX DD, not a shallower day-end reading.
+  ok('the trough equals the table Max DD', bpFmtMoney(trough), tableDD);
+  ok('the deepest point is marked', dd.data.datasets[1].data.length, 1);
+
+  ok('the deployed chart exists', !!cap, true);
+  ok('deployment is a step', cap && cap.data.datasets[0].stepped, 'before');
+  const capPeak = Math.max(...cap.data.datasets[0].data.map(p => p.y));
+  const tablePeak = document.querySelector('.bp-table tr.total td:nth-child(16)').textContent;
+  ok('its peak is the table peak', bpFmtMoney(capPeak), tablePeak);
+
+  // THE MONTHLY GRID sums to the same total.
+  const cells = [...document.querySelectorAll('.bp-mcell')];
+  ok('the monthly grid drew', cells.length > 0, true);
+  const c2 = Alpine.$data(document.querySelector('[x-data]'));
+  const monthSum = Object.values(c2.months.cells).reduce((a, b) => a + b, 0);
+  ok('the months sum to the total', bpFmtMoney(monthSum), tableTotal);
+  const yearSum = Object.values(c2.months.totals).reduce((a, b) => a + b, 0);
+  ok('the years sum to the total', bpFmtMoney(yearSum), tableTotal);
+
+  // A FILTER MOVES THE CURVES, not just the table.
+  const endBefore = tot[tot.length - 1].y;
+  // A DAY-OF-WEEK CATEGORY, unticked: the fixture's trades fall on several
+  // weekdays, so dropping one genuinely narrows. (Exit Reason is one value
+  // in this fixture, so filtering on it would change nothing and the
+  // assertion would be testing the fixture.)
+  const dowCell = [...document.querySelectorAll('.bp-fcell')]
+    .find(el => /day of week/i.test(el.textContent));
+  dowCell.querySelector('.bp-fhead input').click();      // switch it on
+  await wait(120);
+  ok('switching a categorical on keeps everything',
+     /^all [0-9]+ kept$/.test(dowCell.querySelector('.bp-fstate').textContent.trim()), true);
+  // FRIDAY, because this fixture's weekly strategy opens every Friday: any
+  // other day would change nothing and the assertion would be testing the
+  // fixture rather than the page.
+  const friday = [...dowCell.querySelectorAll('.ob-check')]
+    .find(l => /fri/i.test(l.textContent));
+  friday.querySelector('input').click();
+  await wait(200);
+  const eq2 = Chart.getChart('bp-eq-chart');
+  const tot2 = eq2.data.datasets.find(d => d.label === 'TOTAL').data;
+  ok('the curve moved with the filter',
+     tot2.length !== 0 && tot2[tot2.length - 1].y !== endBefore, true);
+
   // THE CARD'S FIELDS DO NOT OVERLAP. Two lines: name above, numbers below.
   const card = document.querySelector('.bp-card');
   const name = card.querySelector('.bp-name').getBoundingClientRect();
@@ -245,6 +308,17 @@ def main() -> int:
     tmp = ROOT / "scripts" / "_portfolio_ui.html"
     tmp.write_text(page, encoding="utf-8")
     try:
+        # `--shot PATH` also writes the picture. The gate reads numbers; a
+        # person reviewing a layout change wants to look at it, and building
+        # the page twice from two scripts is how the two drift.
+        if "--shot" in sys.argv:
+            shot = sys.argv[sys.argv.index("--shot") + 1]
+            subprocess.run(
+                [browser, "--headless=new", "--disable-gpu",
+                 "--window-size=1600,2400", f"--screenshot={shot}",
+                 "--virtual-time-budget=6000", tmp.as_uri()],
+                capture_output=True, timeout=180)
+            print(f"  wrote {shot}")
         p = subprocess.run(
             [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1000",
              "--dump-dom", "--virtual-time-budget=6000", tmp.as_uri()],

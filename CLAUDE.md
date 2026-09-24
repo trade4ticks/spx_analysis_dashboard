@@ -236,7 +236,8 @@ and how the combination performs. Spec'd from the old Dash app
 read as a specification, not a template.
 
 **Phases:** P1 scaffold + load — done; P2 filters, allocation, summary
-table with TOTAL row — done; P3 equity/drawdown/capital deployed; P4
+table with TOTAL row — done; P3 equity/drawdown/capital deployed/monthly
+P&L — done; P4
 correlation (BOTH correlations weekly — the old app's matrix was weekly and
 its rolling pairwise was daily); P5 saved profiles; P6 distribution, overlap,
 rolling risk (Sharpe/Sortino); P7 docs.
@@ -319,6 +320,32 @@ with a published Sharpe.
 - **Sharpe** is kept from the old app, with the rolling Sharpe/Sortino
   section (P6).
 - **Surface metrics are not in v1.**
+
+**P3's decisions.** Equity and drawdown sit SIDE BY SIDE sharing an x axis
+(stacked, the pair is two screens apart and the trough no longer lines up
+with the dip). The curves are built in the SAME pass as the table, from the
+same filtered indices — a second pass that re-derived them could disagree
+with the numbers directly above, which is the one thing a chart beside a
+table must not do. `obDailyCurve` reduces the trade-level equity to one point
+per close date, keeping each day's day-END cumulative and its WORST
+drawdown: the worst trade-level point always falls on some day, so the
+chart's trough IS the table's Max DD rather than a shallower day-boundary
+reading of it (the gate asserts the two strings match). Only the PORTFOLIO's
+drawdown is drawn — one curve per strategy on the same axes is a picture of
+nothing in particular. Capital deployed is the summed per-strategy series,
+stepped (it changes at a close), and its peak is the figure `ann ret %`
+divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
+nothing to lay out and the numbers want to be readable; shade is the month's
+size against the biggest month, the same opacity rule the bar charts use, and
+year totals carry a bar beside them. Everything is dated by CLOSE.
+
+**Switching a categorical filter on keeps everything.** `bpSpecs` skips a set
+filter with no members (matching the old app), so "on with nothing chosen"
+was an ACTIVE-looking filter that changed nothing — the inert-filter failure
+the scalp page already has a line about. Enabling one now selects every
+category, and you untick what you do not want; if you untick them all the
+cell says "nothing chosen — not filtering" rather than implying it keeps
+none.
 
 **The parse cache** (`app/oo_backtest/parsed_cache.py`). A 2,100-trade
 MesoSim log is ~57 MB and takes **3.4 s** to parse here; five strategies is

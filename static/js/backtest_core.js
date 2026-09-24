@@ -314,3 +314,43 @@ function obDeployedSeries(conc, sessions, capital) {
   }
   return out;
 }
+
+
+/* One point per CLOSE DATE from a trade-level equity curve.
+ *
+ * The curve is computed per TRADE (obEquity) because that is where max
+ * drawdown is defined and what the summary table reports; drawing every
+ * trade would be ten thousand points a strategy. So each date keeps its
+ * day-END cumulative and its WORST drawdown of the day -- the worst
+ * trade-level point always falls on some day, so the chart's minimum equals
+ * the table's Max DD exactly rather than being a slightly shallower
+ * day-boundary reading of it. */
+function obDailyCurve(eq) {
+  const out = [];
+  for (const p of eq.points) {
+    const last = out.length ? out[out.length - 1] : null;
+    if (last && last.date === p.date) {
+      last.cumulative = p.cumulative;
+      last.peak = p.peak;
+      if (p.drawdown < last.drawdown) last.drawdown = p.drawdown;
+    } else {
+      out.push({ date: p.date, cumulative: p.cumulative, peak: p.peak,
+                 drawdown: p.drawdown });
+    }
+  }
+  return out;
+}
+
+
+/* P/L by calendar month, keyed "YYYY-MM", dated by CLOSE like everything
+ * else on these pages. */
+function obMonthlyPnl(cols, idx) {
+  const out = new Map();
+  for (const i of idx) {
+    const d = cols.date_closed[i];
+    if (!d) continue;
+    const k = d.slice(0, 7);
+    out.set(k, (out.get(k) || 0) + cols.pnl[i]);
+  }
+  return out;
+}
