@@ -380,6 +380,34 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('sorted by strength',
      rhos.every((v, i) => i === 0 || rhos[i - 1] >= v - 1e-12), true);
 
+  // ── THE CARDS SHOW THEIR FILTERS ──────────────────────────────────
+  // Without these you cannot tell which of several strategies is filtered
+  // without opening each panel in turn, which is the point of having them
+  // side by side. The old app put them here and this was missed.
+  const cards = [...document.querySelectorAll('.bp-card')];
+  const weeklyCard = cards[1];
+  const badges = [...weeklyCard.querySelectorAll('.bp-badge')]
+    .map(b => b.textContent.trim());
+  ok('the filtered strategy shows badges', badges.length > 0, true);
+  ok('a range badge reads label and bounds',
+     badges.some(t => t.includes('VIX Level:') && t.includes('–')), true);
+  ok('the unfiltered strategy shows none',
+     cards[0].querySelectorAll('.bp-badge').length, 0);
+  // A range badge carries one decimal, as the old app wrote them.
+  const vixBadge = badges.find(t => t.startsWith('VIX Level:'));
+  ok('one decimal on the bounds', /[0-9]\.[0-9][^0-9]/.test(vixBadge + ' '), true);
+  // The card carries the strategy's colour on its edge.
+  ok('the card wears its colour',
+     getComputedStyle(cards[0]).borderLeftWidth, '3px');
+
+  // ── THE ANNUAL BARS, beside the monthly grid ──────────────────────
+  const yr = Chart.getChart('bp-year-chart');
+  ok('the annual bar chart drew', !!yr, true);
+  ok('a bar per year', yr && yr.data.labels.length, cc.months.years.length);
+  ok('the bars are the year totals',
+     yr && yr.data.datasets[0].data[0],
+     cc.months.totals[cc.months.years[0]]);
+
   // ── P5: PROFILES ──────────────────────────────────────────────────
   // Saved and reloaded by CLICKING, with the filters and the allocation it
   // was saved with.

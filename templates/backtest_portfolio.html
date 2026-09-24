@@ -40,7 +40,12 @@
        beside the name they overlapped it -- 400px does not hold a name, two
        number inputs and a button abreast, and the name is the part that
        cannot be truncated to nothing. */
-    .bp-card { padding:7px 8px; border-bottom:1px solid var(--border); }
+    /* The 3px edge in the strategy's colour, as the old card had it. */
+    .bp-card { padding:7px 8px 8px 9px; border-bottom:1px solid var(--border);
+               border-left:3px solid transparent; }
+    .bp-badges { display:flex; flex-wrap:wrap; gap:3px; margin-top:5px; }
+    .bp-badge { font-size:9.5px; line-height:1.5; padding:1px 7px;
+                border-radius:9px; white-space:nowrap; font-weight:600; }
     .bp-card:last-child { border-bottom:0; }
     .bp-cline { display:flex; align-items:center; gap:6px; }
     .bp-cfields { display:flex; align-items:flex-end; gap:8px; margin-top:5px; }
@@ -173,9 +178,14 @@
     .bp-matrix td { padding:1px; }
     .bp-mx { min-width:64px; height:24px; display:flex; align-items:center;
              justify-content:center; border-radius:2px; color:var(--text); }
-    .bp-corrgrid { display:grid; gap:10px;
+    .bp-corrgrid { display:grid; gap:14px;
                    grid-template-columns:minmax(320px, 1fr) minmax(320px, 1fr); }
     @media (max-width: 1100px) { .bp-corrgrid { grid-template-columns:1fr; } }
+    /* The heatmap takes the width; the annual bars sit beside it, as they
+       did in the old app (md=8 / md=4). */
+    .bp-monthgrid { display:grid; gap:14px; grid-template-columns:2fr 1fr;
+                    align-items:start; }
+    @media (max-width: 1100px) { .bp-monthgrid { grid-template-columns:1fr; } }
     .bp-sel { background:var(--raised); border:1px solid var(--border);
               color:var(--text); font-size:11px; padding:3px 6px;
               border-radius:4px; color-scheme:dark; }
@@ -292,7 +302,7 @@
         </div>
 
         <template x-for="(c, i) in chosen" :key="c.id">
-          <div class="bp-card">
+          <div class="bp-card" :style="'border-left-color:' + colorOf(i)">
             <div class="bp-cline">
               <span class="bp-swatch" :style="'background:' + colorOf(i)"></span>
               <span class="bp-name" x-text="c.name"></span>
@@ -304,6 +314,18 @@
                  for in a 400px sidebar: the inputs sat on top of the text.
                  They stay in the card -- they are adjusted constantly while
                  watching the table -- and get a line of their own. -->
+            <!-- ACTIVE FILTERS, on the card. The old app put them here and
+                 they are how you see which of several strategies is
+                 filtered without opening each panel. -->
+            <template x-if="badges(c).length">
+              <div class="bp-badges">
+                <template x-for="b in badges(c)" :key="b.key">
+                  <span class="bp-badge"
+                        :style="'background:' + b.bg + ';color:' + b.fg"
+                        x-text="b.text"></span>
+                </template>
+              </div>
+            </template>
             <div class="bp-cfields">
               <label class="bp-field">
                 <span class="bp-flabel">qty</span>
@@ -585,7 +607,9 @@
           <span class="ob-card-title">Monthly P/L</span>
           <span class="ob-card-sub" x-text="monthsSub()"></span>
         </div>
-        <div class="ob-card-body bp-scroll">
+        <div class="ob-card-body">
+          <div class="bp-monthgrid">
+          <div class="bp-scroll">
           <table class="bp-months">
             <thead>
               <tr>
@@ -617,6 +641,18 @@
               </template>
             </tbody>
           </table>
+          </div>
+          <!-- THE ANNUAL BARS, beside the grid rather than inside it: the
+               old app's arrangement, and a chart compares years at a glance
+               where a column of numbers does not. -->
+          <div>
+            <div class="ob-lbl">By year</div>
+            <div class="bp-chart" style="height:280px">
+              <canvas id="bp-year-chart" role="img"
+                      aria-label="Portfolio P/L by year"></canvas>
+            </div>
+          </div>
+          </div>
           <div class="ob-note" style="margin-top:8px">
             Dated by close, like everything else here: a trade lands in the
             month it was closed in, whatever month it was opened in. Shade is
@@ -625,49 +661,38 @@
         </div>
       </div>
 
+      <!-- METRIC AND STRATEGY CORRELATION SIDE BY SIDE, with the pairwise
+           scatter full width beneath them: the old app's card, rebuilt. -->
       <div class="ob-card" x-show="corr.metrics.length" x-cloak>
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Metric vs P/L</span>
-          <span class="ob-card-sub">Spearman, pooled across strategies</span>
-        </div>
-        <div class="ob-card-body bp-scroll">
-          <table class="bp-matrix">
-            <thead>
-              <tr><th class="l">metric</th><th>rho</th><th>trades</th></tr>
-            </thead>
-            <tbody>
-              <template x-for="m in corr.metrics" :key="m.key">
-                <tr>
-                  <th class="l" x-text="m.label"></th>
-                  <td>
-                    <div class="bp-mx" :style="'background:' + metricRow(m).bg"
-                         x-text="metricRow(m).text"></div>
-                  </td>
-                  <td style="text-align:right;padding-right:8px;color:var(--dim)"
-                      x-text="m.n.toLocaleString()"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-          <div class="ob-note" style="margin-top:8px">
-            Rank correlation between each metric at ENTRY and the trade's P/L,
-            over the filtered trades of every strategy pooled. Pooling mixes
-            strategies that traded at different times, so this says what the
-            PORTFOLIO's P/L moved with — not what any one strategy's did. Ties
-            are averaged, and a metric with fewer than ten values is left
-            blank rather than given a number nobody should read.
-          </div>
-        </div>
-      </div>
-
-      <div class="ob-card" x-show="corr.names.length > 1" x-cloak>
-        <div class="ob-card-hdr">
-          <span class="ob-card-title">Strategy correlation</span>
+          <span class="ob-card-title">Correlation</span>
           <span class="ob-card-sub" x-text="corrSub()"></span>
         </div>
         <div class="ob-card-body">
           <div class="bp-corrgrid">
             <div class="bp-scroll">
+              <div class="ob-lbl">Metric vs P/L — Spearman, pooled</div>
+              <table class="bp-matrix">
+                <thead>
+                  <tr><th class="l">metric</th><th>rho</th><th>trades</th></tr>
+                </thead>
+                <tbody>
+                  <template x-for="m in corr.metrics" :key="m.key">
+                    <tr>
+                      <th class="l" x-text="m.label"></th>
+                      <td>
+                        <div class="bp-mx" :style="'background:' + metricRow(m).bg"
+                             x-text="metricRow(m).text"></div>
+                      </td>
+                      <td style="text-align:right;padding-right:8px;color:var(--dim)"
+                          x-text="m.n.toLocaleString()"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="bp-scroll" x-show="corr.names.length > 1" x-cloak>
+              <div class="ob-lbl">Strategy P/L — Pearson, weekly</div>
               <table class="bp-matrix">
                 <thead>
                   <tr>
@@ -692,34 +717,40 @@
                 </tbody>
               </table>
             </div>
-            <div>
-              <div class="ob-row" style="margin-top:0">
-                <span class="ob-lbl">pair</span>
-                <select class="bp-sel" x-model.number="pairA" @change="onPair()">
-                  <template x-for="(nm, i) in corr.names" :key="'a' + i">
-                    <option :value="i" x-text="nm"></option>
-                  </template>
-                </select>
-                <select class="bp-sel" x-model.number="pairB" @change="onPair()">
-                  <template x-for="(nm, i) in corr.names" :key="'b' + i">
-                    <option :value="i" x-text="nm"></option>
-                  </template>
-                </select>
-                <span class="ob-note" x-text="pairSub()"></span>
-              </div>
-              <div class="bp-chart" style="height:220px">
-                <canvas id="bp-sc-chart" role="img"
-                        aria-label="Weekly P/L of one strategy against another"></canvas>
-              </div>
+          </div>
+
+          <div x-show="corr.names.length > 1" x-cloak
+               style="border-top:1px solid var(--border);margin-top:10px;padding-top:8px">
+            <div class="ob-row" style="margin-top:0">
+              <span class="ob-lbl">pair</span>
+              <select class="bp-sel" x-model.number="pairA" @change="onPair()">
+                <template x-for="(nm, i) in corr.names" :key="'a' + i">
+                  <option :value="i" x-text="nm"></option>
+                </template>
+              </select>
+              <select class="bp-sel" x-model.number="pairB" @change="onPair()">
+                <template x-for="(nm, i) in corr.names" :key="'b' + i">
+                  <option :value="i" x-text="nm"></option>
+                </template>
+              </select>
+              <span class="ob-note" x-text="pairSub()"></span>
+            </div>
+            <div class="bp-chart" style="height:300px">
+              <canvas id="bp-sc-chart" role="img"
+                      aria-label="Weekly P/L of one strategy against another"></canvas>
             </div>
           </div>
+
           <div class="ob-note" style="margin-top:6px">
-            Pearson on <b>weekly</b> P/L, dated by close. Weekly because
-            strategies close on their own schedules: a daily series is mostly
-            zeros, and correlating mostly zeros measures how often two
-            strategies happened to close on the same day. Weeks where nothing
-            closed anywhere are dropped for the same reason — matching zeros
-            would pull every pair toward +1.
+            Metric vs P/L is rank correlation between each metric at ENTRY and
+            the trade's P/L, over every strategy's filtered trades pooled —
+            what the PORTFOLIO's P/L moved with, not what any one strategy's
+            did. Nothing is reported from fewer than ten values. Strategy
+            correlation is Pearson on <b>weekly</b> P/L: strategies close on
+            their own schedules, so a daily series is mostly zeros and
+            correlating mostly zeros measures how often two happened to close
+            on the same day. Weeks where nothing closed anywhere are dropped
+            for the same reason.
           </div>
         </div>
       </div>

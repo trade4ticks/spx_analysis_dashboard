@@ -338,6 +338,29 @@ nothing to lay out and the numbers want to be readable; shade is the month's
 size against the biggest month, the same opacity rule the bar charts use, and
 year totals carry a bar beside them. Everything is dated by CLOSE.
 
+**The sidebar card carries its ACTIVE FILTER BADGES** — "VIX Level: 12.0–30.0",
+"Day of Week: Fri" — ported from the old app's `METRIC_BADGE_COLORS` (pale
+ground, darker same-hue text) and keyed by registry key, with the old
+wording rules: a range shows one decimal, a categorical with everything
+chosen shows just its label (all of them is not a narrowing), and a long list
+shows the first two with an ellipsis. Without them you cannot tell which of
+several strategies is filtered without opening each panel in turn, which is
+the point of having them side by side. **This was in the brief and was
+missed, not deferred** (2026-09-25) — as was the annual bar CHART beside the
+monthly grid, and the old app's arrangement of the correlation card (metric
+and strategy tables side by side, scatter full width beneath). All three are
+now built.
+
+**Known departures from the old page, agreed rather than missed:** the
+Strategy Builder is gone (qty and capital are inline in the cards, filters
+are the main-column panel); the date range is a union/intersection toggle
+where the old app had two date pickers; profile saving is an inline name box
+with a 409-driven Replace prompt where the old app had a modal with a
+checkbox; the summary table has 16 columns against the old 13 (our
+definitions won); the rolling pairwise window is in WEEKS. **Still to build:
+P6** — P&L distribution, trade overlap, and rolling risk metrics (the old
+app's 30/90/180 selector, to be decided in weeks or days).
+
 **P5: profiles are POINTERS, not snapshots.** A profile
 (`backtest_portfolio_profiles`, JSONB) holds the strategy ids with their qty,
 capital and filters, plus the range mode and rolling window — no trades and

@@ -33,7 +33,8 @@ const BP_DATA = {
 /* Chart.js instances. Outside Alpine for the same reason the trades are: a
  * chart is not state a template reads, and a reactive proxy around one is a
  * proxy around every point in it. */
-const BP_CHARTS = { eq: null, dd: null, cap: null, sc: null, roll: null };
+const BP_CHARTS = { eq: null, dd: null, cap: null, sc: null, roll: null,
+                    year: null };
 
 /* A hex colour at an opacity, for the rolling lines. */
 function obRgbaFrom(hex, a) {
@@ -41,6 +42,25 @@ function obRgbaFrom(hex, a) {
   const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
+
+/* Badge colours per metric, ported from the old app's METRIC_BADGE_COLORS:
+ * a pale ground with darker text of the same family, which is what makes a
+ * row of them readable at a glance on a dark card. Keyed by the REGISTRY's
+ * key (the old app's "dow" is our "day_of_week"); anything the registry
+ * grows later falls back to the old default rather than being invented. */
+const BP_BADGE = {
+  vix:          ['#cce5ff', '#0d4a8a'],
+  vix3m:        ['#d4d8ff', '#2d3494'],
+  vix9d:        ['#e8d5ff', '#5b21b6'],
+  gap:          ['#fff3c4', '#855a00'],
+  vix_gap:      ['#ffe8cc', '#8a3a00'],
+  premium:      ['#c6f6d5', '#166534'],
+  vix3m_vix:    ['#b2f0f7', '#065a6b'],
+  vix_vix9d:    ['#b2f0eb', '#075c56'],
+  day_of_week:  ['#e2e8f0', '#374151'],
+  exit_reason:  ['#d1d5db', '#1f2937'],
+};
+const BP_BADGE_FALLBACK = ['#1e2030', '#888888'];
 
 const BP_BLUE = '#3498db';
 const BP_PINK = '#e84393';
@@ -714,6 +734,43 @@ document.addEventListener('alpine:init', () => {
       return n;
     },
 
+    /* What a card shows about its filters: one badge per ACTIVE filter,
+     * worded as the old app worded them — "VIX3M/VIX Ratio: 0.7–1.1",
+     * "Premium: 55.0–3480.0", "Day of Week: Fri". Without these you cannot
+     * tell which of several strategies is filtered without opening each
+     * panel in turn, which is the whole point of having them side by side.
+     */
+    badges(c) {
+      void this.tick;
+      const out = [];
+      for (const m of this.registry) {
+        const f = c.filters && c.filters[m.key];
+        if (!f || !f.on) continue;
+        const [bg, fg] = BP_BADGE[m.key] || BP_BADGE_FALLBACK;
+        out.push({ key: m.key, bg, fg, text: this.badgeText(c, m, f) });
+      }
+      return out;
+    },
+
+    badgeText(c, m, f) {
+      if (m.type === 'categorical') {
+        const all = this.categoriesFor(c, m);
+        const chosen = f.allowed || [];
+        // ALL OF THEM IS NOT A NARROWING, so the badge is just the label --
+        // the old app's rule, and it keeps a row of badges meaningful.
+        if (!chosen.length || chosen.length >= all.length) return m.label;
+        const labels = chosen.map(v => {
+          const hit = all.find(x => String(x.value) === String(v));
+          return hit ? hit.label : String(v);
+        });
+        const shown = labels.slice(0, 2).join(',');
+        return `${m.label}: ${shown}${labels.length > 2 ? '…' : ''}`;
+      }
+      const lo = Number(f.lo), hi = Number(f.hi);
+      if (!isFinite(lo) || !isFinite(hi)) return m.label;
+      return `${m.label}: ${lo.toFixed(1)}–${hi.toFixed(1)}`;
+    },
+
     filterBadge(c) {
       const n = this.activeCount(c);
       return n ? `${n} filter${n === 1 ? '' : 's'}` : 'no filters';
@@ -1075,9 +1132,50 @@ document.addEventListener('alpine:init', () => {
               label: it => `${it.dataset.label}: ${it.parsed.y.toFixed(2)}` } } } });
       }
 
+      // BY YEAR, beside the monthly grid. Blue up, pink down, the page's
+      // two colours doing the same job they do everywhere else here.
+      const years = this.months.years;
+      if (years.length) {
+        const vals = years.map(y => this.months.totals[y] || 0);
+        this.drawBar('year', 'bp-year-chart', {
+          labels: years,
+          datasets: [{ data: vals,
+                       backgroundColor: vals.map(v => v >= 0
+                         ? 'rgba(52,152,219,0.75)' : 'rgba(232,67,147,0.75)'),
+                       borderWidth: 0 }],
+        }, {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          indexAxis: 'y',
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.05)' },
+                 border: { display: false },
+                 ticks: { color: '#9a9a9a', font: { size: 10 },
+                          maxTicksLimit: 5, callback: v => bpFmtMoney(v) } },
+            y: { grid: { display: false }, border: { display: false },
+                 ticks: { color: '#9a9a9a', font: { size: 10 } } },
+          },
+          plugins: { legend: { display: false }, tooltip: { callbacks: {
+            label: it => bpFmtMoney(it.parsed.x) } } },
+        });
+      }
+
       this.draw('cap', 'bp-cap-chart', capData,
                 base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
                      cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}));
+    },
+
+    drawBar(key, id, data, options) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const live = BP_CHARTS[key];
+      if (live && live.canvas === el) {
+        live.data = data;
+        live.options = options;
+        live.update('none');
+        return;
+      }
+      if (live) live.destroy();
+      BP_CHARTS[key] = new Chart(el.getContext('2d'), { type: 'bar', data, options });
     },
 
     draw(key, id, data, options) {
