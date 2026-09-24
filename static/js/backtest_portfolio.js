@@ -318,7 +318,35 @@ document.addEventListener('alpine:init', () => {
     // nine metrics times however many strategies on a page whose job is the
     // comparison between them; the sidebar row says which is being edited
     // and how many filters it carries.
-    toggleEdit(id) { this.editing = (this.editing === id ? 0 : id); },
+    /* NOT GATED ON THE PORTFOLIO BEING LOADED. It was, with
+     * `:disabled="!loaded.length"` on the button, and that is a regression
+     * the user hit: before the panel moved out of the sidebar it opened
+     * whenever a strategy was in the list, and a disabled button that keeps
+     * its text colour looks exactly like a working one that does nothing.
+     * Filters set before a load are applied by the load, so there is
+     * nothing to protect; what the panel cannot do yet is show RANGES, and
+     * it says which of the two it is. */
+    toggleEdit(id) {
+      this.ensureFilters(id);
+      this.editing = (this.editing === id ? 0 : id);
+    },
+
+    /* Fill in any metric the registry has that this strategy's filter map
+     * does not. `add()` builds the map from the registry as it stands, so a
+     * strategy added before /registry answered -- or after a metric is added
+     * upstream -- would otherwise have a hole, and the panel reads
+     * `c.filters[m.key].on` straight into a TypeError. */
+    ensureFilters(id) {
+      const c = this.chosen.find(x => x.id === id);
+      if (!c) return;
+      if (!c.filters) c.filters = {};
+      for (const m of this.registry) {
+        if (c.filters[m.key]) continue;
+        c.filters[m.key] = (m.type === 'range')
+          ? { on: false, lo: m.min, hi: m.max }
+          : { on: false, allowed: [] };
+      }
+    },
 
     editingRow() { return this.chosen.find(c => c.id === this.editing) || null; },
 
@@ -430,6 +458,17 @@ document.addEventListener('alpine:init', () => {
       return v.toFixed(2);
     },
 
+    /* Why a range metric has no slider: not loaded yet, or loaded and the
+     * column is empty. Different problems, different fixes, and "no values
+     * in this log" would be a lie before the load. */
+    noValueNote(m) {
+      const c = this.editingRow();
+      if (c && !BP_DATA.payloads[c.id]) {
+        return 'load the portfolio to see this strategy\'s values';
+      }
+      return `no values in this log (${m.column})`;
+    },
+
     rangeSummary(m) {
       const r = this.rangeOf(m);
       if (!r) return '';
@@ -441,8 +480,12 @@ document.addEventListener('alpine:init', () => {
      * trades — from the data, not from a list written here. `exit_reason`
      * has no declared categories because they are whatever the file says. */
     categoriesFor(c, m) {
-      const p = BP_DATA.payloads[c.id];
+      // NULL-SAFE because Alpine evaluates an x-for's expression once more
+      // as the x-if around it is torn down -- with `editing` already 0, so
+      // `editingRow()` is null. Closing the panel logged an expression
+      // error every time; nothing broke, which is how it went unnoticed.
       if (m.categories && m.categories.length) return m.categories;
+      const p = c && BP_DATA.payloads[c.id];
       if (!p) return [];
       return obDistinct(p.columns[m.column] || [])
         .map(v => ({ value: v, label: String(v) }));
@@ -462,7 +505,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     isChosenCategory(c, m, value) {
-      const f = c.filters[m.key];
+      const f = c && c.filters && c.filters[m.key];
       return !!(f && f.allowed.includes(value));
     },
 

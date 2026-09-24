@@ -156,6 +156,11 @@ GATES = [
     # longer produce, so the gate compares payloads, not frames.
     _s("check_portfolio.py",
        note="a cached parse produces the same payload as a fresh one"),
+    # The page DRIVEN BY CLICKING, in a real browser. Every source-level
+    # check passed while the Filters button was disabled and did nothing;
+    # only clicking it could see that. Skips where there is no browser.
+    _s("check_portfolio_ui.py", can_skip=True,
+       note="the buttons a person presses actually do their thing"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
 

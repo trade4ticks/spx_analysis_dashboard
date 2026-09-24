@@ -1,0 +1,280 @@
+"""The Backtest Portfolio page, DRIVEN BY CLICKING, in a real browser.
+
+WHY THIS EXISTS, in the words of the fault that produced it. The Filters
+button stopped opening the panel. Every check passed: the panel was `x-if`,
+it was in the main column, its arithmetic was right, and a browser check even
+read its geometry on screen. All of them opened the panel by CALLING
+`toggleEdit()`. Nothing clicked the button, so `:disabled="!loaded.length"`
+-- added with the panel and looking identical to an enabled button, because
+the disabled style kept the text colour -- went unnoticed until it was used.
+
+So: this clicks what a person clicks, on the page as rendered, and reads what
+the page does. It also captures `window.onerror` and `console.error`, because
+an Alpine expression error does not stop the page -- it logs and leaves the
+control inert, which is exactly the shape of the bug above. Closing the panel
+was logging one on every click and nothing said so.
+
+WHERE IT RUNS: a machine with Edge. The VPS has none, so it SKIPS there
+rather than passing -- a check that cannot run has not run. Registered in
+gates.py with can_skip.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+EXIT_SKIPPED = 3
+EDGE_CANDIDATES = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    "/usr/bin/microsoft-edge",
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome",
+]
+
+
+def find_browser() -> str | None:
+    for p in EDGE_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+def build_page() -> str:
+    """The real template, with its own CSS and JS inlined so file:// works."""
+    import jinja2
+    import pandas as pd
+
+    from app.assets import asset
+    from app.oo_backtest.registry import registry_with_coverage
+
+    class _URL:
+        hostname = "localhost"; scheme = "http"; path = "/"
+        def __str__(self): return "http://localhost/"
+
+    class _Req:
+        url = _URL(); headers = {}; query_params = {}; scope = {"type": "http"}
+
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(ROOT / "templates")),
+        autoescape=True, keep_trailing_newline=True)
+    env.globals["asset"] = asset
+    env.globals["live_port"] = 8001
+    html = env.get_template("backtest_portfolio.html").render(request=_Req())
+    html = re.sub(
+        r'<link rel="stylesheet" href=[^>]*css/([a-z_]+\.css)[^>]*>',
+        lambda m: "<style>\n" + (ROOT / "static/css" / m.group(1)).read_text(encoding="utf-8") + "\n</style>",
+        html)
+    html = re.sub(
+        r"<script src=[^>]*?/static/js/([a-z_]+\.js)[^>]*></script>",
+        lambda m: "<script>\n" + (ROOT / "static/js" / m.group(1)).read_text(encoding="utf-8") + "\n</script>",
+        html)
+
+    sessions = [d.date().isoformat() for d in pd.bdate_range("2023-01-02", "2026-12-31")]
+
+    def payload(sid, name, color, cap, n, start, step, hold, pnls, vix_from):
+        d0 = dt.date.fromisoformat(start)
+        op = [(d0 + dt.timedelta(days=i * step)).isoformat() for i in range(n)]
+        cl = [(dt.date.fromisoformat(o) + dt.timedelta(days=hold)).isoformat() for o in op]
+        return {
+            "saved": {"id": sid, "name": name, "capital_per_position": cap,
+                      "trade_count": n},
+            "filename": f"{name}.json", "color": color, "n": n,
+            "date_min": op[0], "date_max": cl[-1],
+            "capital_per_position": cap, "qty": 1,
+            "parse": {"source": "cache", "seconds": 0.04, "rows": n},
+            "market": {"joined": True, "spx_sessions": sessions},
+            "columns": {
+                "date_opened": op, "date_closed": cl,
+                "pnl": [pnls[i % len(pnls)] for i in range(n)],
+                "days_in_trade": [hold] * n,
+                "day_of_week": [dt.date.fromisoformat(d).weekday() for d in op],
+                "exit_reason": ["profit target"] * n,
+                # A metric whose coverage starts late, so a filter on it has
+                # a cost the panel has to state.
+                "vix_level": [None if i < vix_from else 14 + (i % 9) for i in range(n)],
+            },
+        }
+
+    a = payload(1, "monthly", "#3498db", 25000, 40, "2023-01-03", 30, 30, [100.0], 0)
+    b = payload(2, "weekly", "#e84393", 10000, 40, "2023-01-06", 7, 7, [300.0, -100.0], 10)
+    reg = [m for m in registry_with_coverage(None) if m.get("filter")]
+    return html.replace("</head>", (STUB % (json.dumps([a, b]), json.dumps(reg))) + "</head>", 1)
+
+
+STUB = """
+<script>
+window.__errs = [];
+window.onerror = (m) => window.__errs.push('error: ' + m);
+window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
+(function () {
+  const ce = console.error, cw = console.warn;
+  console.error = (...a) => { window.__errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); };
+  console.warn = (...a) => { window.__errs.push('console.warn: ' + a.map(String).join(' ')); cw(...a); };
+})();
+
+const LOADED = %s;
+window.fetch = async (u) => ({ok: true, json: async () => {
+  if (String(u).includes('/strategies')) return {strategies: [
+    {id:1,name:'monthly',trade_count:40,capital_per_position:25000},
+    {id:2,name:'weekly',trade_count:40,capital_per_position:10000}],
+    colors:['#3498db','#e84393'], max:12};
+  if (String(u).includes('/registry')) return {metrics: %s};
+  if (String(u).includes('/load')) return {strategies: LOADED,
+    load: {seconds: 0.2, n: 2, from_cache: 2, parsed: 0}};
+  return {};
+}});
+
+window.addEventListener('load', () => setTimeout(async () => {
+  const out = [];
+  try {
+  const ok = (k, got, want) => out.push(
+    (String(got) === String(want) ? 'ok|' : 'FAIL|') + k + '|' + got + '|' + want);
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const c = Alpine.$data(document.querySelector('[x-data]'));
+  const side = () => [...document.querySelectorAll('.ob-side button')];
+  const filterBtns = () => side().filter(b => /filter|editing/i.test(b.textContent));
+  const panels = () => document.querySelectorAll('.bp-fgrid').length;
+
+  // ADD TWO STRATEGIES THE WAY A PERSON DOES: choose in the dropdown, then
+  // press Add. The SELECT is driven with a real input event rather than by
+  // assigning to the component -- writing `pick` directly raced x-model,
+  // which re-synced the select and wrote its old value back, so the second
+  // Add did nothing. Driving the control is the point of this file.
+  const choose = async (id) => {
+    const sel = document.querySelector('.ob-side select');
+    sel.value = String(id);
+    // BOTH EVENTS: Alpine's x-model listens for `change` on a <select>, not
+    // `input`, so dispatching only the latter left `pick` at 0 and the Add
+    // button disabled -- and a click on a disabled button does nothing,
+    // silently, which is the same shape as the bug being tested for.
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await wait(40);
+    side().find(b => b.textContent.trim() === 'Add').click();
+    await wait(60);
+  };
+  await choose(1);
+  await choose(2);
+  ok('two strategies added', c.chosen.length, 2);
+
+  // THE BUTTON WORKS BEFORE A LOAD. It was disabled here, which is the
+  // regression this file exists for.
+  const early = filterBtns();
+  ok('a filter button per strategy', early.length, 2);
+  ok('not disabled before loading', early[0].disabled, false);
+  early[0].click();
+  await wait(120);
+  ok('clicking opens the panel', panels(), 1);
+  // Across the PANEL, not the first cell: that one is categorical (Day of
+  // Week) and has no range to be missing.
+  ok('the panel says values need a load',
+     /load the portfolio/i.test(document.querySelector('.bp-fgrid').textContent), true);
+  early[0].click();
+  await wait(100);
+  ok('clicking again closes it', panels(), 0);
+
+  // LOAD, then drive the panel by clicking.
+  side().find(b => /load portfolio/i.test(b.textContent)).click();
+  await wait(250);
+  ok('the summary table drew', document.querySelectorAll('.bp-table tr.total').length, 1);
+
+  const btn = filterBtns()[1];
+  btn.click();
+  await wait(150);
+  ok('the second strategy opens', c.editing, 2);
+  ok('its panel is on screen',
+     document.querySelector('.bp-fgrid').offsetHeight > 0, true);
+  ok('the panel is in the main column',
+     !!document.querySelector('.ob-main .bp-fgrid'), true);
+  ok('no sliders in the sidebar',
+     document.querySelectorAll('.ob-side .ob-dual').length, 0);
+
+  // A CHECKBOX, CLICKED, changes the table.
+  const before = document.querySelector('.bp-table tr.total td:nth-child(2)').textContent;
+  const boxes = [...document.querySelectorAll('.bp-fcell input[type=checkbox]')];
+  const vixBox = boxes.find(b => /vix level/i.test(b.closest('.bp-fcell').textContent));
+  vixBox.click();
+  await wait(150);
+  ok('ticking a filter changes the table',
+     document.querySelector('.bp-table tr.total td:nth-child(2)').textContent !== before, true);
+  ok('and the row states its cost',
+     /no value for an active filter/.test(document.body.textContent), true);
+
+  // THE CARD'S FIELDS DO NOT OVERLAP. Two lines: name above, numbers below.
+  const card = document.querySelector('.bp-card');
+  const name = card.querySelector('.bp-name').getBoundingClientRect();
+  const qty = card.querySelector('input[type=number]').getBoundingClientRect();
+  ok('qty sits BELOW the name', qty.top >= name.bottom - 1, true);
+  ok('qty is labelled', /qty/i.test(card.querySelector('.bp-flabel').textContent), true);
+  ok('the card fits the sidebar',
+     card.scrollWidth <= card.clientWidth + 1, true);
+
+  } catch (e) {
+    // A THROW IS A FINDING, not a lost run: without this the page simply
+    // never reports and the gate can only say "it did not get that far".
+    out.push('FAIL|the driver threw|' + (e && e.message ? e.message : e) + '|no throw');
+  }
+  out.push('errs|' + (window.__errs.length ? window.__errs.slice(0, 3).join(' ~ ') : 'clean'));
+  const pre = document.createElement('pre');
+  pre.id = 'report';
+  pre.textContent = out.join('\\n');
+  document.body.appendChild(pre);
+}, 400));
+</script>
+"""
+
+
+def main() -> int:
+    browser = find_browser()
+    if browser is None:
+        print("  SKIP  no Edge/Chromium on this host — the page was NOT driven")
+        return EXIT_SKIPPED
+    try:
+        page = build_page()
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  the page could not be rendered: {type(exc).__name__}: {exc}")
+        return 1
+    tmp = ROOT / "scripts" / "_portfolio_ui.html"
+    tmp.write_text(page, encoding="utf-8")
+    try:
+        p = subprocess.run(
+            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1000",
+             "--dump-dom", "--virtual-time-budget=6000", tmp.as_uri()],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    m = re.search(r'<pre id="report">(.*?)</pre>', p.stdout, re.S)
+    if not m:
+        print("  the page never reported — it did not get that far")
+        print("   ", (p.stdout or "")[-400:].replace("\n", " ")[:400])
+        return 1
+
+    import html as _html
+    fails = 0
+    for line in _html.unescape(m.group(1)).strip().splitlines():
+        parts = line.split("|")
+        if parts[0] == "errs":
+            if parts[1] != "clean":
+                print(f"  FAIL  the console is not clean: {parts[1]}")
+                fails += 1
+            continue
+        status, name, got, want = parts[0], parts[1], parts[2], parts[3]
+        if status != "ok":
+            print(f"  FAIL  {name}: {got} (want {want})")
+            fails += 1
+    n = len(_html.unescape(m.group(1)).strip().splitlines()) - 1
+    print(f"portfolio UI: {n} clicked assertions, failures: {fails}")
+    return 1 if fails else 0
+
+
+sys.exit(main())

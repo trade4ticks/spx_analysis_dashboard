@@ -31,12 +31,25 @@
       white-space:nowrap;
     }
     .bp-btn:hover { border-color:var(--accent); color:var(--accent); }
-    .bp-btn:disabled { opacity:.45; cursor:default; border-color:var(--border); color:var(--text); }
+    .bp-btn:disabled { opacity:.4; cursor:default; border-color:var(--border); color:var(--dim); }
     .bp-btn.pri { border-color:var(--accent); color:var(--accent); }
 
-    /* One loaded strategy. The swatch is the only thing carrying its colour
-       in P1; from P3 the same colour is its line on every chart, which is
-       why the colour is assigned at load and not per chart. */
+    /* One strategy in the sidebar: a CARD OF TWO LINES, not a row of
+       columns. The name and its trade count take the first line; qty,
+       capital and the filter button take the second. Laid out as columns
+       beside the name they overlapped it -- 400px does not hold a name, two
+       number inputs and a button abreast, and the name is the part that
+       cannot be truncated to nothing. */
+    .bp-card { padding:7px 8px; border-bottom:1px solid var(--border); }
+    .bp-card:last-child { border-bottom:0; }
+    .bp-cline { display:flex; align-items:center; gap:6px; }
+    .bp-cfields { display:flex; align-items:flex-end; gap:8px; margin-top:5px; }
+    .bp-field { display:flex; flex-direction:column; gap:2px; }
+    .bp-flabel { font-size:9px; color:var(--dim); text-transform:uppercase;
+                 letter-spacing:.4px; }
+    .bp-fbtn { margin-left:auto; font-size:10px; padding:3px 8px; }
+
+    /* The rows in the main column's Loaded table keep the old shape. */
     .bp-strat { display:flex; align-items:center; gap:8px; padding:7px 8px;
                 border-bottom:1px solid var(--border); }
     .bp-strat:last-child { border-bottom:0; }
@@ -50,7 +63,8 @@
       font-size:11px; padding:3px 6px; border-radius:4px; text-align:right;
       font-variant-numeric:tabular-nums; color-scheme:dark;
     }
-    .bp-x { color:var(--dim); cursor:pointer; font-size:13px; padding:0 2px; }
+    .bp-x { color:var(--dim); cursor:pointer; font-size:13px; padding:0 2px;
+            margin-left:auto; }
     .bp-x:hover { color:var(--danger); }
 
     .bp-head { display:flex; align-items:center; gap:8px; font-size:10px;
@@ -182,38 +196,36 @@
           <span class="ob-card-title">Allocation</span>
           <span class="ob-card-sub" x-text="allocSummary()"></span>
         </div>
-        <div class="bp-head">
-          <span style="width:10px"></span>
-          <span class="bp-grow">strategy</span>
-          <span style="width:74px;text-align:right">qty</span>
-          <span style="width:74px;text-align:right">capital</span>
-          <span style="width:14px"></span>
-        </div>
+
         <template x-for="(c, i) in chosen" :key="c.id">
-          <div class="bp-strat">
-            <span class="bp-swatch" :style="'background:' + colorOf(i)"></span>
-            <span class="bp-grow">
-              <span class="bp-name" x-text="c.name"></span><br>
-              <span class="bp-meta" x-text="rowMeta(c)"></span>
-            </span>
-            <input class="bp-num" type="number" min="1" step="1"
-                   x-model.number="c.qty" @change="normalise(c)">
-            <input class="bp-num" type="number" min="0" step="500"
-                   x-model.number="c.capital" @change="normalise(c)">
-            <span class="bp-x" @click="remove(i)" title="Remove">×</span>
-          </div>
-        </template>
-        <template x-for="c in chosen" :key="'f' + c.id">
-          <div class="bp-strat" style="padding-top:0">
-            <span style="width:10px"></span>
-            <span class="bp-grow">
-              <span class="bp-meta" x-text="c.name + ' - ' + filterBadge(c)"></span>
-            </span>
-            <button class="bp-btn" style="font-size:10px;padding:2px 8px"
-                    :class="editing === c.id ? 'pri' : ''"
-                    @click="toggleEdit(c.id)"
-                    :disabled="!loaded.length"
-                    x-text="editing === c.id ? 'Editing' : 'Filters'"></button>
+          <div class="bp-card">
+            <div class="bp-cline">
+              <span class="bp-swatch" :style="'background:' + colorOf(i)"></span>
+              <span class="bp-name" x-text="c.name"></span>
+              <span class="bp-x" @click="remove(i)" title="Remove">×</span>
+            </div>
+            <div class="bp-meta" x-text="rowMeta(c)"></div>
+            <!-- SECOND LINE for the two numbers. They were laid out as
+                 right-hand columns beside the name, which there is no room
+                 for in a 400px sidebar: the inputs sat on top of the text.
+                 They stay in the card -- they are adjusted constantly while
+                 watching the table -- and get a line of their own. -->
+            <div class="bp-cfields">
+              <label class="bp-field">
+                <span class="bp-flabel">qty</span>
+                <input class="bp-num" type="number" min="1" step="1"
+                       x-model.number="c.qty" @change="normalise(c)">
+              </label>
+              <label class="bp-field">
+                <span class="bp-flabel">capital</span>
+                <input class="bp-num" type="number" min="0" step="500"
+                       x-model.number="c.capital" @change="normalise(c)">
+              </label>
+              <button class="bp-btn bp-fbtn"
+                      :class="editing === c.id ? 'pri' : ''"
+                      @click="toggleEdit(c.id)"
+                      x-text="editing === c.id ? 'Editing' : filterBadge(c)"></button>
+            </div>
           </div>
         </template>
         <div class="ob-card-body">
@@ -389,7 +401,7 @@
                 </template>
 
                 <template x-if="m.type === 'range' && !rangeOf(m)">
-                  <div class="ob-dim" x-text="'no values in this log (' + m.column + ')'"></div>
+                  <div class="ob-dim" x-text="noValueNote(m)"></div>
                 </template>
 
                 <template x-if="m.type === 'categorical'">

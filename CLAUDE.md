@@ -262,10 +262,34 @@ panel under the summary table — which is **sticky**, so every number stays in
 view while a slider moves; watching the table move IS the filtering. The
 panel is `x-if`, not `x-show`: hidden-but-present would evaluate every
 expression in it against the null strategy. **qty and capital stay inline in
-the sidebar rows** — they are adjusted repeatedly while watching the table,
-which is the opposite case. The controls themselves (`ob-dual`, `ob-checks`)
+the strategy cards** — they are adjusted repeatedly while watching the table,
+which is the opposite case — but on a **second line** beneath the name, with
+labels. Laid out as right-hand columns beside the name they overlapped it:
+400px does not hold a name, two number inputs and a button abreast, and the
+name is the part that cannot be truncated away. The controls themselves (`ob-dual`, `ob-checks`)
 are the OO page's, moved into `backtest.css`; slider bounds come from each
-strategy's own values rather than the registry's nominal range. A filter
+strategy's own values rather than the registry's nominal range.
+
+**The Filters button is NOT gated on the portfolio being loaded.** It was
+(`:disabled="!loaded.length"`), and that was a regression a user hit: the
+button looked normal and did nothing, because `.bp-btn:disabled` kept the
+text colour. Filters set before a load are applied by the load, so there is
+nothing to protect; what the panel cannot show yet is RANGES, and it says
+which of the two it is ("load the portfolio to see this strategy's values"
+vs "no values in this log"). `ensureFilters()` back-fills any metric key a
+strategy's filter map lacks, so a strategy added before `/registry` answered
+cannot leave a hole that the panel reads into a TypeError.
+
+**Every check of that panel passed while the button was dead**, including a
+browser check that read its geometry — because they all opened it by calling
+`toggleEdit()`. `scripts/check_portfolio_ui.py` now drives the page **by
+clicking**, in headless Edge, and captures `window.onerror` and
+`console.error`: an Alpine expression error does not stop a page, it logs and
+leaves the control inert, which is this exact bug's shape. It found a second
+one immediately — closing the panel logged an error on every click, because
+Alpine re-evaluates an `x-for` inside a dying `x-if` with `editingRow()`
+already null. Registered `can_skip`: no browser on the VPS means SKIP, not
+PASS. A filter
 drops trades with no value for it and the row states the cost (staggered
 coverage). The TOTAL row pools the
 filtered, qty-scaled trades and runs the same `obStats`/`obExtraStats` over
