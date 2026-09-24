@@ -67,19 +67,35 @@
     .bp-load { font-size:11px; color:var(--muted); }
     .bp-load .warn { color:var(--warning); }
 
-    /* The filter editor: one strategy at a time. A panel per strategy, all
-       open at once, would be ten metrics times however many strategies on a
-       page whose job is the comparison between them. */
-    .bp-filters { padding:8px; border-top:1px solid var(--border);
-                  background:rgba(0,0,0,.14); }
-    .bp-frow { display:flex; align-items:center; gap:6px; margin-bottom:5px; }
-    .bp-flab { flex:1; min-width:0; font-size:11px; color:var(--text);
+    /* The filter editor, in the MAIN COLUMN. Two columns at the sidebar's
+       old width, as many as fit beyond it: nine metrics stacked one per row
+       in a 400px sidebar was already tight, and the list grows. The sliders
+       and chips themselves come from backtest.css, which /oo-backtest reads
+       too - the same controls for the same registry. */
+    .bp-fgrid { display:grid; gap:8px 14px;
+                grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); }
+    .bp-fcell { border:1px solid var(--border); border-radius:5px; padding:7px 9px;
+                background:rgba(0,0,0,.12); }
+    .bp-fcell.on { border-color:var(--accent); }
+    .bp-fhead { display:flex; align-items:center; gap:6px; cursor:pointer;
+                margin-bottom:4px; }
+    .bp-fhead input { accent-color:var(--accent); }
+    .bp-flab { flex:1; min-width:0; font-size:11px; font-weight:600; color:var(--text);
                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .bp-flab.off { color:var(--dim); }
-    .bp-cats { display:flex; flex-wrap:wrap; gap:3px; }
-    .bp-cat { font-size:10px; padding:2px 6px; border-radius:3px; cursor:pointer;
-              border:1px solid var(--border); color:var(--dim); }
-    .bp-cat.on { border-color:var(--accent); color:var(--accent); }
+    .bp-fstate { font-size:10px; color:var(--dim); white-space:nowrap; }
+
+    /* The summary table PINS to the top of the scrolling column, the same
+       treatment /oo-backtest gives its fifteen stats and for the same
+       reason: the filter panel sits below it, and watching these numbers
+       move while a slider moves is the whole point of the page.
+       ::before covers the column's padding band above the card - sticky
+       offsets are measured from the scrollport edge, inside that padding,
+       so rows would show through the gap without it. */
+    .bp-summary { position:sticky; top:0; z-index:12;
+                  background:var(--surface);
+                  box-shadow:0 4px 12px rgba(0,0,0,.45); }
+    .bp-summary::before { content:""; position:absolute; left:-15px; right:-15px;
+                          top:-13px; height:13px; background:var(--bg); }
 
     /* The summary table. TOTAL is the row the page exists for, so it is
        marked rather than merely last. */
@@ -188,58 +204,16 @@
           </div>
         </template>
         <template x-for="c in chosen" :key="'f' + c.id">
-          <div>
-            <div class="bp-strat" style="padding-top:0">
-              <span style="width:10px"></span>
-              <span class="bp-grow">
-                <span class="bp-meta" x-text="c.name + ' - ' + filterBadge(c)"></span>
-              </span>
-              <button class="bp-btn" style="font-size:10px;padding:2px 8px"
-                      @click="toggleEdit(c.id)"
-                      x-text="editing === c.id ? 'Done' : 'Filters'"></button>
-            </div>
-            <div class="bp-filters" x-show="editing === c.id" x-cloak>
-              <template x-for="m in registry" :key="m.key">
-                <div>
-                  <div class="bp-frow">
-                    <input type="checkbox" x-model="c.filters[m.key].on"
-                           @change="onFilterChange()">
-                    <span class="bp-flab" :class="c.filters[m.key].on ? '' : 'off'"
-                          x-text="m.label"></span>
-                    <template x-if="m.type === 'range'">
-                      <span style="display:flex;gap:4px">
-                        <input class="bp-num" style="width:62px" type="number"
-                               :step="m.step" x-model.number="c.filters[m.key].lo"
-                               @change="onFilterChange()">
-                        <input class="bp-num" style="width:62px" type="number"
-                               :step="m.step" x-model.number="c.filters[m.key].hi"
-                               @change="onFilterChange()">
-                      </span>
-                    </template>
-                  </div>
-                  <template x-if="m.type === 'categorical'">
-                    <div class="bp-cats" style="margin:0 0 6px 22px">
-                      <template x-for="cat in categoriesFor(c, m)" :key="String(cat.value)">
-                        <span class="bp-cat"
-                              :class="isChosenCategory(c, m, cat.value) ? 'on' : ''"
-                              @click="toggleCategory(c, m, cat.value)"
-                              x-text="cat.label"></span>
-                      </template>
-                    </div>
-                  </template>
-                </div>
-              </template>
-              <div class="ob-row">
-                <button class="bp-btn" style="font-size:10px;padding:2px 8px"
-                        @click="resetFilters(c)">Clear this strategy's filters</button>
-              </div>
-              <div class="ob-note" style="margin-top:6px">
-                The same metrics the single-backtest page filters on, from the
-                same registry. A filter drops trades with no value for it -
-                metrics start at different dates, and the table says what that
-                costs.
-              </div>
-            </div>
+          <div class="bp-strat" style="padding-top:0">
+            <span style="width:10px"></span>
+            <span class="bp-grow">
+              <span class="bp-meta" x-text="c.name + ' - ' + filterBadge(c)"></span>
+            </span>
+            <button class="bp-btn" style="font-size:10px;padding:2px 8px"
+                    :class="editing === c.id ? 'pri' : ''"
+                    @click="toggleEdit(c.id)"
+                    :disabled="!loaded.length"
+                    x-text="editing === c.id ? 'Editing' : 'Filters'"></button>
           </div>
         </template>
         <div class="ob-card-body">
@@ -304,7 +278,7 @@
         </div>
       </template>
 
-      <div class="ob-card" x-show="rows.length" x-cloak>
+      <div class="ob-card bp-summary" x-show="rows.length" x-cloak>
         <div class="ob-card-hdr">
           <span class="ob-card-title">Portfolio summary</span>
           <span class="ob-card-sub">P/L dated by close &middot; deployment is overnight capital</span>
@@ -366,6 +340,82 @@
           </div>
         </div>
       </div>
+
+      <!-- THE FILTER PANEL LIVES HERE, not in the sidebar.
+           The sidebar is ~400px and permanent; filter editing is occasional
+           and wants width. So it opens in the main column, under the summary
+           table - which is STICKY, so every number stays on screen while a
+           slider moves. Watching the table move IS the filtering. -->
+      {#- x-if, NOT x-show: x-show leaves the panel in the document with
+          display:none, so every expression inside it still evaluates -- for
+          a strategy that is not being edited, which is `null`. It also keeps
+          ten metric cells and their sliders alive for nothing. -#}
+      <template x-if="editing">
+      <div class="ob-card">
+        <div class="ob-card-hdr">
+          <span class="bp-swatch" :style="'background:' + editingColor()"></span>
+          <span class="ob-card-title" x-text="editingName() + ' - filters'"></span>
+          <span class="ob-card-sub" x-text="editingSummary()"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-fgrid">
+            <template x-for="m in registry" :key="m.key">
+              <div class="bp-fcell" :class="isOn(m) ? 'on' : ''">
+                <label class="bp-fhead">
+                  <input type="checkbox" :checked="isOn(m)"
+                         @change="setOn(m, $event.target.checked)">
+                  <span class="bp-flab" x-text="m.label"></span>
+                  <span class="bp-fstate" x-text="stateOf(m)"></span>
+                </label>
+
+                <template x-if="m.type === 'range' && rangeOf(m)">
+                  <div>
+                    <div class="ob-range-vals">
+                      <span x-text="fmtVal(m, rangeOf(m).lo)"></span>
+                      <span x-text="fmtVal(m, rangeOf(m).hi)"></span>
+                    </div>
+                    <div class="ob-dual">
+                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
+                             :step="rangeOf(m).step" :value="rangeOf(m).lo"
+                             @input="setLo(m, $event.target.value)"
+                             :aria-label="m.label + ' minimum'">
+                      <input type="range" :min="rangeOf(m).min" :max="rangeOf(m).max"
+                             :step="rangeOf(m).step" :value="rangeOf(m).hi"
+                             @input="setHi(m, $event.target.value)"
+                             :aria-label="m.label + ' maximum'">
+                    </div>
+                    <div class="ob-dim" x-text="rangeSummary(m)"></div>
+                  </div>
+                </template>
+
+                <template x-if="m.type === 'range' && !rangeOf(m)">
+                  <div class="ob-dim" x-text="'no values in this log (' + m.column + ')'"></div>
+                </template>
+
+                <template x-if="m.type === 'categorical'">
+                  <div class="ob-checks">
+                    <template x-for="cat in categoriesFor(editingRow(), m)"
+                              :key="String(cat.value)">
+                      <label class="ob-check">
+                        <input type="checkbox"
+                               :checked="isChosenCategory(editingRow(), m, cat.value)"
+                               @change="toggleCategory(editingRow(), m, cat.value)">
+                        <span x-text="cat.label"></span>
+                      </label>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <div class="ob-row">
+            <button class="bp-btn" @click="resetFilters(editingRow())">Clear these filters</button>
+            <button class="bp-btn" @click="editing = 0">Close</button>
+            <span class="ob-note" x-text="editingCost()"></span>
+          </div>
+        </div>
+      </div>
+      </template>
 
       <!-- WHAT THIS PHASE IS. Stated on the page, not only in the commit:
            a main column with nothing in it reads as a page that broke. -->

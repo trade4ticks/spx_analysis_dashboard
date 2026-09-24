@@ -253,9 +253,21 @@ node, and a strict eval keeps its declarations to itself — every driver would
 see `obStats is not defined`. `obNull` is a `const`, so the core and the
 bundle must be evaluated in ONE eval, not two.
 
-**P2's decisions.** Filters come from the shared registry, per strategy, with
-range boxes and categorical chips; a filter drops trades with no value for it
-and the row states the cost (staggered coverage). The TOTAL row pools the
+**P2's decisions.** Filters come from the shared registry, per strategy.
+**They live in the MAIN COLUMN, not the sidebar** (moved 2026-09-25): the
+sidebar is ~400px and permanent, filter editing is occasional and wants
+width, so nine-and-growing metrics stacked one per row there were squeezing
+the thing that is always on screen. A sidebar row's *Filters* button opens a
+panel under the summary table — which is **sticky**, so every number stays in
+view while a slider moves; watching the table move IS the filtering. The
+panel is `x-if`, not `x-show`: hidden-but-present would evaluate every
+expression in it against the null strategy. **qty and capital stay inline in
+the sidebar rows** — they are adjusted repeatedly while watching the table,
+which is the opposite case. The controls themselves (`ob-dual`, `ob-checks`)
+are the OO page's, moved into `backtest.css`; slider bounds come from each
+strategy's own values rather than the registry's nominal range. A filter
+drops trades with no value for it and the row states the cost (staggered
+coverage). The TOTAL row pools the
 filtered, qty-scaled trades and runs the same `obStats`/`obExtraStats` over
 them. Two figures need their own definition at portfolio level and the page
 says so under the table: **ann ret %** divides by the peak of the SUMMED

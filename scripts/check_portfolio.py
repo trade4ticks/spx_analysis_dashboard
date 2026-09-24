@@ -492,6 +492,49 @@ def case_the_page_computes_nothing_of_its_own():
           "the OO page does not load the shared calculations it now depends on")
 
 
+
+def case_filters_live_in_the_main_column():
+    """Filter editing is in the main column; the sidebar keeps qty and capital.
+
+    THE REASON, so it is not undone by tidying: the sidebar is ~400px and
+    permanent, filter editing is occasional and wants width. Stacked one per
+    row in the sidebar the nine metrics were already tight and the list
+    grows; in the main column they run two or more abreast. qty and capital
+    stay inline in the sidebar rows because they are adjusted repeatedly
+    while watching the table, which is the opposite case.
+    """
+    html = (ROOT / "templates" / "backtest_portfolio.html").read_text(encoding="utf-8")
+    side = html.split('class="ob-side"')[1].split('class="ob-main"')[0]
+    main = html.split('class="ob-main"')[1]
+
+    check("bp-fgrid" in main and "bp-fgrid" not in side,
+          "the filter panel is not in the main column")
+    check("ob-dual" in main and "ob-dual" not in side,
+          "there are range sliders in the sidebar; that is where they used "
+          "to be and the point of the move was to get them out")
+    # qty and capital stay where they are.
+    check('x-model.number="c.qty"' in side and 'x-model.number="c.capital"' in side,
+          "qty and capital left the sidebar rows; they are adjusted "
+          "repeatedly while watching the table and belong beside it")
+    # One panel at a time, and only when open.
+    check('<template x-if="editing">' in main,
+          "the panel is not x-if'd on `editing` — with x-show it stays in the "
+          "document for a strategy that is not being edited, and every "
+          "expression inside it evaluates against null")
+    # The table stays visible while the panel is worked.
+    check("bp-summary" in main and "position:sticky" in html,
+          "the summary table does not pin, so working a filter scrolls the "
+          "numbers it is supposed to move off the screen")
+    # The controls are the shared ones, not a second set.
+    css = (ROOT / "static" / "css" / "backtest.css").read_text(encoding="utf-8")
+    for rule in (".ob-dual", ".ob-checks", ".ob-range-vals"):
+        check(rule in css, f"{rule} is not in the shared stylesheet")
+    oo = (ROOT / "templates" / "oo_backtest.html").read_text(encoding="utf-8")
+    check(".ob-dual {" not in oo,
+          "the OO page still defines the dual slider inline as well as "
+          "reading it from the shared sheet")
+
+
 CASES = [
     ("payload survives the cache", case_payload_survives_the_cache),
     ("dates and nulls survive",    case_dates_and_nulls_survive),
@@ -501,6 +544,7 @@ CASES = [
     ("one load path",              case_the_router_reuses_one_path),
     ("the page is wired up",       case_the_page_is_wired_up),
     ("P2 arithmetic",              case_p2_arithmetic),
+    ("filters in the main column", case_filters_live_in_the_main_column),
     ("no second implementation",   case_the_page_computes_nothing_of_its_own),
 ]
 

@@ -26,7 +26,18 @@
 const BP_DATA = {
   payloads: {},      // strategy id -> the server's payload
   scaled: {},        // strategy id -> { qty, cols } with pnl x qty
+  extents: {},       // "id:metric" -> the observed range, for the sliders
 };
+
+/* A bound snapped outward to the registry's step, so a slider's ends are
+ * round numbers rather than whatever the extreme trade happened to be. */
+function obClampStep(v, step, how) {
+  const s = Number(step);
+  if (!isFinite(s) || s <= 0) return v;
+  const k = v / s;
+  return Number(((how === 'floor' ? Math.floor(k) : Math.ceil(k)) * s)
+                .toPrecision(12));
+}
 
 function bpFmtInt(n) {
   return (n == null || !isFinite(n)) ? '—' : Math.round(n).toLocaleString();
@@ -245,6 +256,7 @@ document.addEventListener('alpine:init', () => {
       this.rows = [];
       BP_DATA.payloads = {};
       BP_DATA.scaled = {};
+      BP_DATA.extents = {};
       this.loadNote = '';
       this.error = '';
       this.editing = 0;
@@ -279,6 +291,7 @@ document.addEventListener('alpine:init', () => {
         this.loaded = b.strategies || [];
         BP_DATA.payloads = {};
         BP_DATA.scaled = {};
+        BP_DATA.extents = {};
         for (const p of this.loaded) BP_DATA.payloads[p.saved.id] = p;
         const wall = (performance.now() - t0) / 1000;
         const srv = b.load || {};
@@ -299,8 +312,130 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    // ── filters ─────────────────────────────────────────────────────────
+    // ── filters, in the main column ─────────────────────────────────────
+    //
+    // ONE STRATEGY AT A TIME. Every strategy's panel open at once would be
+    // nine metrics times however many strategies on a page whose job is the
+    // comparison between them; the sidebar row says which is being edited
+    // and how many filters it carries.
     toggleEdit(id) { this.editing = (this.editing === id ? 0 : id); },
+
+    editingRow() { return this.chosen.find(c => c.id === this.editing) || null; },
+
+    editingName() {
+      const c = this.editingRow();
+      return c ? c.name : '';
+    },
+
+    editingColor() {
+      const i = this.chosen.findIndex(c => c.id === this.editing);
+      return i < 0 ? 'transparent' : this.colorOf(i);
+    },
+
+    editingSummary() {
+      const c = this.editingRow();
+      if (!c) return '';
+      const r = this.rows.find(x => x.id === c.id);
+      return r ? `${bpFmtInt(r.n)} of ${bpFmtInt(r.nAll)} trades` : '';
+    },
+
+    editingCost() {
+      const c = this.editingRow();
+      const r = c && this.rows.find(x => x.id === c.id);
+      if (!r || !r.cost.noValue) return '';
+      return `${bpFmtInt(r.cost.noValue)} trades have no value for an active `
+           + `filter and are dropped by it — metrics start at different dates.`;
+    },
+
+    isOn(m) {
+      const c = this.editingRow();
+      return !!(c && c.filters[m.key] && c.filters[m.key].on);
+    },
+
+    setOn(m, on) {
+      const c = this.editingRow();
+      if (!c) return;
+      c.filters[m.key].on = !!on;
+      this.recompute();
+    },
+
+    stateOf(m) {
+      const c = this.editingRow();
+      if (!c) return '';
+      const f = c.filters[m.key];
+      if (!f || !f.on) return 'off';
+      if (m.type === 'categorical') {
+        const n = (f.allowed || []).length;
+        return n ? `${n} kept` : 'none kept';
+      }
+      const r = this.rangeOf(m);
+      return r ? `${this.fmtVal(m, r.lo)} – ${this.fmtVal(m, r.hi)}` : 'no values';
+    },
+
+    /* The slider's bounds come from THIS STRATEGY'S OWN VALUES, not from the
+     * registry's nominal range: a VIX slider spanning 9–80 when the log only
+     * ever saw 12–31 is a control whose useful travel is a third of its
+     * length. The registry supplies the step and the formatting. */
+    rangeOf(m) {
+      const c = this.editingRow();
+      if (!c) return null;
+      const ext = this.extentOf(c, m);
+      if (!ext) return null;
+      const f = c.filters[m.key];
+      const lo = (f && isFinite(f.lo)) ? f.lo : ext.min;
+      const hi = (f && isFinite(f.hi)) ? f.hi : ext.max;
+      return { min: ext.min, max: ext.max, step: m.step || 0.01,
+               lo: Math.max(ext.min, Math.min(lo, ext.max)),
+               hi: Math.max(ext.min, Math.min(hi, ext.max)), n: ext.n };
+    },
+
+    extentOf(c, m) {
+      const p = BP_DATA.payloads[c.id];
+      if (!p) return null;
+      const key = c.id + ':' + m.key;
+      if (!(key in BP_DATA.extents)) {
+        const ext = obExtent(p.columns[m.column] || []);
+        BP_DATA.extents[key] = ext && { min: obClampStep(ext.min, m.step, 'floor'),
+                                        max: obClampStep(ext.max, m.step, 'ceil'),
+                                        n: ext.n };
+      }
+      return BP_DATA.extents[key];
+    },
+
+    setLo(m, v) {
+      const c = this.editingRow(), r = this.rangeOf(m);
+      if (!c || !r) return;
+      const f = c.filters[m.key];
+      f.lo = Math.min(Number(v), r.hi);
+      f.on = true;
+      this.recompute();
+    },
+
+    setHi(m, v) {
+      const c = this.editingRow(), r = this.rangeOf(m);
+      if (!c || !r) return;
+      const f = c.filters[m.key];
+      f.hi = Math.max(Number(v), r.lo);
+      f.on = true;
+      this.recompute();
+    },
+
+    fmtVal(m, v) {
+      void this.tick;
+      if (v == null || !isFinite(v)) return '—';
+      if (m.format === 'usd') return bpFmtMoney(v);
+      if (m.format === 'pct') return v.toFixed(2) + '%';
+      if (m.format === 'ratio') return v.toFixed(2);
+      if (m.format === 'int') return String(Math.round(v));
+      return v.toFixed(2);
+    },
+
+    rangeSummary(m) {
+      const r = this.rangeOf(m);
+      if (!r) return '';
+      return `${bpFmtInt(r.n)} trades have a value · `
+           + `${this.fmtVal(m, r.min)} to ${this.fmtVal(m, r.max)} in this log`;
+    },
 
     /* The categories a categorical metric actually has in THIS strategy's
      * trades — from the data, not from a list written here. `exit_reason`
@@ -314,10 +449,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     toggleCategory(c, m, value) {
+      if (!c) return;
       const f = c.filters[m.key];
       const i = f.allowed.indexOf(value);
       if (i >= 0) f.allowed.splice(i, 1); else f.allowed.push(value);
-      f.on = f.allowed.length > 0;
+      // TICKING THE FIRST BOX TURNS THE FILTER ON; clearing the last leaves
+      // it on with nothing kept, which filters everything out. That is a
+      // real state a person can reach deliberately, and `stateOf` says
+      // "none kept" rather than pretending the filter is off.
+      if (f.allowed.length) f.on = true;
       this.recompute();
     },
 
@@ -325,8 +465,6 @@ document.addEventListener('alpine:init', () => {
       const f = c.filters[m.key];
       return !!(f && f.allowed.includes(value));
     },
-
-    onFilterChange() { this.recompute(); },
 
     resetFilters(c) {
       c.filters = this.blankFilters();

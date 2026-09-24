@@ -64,3 +64,30 @@
 .ob-status { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); margin:0 2px 8px; }
 .ob-stats { display:grid; gap:8px; grid-template-columns:repeat(5, minmax(0,1fr)); }
 .ob-row { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
+
+/* ── Filter controls ─────────────────────────────────────────────────────
+   Both pages screen on the same metrics from the same registry, so they
+   screen with the same controls. /oo-backtest puts them in its sidebar for
+   one strategy; /backtest-portfolio puts them in the main column, per
+   strategy, where there is width for two columns of them. */
+.ob-range-vals { display:flex; justify-content:space-between; font-size:11px; font-weight:700; color:var(--text); }
+
+/* Dual-handle slider: two native ranges stacked on one track. The inputs
+   ignore the pointer; only their thumbs take it, so either can be grabbed. */
+.ob-dual { position:relative; height:22px; margin:2px 0 2px; }
+.ob-dual::before { content:""; position:absolute; left:0; right:0; top:10px; height:3px;
+                   border-radius:2px; background:var(--border); }
+.ob-dual input[type=range] { position:absolute; left:0; top:0; width:100%; height:22px; margin:0;
+                             background:none; pointer-events:none; -webkit-appearance:none; appearance:none;
+                             accent-color:var(--accent); color-scheme:dark; }
+.ob-dual input[type=range]::-webkit-slider-runnable-track { background:transparent; height:22px; }
+.ob-dual input[type=range]::-moz-range-track { background:transparent; }
+.ob-dual input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; pointer-events:auto; width:14px; height:14px;
+                                                   margin-top:4px; border-radius:50%; background:var(--accent);
+                                                   border:2px solid var(--surface); cursor:pointer; }
+.ob-dual input[type=range]::-moz-range-thumb { pointer-events:auto; width:12px; height:12px; border-radius:50%;
+                                               background:var(--accent); border:2px solid var(--surface); cursor:pointer; }
+
+.ob-checks { display:flex; flex-wrap:wrap; gap:4px 12px; }
+.ob-check { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--text); cursor:pointer; }
+.ob-check input { accent-color:var(--accent); }
