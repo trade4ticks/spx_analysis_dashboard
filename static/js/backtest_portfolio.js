@@ -34,7 +34,7 @@ const BP_DATA = {
  * chart is not state a template reads, and a reactive proxy around one is a
  * proxy around every point in it. */
 const BP_CHARTS = { eq: null, dd: null, cap: null, sc: null, roll: null,
-                    year: null, dist: null, overlap: null, risk: null };
+                    dist: null, overlap: null, risk: null };
 
 /* The rolling-risk palette, the old app's: blue Sharpe, purple Sortino,
  * amber win rate on its own axis. */
@@ -1163,32 +1163,10 @@ document.addEventListener('alpine:init', () => {
               label: it => `${it.dataset.label}: ${it.parsed.y.toFixed(2)}` } } } });
       }
 
-      // BY YEAR, beside the monthly grid. Blue up, pink down, the page's
-      // two colours doing the same job they do everywhere else here.
-      const years = this.months.years;
-      if (years.length) {
-        const vals = years.map(y => this.months.totals[y] || 0);
-        this.drawBar('year', 'bp-year-chart', {
-          labels: years,
-          datasets: [{ data: vals,
-                       backgroundColor: vals.map(v => v >= 0
-                         ? 'rgba(52,152,219,0.75)' : 'rgba(232,67,147,0.75)'),
-                       borderWidth: 0 }],
-        }, {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          indexAxis: 'y',
-          scales: {
-            x: { grid: { color: 'rgba(255,255,255,0.05)' },
-                 border: { display: false },
-                 ticks: { color: '#9a9a9a', font: { size: 10 },
-                          maxTicksLimit: 5, callback: v => bpFmtMoney(v) } },
-            y: { grid: { display: false }, border: { display: false },
-                 ticks: { color: '#9a9a9a', font: { size: 10 } } },
-          },
-          plugins: { legend: { display: false }, tooltip: { callbacks: {
-            label: it => bpFmtMoney(it.parsed.x) } } },
-        });
-      }
+      // The annual bars are NOT drawn here. They are DOM cells in the
+      // monthly grid's own rows (`yearBar`), because a canvas beside the
+      // table kept its own vertical rhythm and a year's bar drifted off
+      // that year's row of months.
 
       // ── P/L DISTRIBUTION: overlaid histograms, one per strategy ──────
       if (c.dist && c.dist.length) {
@@ -1398,12 +1376,38 @@ document.addEventListener('alpine:init', () => {
                empty: false, title: `${key}: ${bpFmtMoney(v)}` };
     },
 
+    /* The annual bar for one year, as percentages of its own grid cell --
+     * so it is laid out by the row it belongs to and cannot drift off it.
+     * The per-year TOTAL is not printed beside December any more: the bar
+     * carries it (and its tooltip states it), and the number was the same
+     * figure twice. */
     yearBar(year) {
       void this.tick;
-      const v = this.months.totals[year] || 0;
-      const biggest = Math.max(1, ...Object.values(this.months.totals).map(Math.abs));
-      return { text: bpFmtMoney(v), w: Math.round(40 * Math.abs(v) / biggest),
-               bg: v >= 0 ? BP_BLUE : BP_PINK };
+      const totals = this.months.totals;
+      const v = totals[year] || 0;
+      const vals = Object.values(totals);
+      const biggest = Math.max(1, ...vals.map(Math.abs));
+      // ZERO SITS IN THE MIDDLE ONLY WHEN SOME YEAR LOST MONEY. Reserving
+      // half the column for a direction nothing uses would halve every
+      // bar's resolution to draw white space.
+      const anyNeg = vals.some(x => x < 0);
+      const zero = anyNeg ? 50 : 0;
+      const width = (anyNeg ? 50 : 100) * Math.abs(v) / biggest;
+      return { zero, width, left: v >= 0 ? zero : zero - width,
+               bg: v >= 0 ? BP_BLUE : BP_PINK,
+               title: `${year}: ${bpFmtMoney(v)}` };
+    },
+
+    /* What the bar column's width means, stated once under it rather than
+     * as a number on every row. */
+    yearScale() {
+      void this.tick;
+      const vals = Object.values(this.months.totals);
+      if (!vals.length) return '';
+      const biggest = Math.max(1, ...vals.map(Math.abs));
+      return vals.some(x => x < 0)
+        ? `±${bpFmtMoney(biggest)}`
+        : `0 to ${bpFmtMoney(biggest)}`;
     },
 
     // ── P4 readouts ─────────────────────────────────────────────────────

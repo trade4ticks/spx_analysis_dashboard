@@ -334,8 +334,33 @@ nothing in particular. Capital deployed is the summed per-strategy series,
 stepped (it changes at a close), and its peak is the figure `ann ret %`
 divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
 nothing to lay out and the numbers want to be readable; shade is the month's
-size against the biggest month, the same opacity rule the bar charts use, and
-year totals carry a bar beside them. Everything is dated by CLOSE.
+size against the biggest month, the same opacity rule the bar charts use.
+Everything is dated by CLOSE.
+
+**The months and the annual bars are ONE grid** (2026-09-25). The bars were a
+Chart.js canvas beside the table, and two elements placed side by side keep
+their own vertical rhythm: a year's bar sat at a different height than that
+year's row of months, and any change to either would have moved it again. Now
+each year is one grid row carrying its twelve month cells AND its bar, so the
+alignment is structural rather than tuned — `yearBar()` returns percentages of
+the bar's own cell, zero centred only when some year lost money (reserving
+half the column for a direction nothing uses halves every bar's resolution to
+draw white space). The per-year TOTAL beside December is gone: the bar is that
+figure, and printing both was the same number twice. Month tracks are
+`minmax(0, 1fr)` — **never a fixed min-width**, which is what forced the
+horizontal scrollbar — so twelve FULL figures fit without abbreviating and the
+columns flex instead of overflowing.
+
+**Measuring "does it fit" by asking for a scrollbar does not work**, and cost
+two wrong gates before the right one. `.bp-mwrap` overflows visibly, and a
+visible overflow reports `scrollWidth === clientWidth`, so the check passed
+with the grid hanging 400 px out of the card. Comparing element edges passed
+too: a grid item with a min-width overflows its TRACK while the container
+keeps its width, so the grid's own right edge never moves. What the fault
+actually produces is cells crossing each other and the bar column — so the
+assertion is **overlap between neighbours, measured at three widths**
+(`check_portfolio_ui`), and it is the one that fails when the min-width comes
+back.
 
 **P6's decisions.** The **distribution** is the old app's overlaid
 histograms — one series per strategy at 0.6 opacity, **$100 bins** as it had
@@ -365,8 +390,9 @@ chosen shows just its label (all of them is not a narrowing), and a long list
 shows the first two with an ellipsis. Without them you cannot tell which of
 several strategies is filtered without opening each panel in turn, which is
 the point of having them side by side. **This was in the brief and was
-missed, not deferred** (2026-09-25) — as was the annual bar CHART beside the
-monthly grid, and the old app's arrangement of the correlation card (metric
+missed, not deferred** (2026-09-25) — as were the annual bars beside the
+monthly grid (since rebuilt into that grid, above), and the old app's
+arrangement of the correlation card (metric
 and strategy tables side by side, scatter full width beneath). All three are
 now built.
 

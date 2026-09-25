@@ -454,13 +454,89 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the card wears its colour',
      getComputedStyle(cards[0]).borderLeftWidth, '3px');
 
-  // ── THE ANNUAL BARS, beside the monthly grid ──────────────────────
-  const yr = Chart.getChart('bp-year-chart');
-  ok('the annual bar chart drew', !!yr, true);
-  ok('a bar per year', yr && yr.data.labels.length, cc.months.years.length);
-  ok('the bars are the year totals',
-     yr && yr.data.datasets[0].data[0],
-     cc.months.totals[cc.months.years[0]]);
+  // ── THE ANNUAL BARS SHARE THE MONTHS' ROWS ────────────────────────
+  // They used to be a canvas beside the table, keeping its own vertical
+  // rhythm, so a year's bar sat at a different height than that year's row
+  // of months. The fix is structural -- one grid, one row per year -- and
+  // this is the assertion that holds it there: measure both and compare.
+  const bars = [...document.querySelectorAll('.bp-bcell')];
+  ok('a bar per year', bars.length, cc.months.years.length);
+  const rows = [...document.querySelectorAll('.bp-mrow')];
+  let worst = 0;
+  rows.forEach(r => {
+    const cell = r.querySelector('.bp-mcell').getBoundingClientRect();
+    const bar = r.querySelector('.bp-bcell').getBoundingClientRect();
+    worst = Math.max(worst, Math.abs(cell.top - bar.top),
+                     Math.abs(cell.height - bar.height));
+  });
+  ok('every bar is level with its own months', worst <= 1, true);
+  // Direction and length come from that year's total.
+  const firstYear = cc.months.years[0];
+  const bar0 = cc.yearBar(firstYear);
+  ok('the bar is coloured by sign',
+     bar0.bg, cc.months.totals[firstYear] >= 0 ? '#3498db' : '#e84393');
+  ok('the widest year fills the column',
+     Math.round(Math.max(...cc.months.years.map(y => cc.yearBar(y).width))), 100);
+  // THE REDUNDANT PER-YEAR NUMBER IS GONE. The bar carries that figure.
+  ok('no year-total column beside December',
+     document.querySelectorAll('.bp-ycell').length, 0);
+
+  // NO HORIZONTAL SCROLL on the months. Twelve full figures, no scrollbar:
+  // the reason the cells are flexible rather than min-width'd.
+  const mgrid = document.querySelector('.bp-mgrid');
+  const mwrap = document.querySelector('.bp-mwrap');
+  ok('twelve month columns drew',
+     getComputedStyle(mgrid).gridTemplateColumns.split(' ').length, 14);
+  // MEASURED, NOT ASKED FOR A SCROLLBAR. .bp-mwrap overflows visibly at
+  // this width, and a visible overflow reports scrollWidth == clientWidth --
+  // so 'does it scroll' passed with the grid hanging 400px out of the card.
+  // What fits is a question about edges, so compare edges.
+  const gridBox = mgrid.getBoundingClientRect();
+  const wrapBox = mwrap.getBoundingClientRect();
+  const lastMonth = [...rows[0].querySelectorAll('.bp-mcell')].pop();
+  const barCell = rows[0].querySelector('.bp-bcell').getBoundingClientRect();
+  ok('the grid fits its column',
+     gridBox.right <= wrapBox.right + 1, true);
+  ok('December fits inside the grid',
+     lastMonth.getBoundingClientRect().right <= gridBox.right + 1, true);
+  ok('the bar column fits inside the grid',
+     barCell.right <= gridBox.right + 1, true);
+  // AND IT STILL FITS WHEN THE COLUMN IS NARROWER. At this window the old
+  // fixed-width cells happened to fit too, so measuring only here proves
+  // nothing: the scrollbar the user saw appeared because the table was given
+  // a third of the row. Squeeze it and measure again -- month tracks that
+  // flex survive, a fixed min-width does not.
+  // Overlap is what a fixed cell width actually causes: the grid keeps its
+  // width and the CELLS spill over each other and into the bars. So the
+  // question is whether any cell crosses the next one.
+  const overlap = (w) => {
+    if (w) mwrap.style.width = w + 'px';
+    void mwrap.offsetWidth;
+    let worstGap = 0;
+    rows.forEach(r => {
+      const cs = [...r.querySelectorAll('.bp-mcell')].map(e => e.getBoundingClientRect());
+      const bc = r.querySelector('.bp-bcell').getBoundingClientRect();
+      for (let i = 0; i < cs.length - 1; i++)
+        worstGap = Math.min(worstGap, cs[i + 1].left - cs[i].right);
+      worstGap = Math.min(worstGap, bc.left - cs[cs.length - 1].right);
+    });
+    mwrap.style.width = '';
+    void mwrap.offsetWidth;
+    return worstGap;
+  };
+  ok('no cell overlaps its neighbour', overlap(0) >= -1, true);
+  ok('nor at 900px', overlap(900) >= -1, true);
+  ok('nor at 760px', overlap(760) >= -1, true);
+  // A FULL FIGURE IS NOT CLIPPED. The cells shrank to fit rather than
+  // abbreviating, so the thing to prove is that the text still fits in one.
+  const widest = [...document.querySelectorAll('.bp-mcell')]
+    .filter(el => el.textContent.trim().startsWith('$'))
+    .sort((a, b) => b.textContent.length - a.textContent.length)[0];
+  ok('the widest money cell is not clipped',
+     !widest || widest.scrollWidth <= widest.clientWidth + 1, true);
+  const monthCard = mgrid.closest('.ob-card');
+  ok('nor does the card holding them',
+     monthCard.scrollWidth <= monthCard.clientWidth + 1, true);
 
   // ── P5: PROFILES ──────────────────────────────────────────────────
   // Saved and reloaded by CLICKING, with the filters and the allocation it
@@ -520,7 +596,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   // is the whole job of a summary table. Checked without a regex: every
   // backslash in this driver has to survive a Python string on the way in,
   // and two attempts at an escaped one broke the page instead.
-  const money = [...document.querySelectorAll('.bp-table td, .bp-mcell, .bp-ycell')]
+  const money = [...document.querySelectorAll('.bp-table td, .bp-mcell, .bp-bfoot')]
     .map(el => el.textContent.trim())
     .filter(t => t.startsWith('$') || t.startsWith('-$'));
   const abbreviated = money.filter(t => t.endsWith('k') || t.endsWith('M'));

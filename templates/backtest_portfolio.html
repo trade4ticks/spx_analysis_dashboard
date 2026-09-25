@@ -151,21 +151,47 @@
        DOM, not canvas: twelve cells a year is nothing to lay out, and the
        numbers want to be readable and selectable rather than hit-tested.
        Colour is blue/pink by sign with opacity by size against the biggest
-       month, the same rule the bar charts use. */
-    .bp-months { border-collapse:collapse; font-size:10px;
-                 font-variant-numeric:tabular-nums; }
-    .bp-months th { color:var(--dim); font-weight:600; padding:2px 5px;
-                    text-transform:uppercase; letter-spacing:.3px; }
-    .bp-months td { padding:0; }
-    /* Wide enough for a full figure ($14,206), not an abbreviated one. */
-    .bp-mcell { min-width:74px; height:22px; display:flex; align-items:center;
-                justify-content:center; border-radius:2px; margin:1px;
-                padding:0 4px; color:var(--text); }
+       month, the same rule the bar charts use.
+
+       THE MONTHS AND THE ANNUAL BARS ARE ONE GRID. Twelve month columns
+       share the leftover width (minmax(0,1fr) — never a fixed min-width,
+       which is what forced a scrollbar), and the bar column is a fixed
+       130px. A year's bar is a cell in that year's own row, so it is level
+       with its months by construction. */
+    .bp-mgrid { display:grid; gap:2px;
+                grid-template-columns:auto repeat(12, minmax(0, 1fr)) 130px;
+                font-size:9.5px; font-variant-numeric:tabular-nums; }
+    /* The row is a wrapper for x-for only; display:contents puts its cells
+       in the parent grid, which is what keeps one row per year. */
+    .bp-mrow { display:contents; }
+    .bp-mhead { color:var(--dim); font-weight:600; font-size:9px;
+                text-transform:uppercase; letter-spacing:.3px;
+                text-align:center; padding:2px 0; }
+    .bp-bhead { text-align:left; padding-left:6px; }
+    .bp-myear { color:var(--dim); font-weight:600; padding-right:6px;
+                display:flex; align-items:center; }
+    /* No min-width and no abbreviating: a full figure ($14,206) fits at this
+       size, and the column flexes rather than overflowing. */
+    .bp-mcell { height:20px; display:flex; align-items:center; overflow:hidden;
+                justify-content:center; border-radius:2px; padding:0 2px;
+                color:var(--text); }
     .bp-mcell.empty { color:var(--border); }
-    .bp-ycell { padding-left:10px; white-space:nowrap; }
-    .bp-ybar { display:inline-block; height:9px; border-radius:2px;
-               vertical-align:middle; margin-right:6px; min-width:1px; }
-    .bp-months td:last-child { font-variant-numeric:tabular-nums; }
+    .bp-bcell { position:relative; height:20px; margin-left:6px; }
+    .bp-bbar { position:absolute; top:5px; height:10px; border-radius:2px;
+               min-width:1px; }
+    .bp-bzero { position:absolute; top:0; bottom:0; width:1px;
+                background:rgba(255,255,255,0.18); }
+    .bp-mfoot { color:var(--dim); font-size:9px; padding-top:3px; }
+    /* An explicit class, not :first-of-type -- every grid child here is a
+       div, so :first-of-type would match the header cell instead. */
+    .bp-mfoot-span { grid-column:1 / -2; }
+    .bp-bfoot { padding-left:12px; white-space:nowrap; }
+    /* Narrow screens genuinely cannot hold twelve full figures. Scroll there
+       rather than abbreviate, and only there. */
+    @media (max-width: 1100px) {
+      .bp-mwrap { overflow-x:auto; }
+      .bp-mgrid { min-width:880px; }
+    }
 
     /* ── P4: correlation ──────────────────────────────────────────────
        The matrix is a small table, the same treatment the monthly grid
@@ -181,11 +207,6 @@
     .bp-corrgrid { display:grid; gap:14px;
                    grid-template-columns:minmax(320px, 1fr) minmax(320px, 1fr); }
     @media (max-width: 1100px) { .bp-corrgrid { grid-template-columns:1fr; } }
-    /* The heatmap takes the width; the annual bars sit beside it, as they
-       did in the old app (md=8 / md=4). */
-    .bp-monthgrid { display:grid; gap:14px; grid-template-columns:2fr 1fr;
-                    align-items:start; }
-    @media (max-width: 1100px) { .bp-monthgrid { grid-template-columns:1fr; } }
     .bp-sel { background:var(--raised); border:1px solid var(--border);
               color:var(--text); font-size:11px; padding:3px 6px;
               border-radius:4px; color-scheme:dark; }
@@ -608,50 +629,42 @@
           <span class="ob-card-sub" x-text="monthsSub()"></span>
         </div>
         <div class="ob-card-body">
-          <div class="bp-monthgrid">
-          <div class="bp-scroll">
-          <table class="bp-months">
-            <thead>
-              <tr>
-                <th></th>
-                <template x-for="mn in months.labels" :key="mn">
-                  <th x-text="mn"></th>
-                </template>
-                <th style="text-align:left;padding-left:10px">year</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="y in months.years" :key="y">
-                <tr>
-                  <th x-text="y"></th>
-                  <template x-for="(mn, i) in months.labels" :key="y + mn">
-                    <td>
-                      <div class="bp-mcell" :class="monthCell(y, i).empty ? 'empty' : ''"
-                           :style="'background:' + monthCell(y, i).bg"
-                           :title="monthCell(y, i).title"
-                           x-text="monthCell(y, i).text"></div>
-                    </td>
-                  </template>
-                  <td class="bp-ycell">
-                    <span class="bp-ybar"
-                          :style="'width:' + yearBar(y).w + 'px;background:' + yearBar(y).bg"></span>
-                    <span x-text="yearBar(y).text"></span>
-                  </td>
-                </tr>
+          <!-- ONE GRID, months and annual bars together. The bars were a
+               canvas beside the table and the two had independent vertical
+               rhythm, so a year's bar sat at a different height than its own
+               row of months. Here every year is ONE grid row carrying its
+               twelve cells and its bar, so they cannot drift apart when
+               either changes: the alignment is structural, not tuned. -->
+          <div class="bp-mwrap">
+            <div class="bp-mgrid" role="table"
+                 aria-label="Portfolio P/L by month, with annual totals">
+              <div class="bp-mhead"></div>
+              <template x-for="mn in months.labels" :key="'h' + mn">
+                <div class="bp-mhead" x-text="mn"></div>
               </template>
-            </tbody>
-          </table>
-          </div>
-          <!-- THE ANNUAL BARS, beside the grid rather than inside it: the
-               old app's arrangement, and a chart compares years at a glance
-               where a column of numbers does not. -->
-          <div>
-            <div class="ob-lbl">By year</div>
-            <div class="bp-chart" style="height:280px">
-              <canvas id="bp-year-chart" role="img"
-                      aria-label="Portfolio P/L by year"></canvas>
+              <div class="bp-mhead bp-bhead">by year</div>
+
+              <template x-for="y in months.years" :key="y">
+                <div class="bp-mrow">
+                  <div class="bp-myear" x-text="y"></div>
+                  <template x-for="(mn, i) in months.labels" :key="y + mn">
+                    <div class="bp-mcell" :class="monthCell(y, i).empty ? 'empty' : ''"
+                         :style="'background:' + monthCell(y, i).bg"
+                         :title="monthCell(y, i).title"
+                         x-text="monthCell(y, i).text"></div>
+                  </template>
+                  <div class="bp-bcell" :title="yearBar(y).title">
+                    <span class="bp-bzero" :style="'left:' + yearBar(y).zero + '%'"></span>
+                    <span class="bp-bbar"
+                          :style="'left:' + yearBar(y).left + '%;width:' + yearBar(y).width
+                                  + '%;background:' + yearBar(y).bg"></span>
+                  </div>
+                </div>
+              </template>
+
+              <div class="bp-mfoot bp-mfoot-span"></div>
+              <div class="bp-mfoot bp-bfoot" x-text="yearScale()"></div>
             </div>
-          </div>
           </div>
           <div class="ob-note" style="margin-top:8px">
             Dated by close, like everything else here: a trade lands in the
