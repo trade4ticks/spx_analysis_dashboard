@@ -145,6 +145,12 @@ GATES = [
        note="colour thresholds cannot change membership or extent"),
 
     # ── the OO/Mesosim backtest page ─────────────────────────────────────
+    # The exchange calendar is the authority on whether a day was a session,
+    # so a wrong answer here is wrong in the rollup, the deployment axis,
+    # coverage, the artifact report and the freshness check at once. Pure
+    # Python and offline, so it runs on the VPS too.
+    _s("check_market_calendar.py", note="NYSE sessions and expected bars",
+       vps=True),
     # It bins in the browser against edges defined in Python; a disagreement
     # about which side of an edge a value falls on is invisible on screen.
     _s("check_oo_backtest.py", can_skip=True,

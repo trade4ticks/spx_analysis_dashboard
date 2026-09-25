@@ -12,6 +12,14 @@ websockets>=12.0
 # and still accepts CSV -- an absent optional parser should narrow what the
 # upload accepts, not stop the app from starting.
 openpyxl>=3.1.0
+# The exchange calendar decides whether a day was a trading session, for the
+# backtest pages' rollup, deployment axis and freshness check. The rules ship
+# in the package -- no network at runtime. A HARD dependency: app/oo_backtest
+# imports it at module load, deliberately, because falling back to inferring
+# sessions from our own OHLC table is what hid a missing 2026-04-08.
+# Install on the VPS BEFORE pulling:
+#   sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'
+pandas_market_calendars>=5.0
 jinja2==3.1.3
 duckdb>=1.1.0
 anthropic>=0.40.0
