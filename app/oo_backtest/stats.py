@@ -1,6 +1,9 @@
 """Statistics calculations for the dashboard.
 
-COPIED unchanged from Options-Backtest-Dashboard/utils/stats.py (211198c).
+Copied from Options-Backtest-Dashboard/utils/stats.py (211198c), with ONE
+deliberate change since: max drawdown is evaluated at day end rather than
+per trade (see below). The same change was made in the source app, so the
+two still agree -- but this is no longer a verbatim copy.
 """
 
 import numpy as np
@@ -53,9 +56,15 @@ def calculate_stats(df: pd.DataFrame) -> dict:
     else:
         avg_days_in_trade = 0.0
 
-    # Calculate max drawdown
-    sorted_df = df.sort_values("date_closed")
-    cumulative = sorted_df["pnl"].cumsum()
+    # Calculate max drawdown, AT DAY END ONLY.
+    #
+    # Two trades closing on one day at -5,000 and +5,000 are not a 5,000
+    # drawdown -- the other position was open and offsetting, and only the
+    # day's net was ever at risk. Summing per close date before the cumsum
+    # also removes the tie-break: a day's net does not depend on the order
+    # its trades are summed in, so this no longer needs a stable sort.
+    daily_pnl = df.groupby("date_closed")["pnl"].sum().sort_index()
+    cumulative = daily_pnl.cumsum()
     peak = cumulative.cummax()
     drawdown = cumulative - peak
     max_drawdown = drawdown.min()

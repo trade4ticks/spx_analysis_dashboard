@@ -1112,11 +1112,11 @@ document.addEventListener('alpine:init', () => {
         const cols = c && this.scaledCols(c);
         if (!cols) continue;
         curves.eq.push({ name: r.name, color: r.color,
-                         points: obDailyCurve(obEquity(cols, r.idxDraw)) });
+                         points: obEquity(cols, r.idxDraw).points });
       }
       if (pooledDraw.pnl.length) {
         const peq = obEquity(pooledDraw, [...pooledDraw.pnl.keys()]);
-        const daily = obDailyCurve(peq);
+        const daily = peq.points;
         curves.eq.push({ name: 'TOTAL', color: BP_TOTAL, points: daily, total: true });
         curves.dd = daily;
         curves.maxDD = peq.maxDD;

@@ -98,13 +98,42 @@ function obApplyFilters(cols, n, specs, lenient) {
 }
 
 
-/* Order for anything cumulative: by close date, ties kept in payload order
- * (open date, then file order). A STABLE sort -- pandas' default sort in the
- * source app's stats is not, so its max drawdown could differ across runs
- * when several trades close the same day. */
-function obByClose(cols, idx) {
-  const dc = cols.date_closed;
-  return idx.slice().sort((a, b) => (dc[a] < dc[b] ? -1 : dc[a] > dc[b] ? 1 : a - b));
+/* Cumulative P/L and drawdown, ONE POINT PER CLOSE DATE.
+ *
+ * DRAWDOWN IS EVALUATED AT DAY END ONLY. Two trades closing on one day at
+ * -$5,000 and +$5,000 are not a $5,000 drawdown: the other position was open
+ * and offsetting, and only the day's net was ever at risk. Measuring between
+ * them recorded an exposure that never existed.
+ *
+ * It also retires the tie-break question. A day's net is the same whichever
+ * order its trades are summed in, so how same-day closes are sorted stops
+ * affecting the answer -- which is why there is no obByClose any more, and
+ * why the source app's unstable sort no longer matters.
+ *
+ * A trade with no close date is not on a date axis and is skipped, as
+ * obSharpe already skips it; the parser excludes still-open positions, so
+ * this is a backstop rather than a case.
+ */
+function obEquity(cols, idx) {
+  const pnl = cols.pnl, dc = cols.date_closed;
+  const byDay = new Map();
+  for (const i of idx) {
+    const d = dc[i];
+    if (!d) continue;
+    byDay.set(d, (byDay.get(d) || 0) + pnl[i]);
+  }
+  const points = [];
+  let cum = 0, peak = -Infinity, maxDD = null;
+  for (const d of [...byDay.keys()].sort()) {
+    const day = byDay.get(d);
+    cum += day;
+    if (cum > peak) peak = cum;
+    const dd = cum - peak;
+    const pt = { date: d, pnl: day, cumulative: cum, peak, drawdown: dd };
+    points.push(pt);
+    if (dd < 0 && (maxDD === null || dd < maxDD.drawdown)) maxDD = pt;
+  }
+  return { points, maxDD };
 }
 
 
@@ -140,26 +169,6 @@ function obStats(cols, idx) {
     max_winner: maxW,
     max_loser: maxL,
   };
-}
-
-
-/* Cumulative P/L, running peak and drawdown per trade in close order, as
- * calculations.py calculate_drawdown. maxDD is the deepest point (first
- * occurrence), or null when the curve never falls below its peak. */
-function obEquity(cols, idx) {
-  const order = obByClose(cols, idx);
-  const pnl = cols.pnl, dc = cols.date_closed;
-  const points = [];
-  let cum = 0, peak = -Infinity, maxDD = null;
-  for (const i of order) {
-    cum += pnl[i];
-    if (cum > peak) peak = cum;
-    const dd = cum - peak;
-    const pt = { row: i, date: dc[i], pnl: pnl[i], cumulative: cum, peak, drawdown: dd };
-    points.push(pt);
-    if (dd < 0 && (maxDD === null || dd < maxDD.drawdown)) maxDD = pt;
-  }
-  return { points, maxDD };
 }
 
 
@@ -341,32 +350,6 @@ function obDeployedSeries(conc, sessions, capital) {
   for (let k = 0; k < conc.days.length; k++) {
     const j = at.get(conc.days[k]);
     if (j !== undefined) out[j] = conc.counts[k] * capital;
-  }
-  return out;
-}
-
-
-/* One point per CLOSE DATE from a trade-level equity curve.
- *
- * The curve is computed per TRADE (obEquity) because that is where max
- * drawdown is defined and what the summary table reports; drawing every
- * trade would be ten thousand points a strategy. So each date keeps its
- * day-END cumulative and its WORST drawdown of the day -- the worst
- * trade-level point always falls on some day, so the chart's minimum equals
- * the table's Max DD exactly rather than being a slightly shallower
- * day-boundary reading of it. */
-function obDailyCurve(eq) {
-  const out = [];
-  for (const p of eq.points) {
-    const last = out.length ? out[out.length - 1] : null;
-    if (last && last.date === p.date) {
-      last.cumulative = p.cumulative;
-      last.peak = p.peak;
-      if (p.drawdown < last.drawdown) last.drawdown = p.drawdown;
-    } else {
-      out.push({ date: p.date, cumulative: p.cumulative, peak: p.peak,
-                 drawdown: p.drawdown });
-    }
   }
   return out;
 }

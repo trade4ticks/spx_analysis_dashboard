@@ -982,6 +982,18 @@ bar-count rule would restore exactly the hiding this removed.
 
 ### Decisions, and why
 
+- **Max drawdown is evaluated at DAY END** (2026-09-25), in
+  `app/oo_backtest/stats.py` and `obEquity` alike, and in the source app so the
+  two still agree. Two trades closing on one day at −$5,000 and +$5,000 are not
+  a $5,000 drawdown: the other position was open and offsetting, and only the
+  day's net was ever at risk. `obEquity` sums P/L per close date and walks days,
+  so its points ARE the daily curve — which is why `obByClose` and
+  `obDailyCurve` no longer exist, and why the source app's unstable
+  `sort_values("date_closed")` stopped mattering: a day's net does not depend on
+  the order its trades are summed in. The table's Max DD and the chart's trough
+  still agree, both on day end. Magnitude: none at all on a log with one close a
+  day, ~1.7% shallower where closes occasionally coincide, ~7% with three a day
+  — and most on the portfolio TOTAL, which pools every strategy's closes.
 - **Filtering happens in the browser.** The full trade set ships once; filter changes
   recompute locally, no server round trip (the old Dash app round-tripped every slider
   nudge). Dates serialize as ISO strings deliberately.

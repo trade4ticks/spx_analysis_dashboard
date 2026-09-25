@@ -705,23 +705,49 @@ def check_stats_parity() -> None:
     check(got["none"]["idx"] == [] and got["none"]["stats"]["num_trades"] == 0 and got["none"]["equity"]["maxDD"] is None,
           "a filter matching nothing gives zero trades, zero stats, no drawdown point")
 
+    # calculate_drawdown is the source app's PER-TRADE curve; ours is per
+    # CLOSE DATE, so the comparison is against its day-end reduction. On a
+    # log with one trade a day the two coincide, which is exactly why this
+    # has to say which it means rather than relying on that.
     dd = calc.calculate_drawdown(df.copy())
+    dd_day = dd.groupby("date_closed").last()
     js_pts = got["all"]["equity"]["points"]
-    check(len(js_pts) == len(dd) and all(close(p["cumulative"], c) and close(p["drawdown"], d)
-                                         for p, c, d in zip(js_pts, dd["cumulative_pnl"], dd["drawdown"])),
-          "cumulative P/L and drawdown equal calculate_drawdown point for point")
+    check(len(js_pts) == len(dd_day) and all(close(p["cumulative"], c) and close(p["drawdown"], d)
+                                             for p, c, d in zip(js_pts, dd_day["cumulative_pnl"], dd_day["drawdown"])),
+          f"cumulative P/L and drawdown equal calculate_drawdown at each day's END "
+          f"({len(js_pts)} days from {len(dd)} trades)")
     mdd = got["all"]["equity"]["maxDD"]
     check(mdd is not None and close(mdd["drawdown"], dd["drawdown"].min())
           and mdd["date"] == dd.loc[dd["drawdown"].idxmin(), "date_closed"].strftime("%Y-%m-%d"),
           f"max-DD point is the deepest drawdown, and its date ({mdd and mdd['date']})")
 
-    # Ties: three trades per close date. Against a STABLE pandas sort the JS
-    # must agree exactly; that it keeps payload order is the point.
-    t = ties.sort_values("date_closed", kind="mergesort")
-    cum = t["pnl"].cumsum()
-    stable_dd = float((cum - cum.cummax()).min())
-    check(close(got["ties"]["stats"]["max_drawdown"], stable_dd),
-          f"same-day closes: max drawdown equals a stable-order pandas sort ({got['ties']['stats']['max_drawdown']:.2f})")
+    # ── SAME-DAY CLOSES: DRAWDOWN IS EVALUATED AT DAY END ────────────────
+    # Three trades per close date. A day that closes -5,000 then +5,000 was
+    # never 5,000 down -- the second position was open and offsetting -- so
+    # only the day's net counts.
+    day_net = ties.groupby("date_closed")["pnl"].sum().sort_index()
+    dcum = day_net.cumsum()
+    day_dd = float((dcum - dcum.cummax()).min())
+    js_ties = got["ties"]["stats"]["max_drawdown"]
+    check(close(js_ties, day_dd),
+          f"same-day closes: max drawdown is the day-end figure ({js_ties:.2f})")
+    # It is SHALLOWER than evaluating between the trades, which is the whole
+    # reason for the change rather than a side effect of it.
+    per_trade = ties.sort_values("date_closed", kind="mergesort")["pnl"].cumsum()
+    intra_dd = float((per_trade - per_trade.cummax()).min())
+    check(day_dd > intra_dd,
+          f"and shallower than the per-trade reading ({day_dd:.2f} vs {intra_dd:.2f})")
+    # AND THE ORDER WITHIN A DAY NO LONGER MATTERS. This is what retires the
+    # sort-stability question: a day's net is the same whichever way round
+    # its trades are summed, so an unstable sort cannot change the answer.
+    shuffled = ties.iloc[::-1]
+    scum = shuffled.groupby("date_closed")["pnl"].sum().sort_index().cumsum()
+    check(close(float((scum - scum.cummax()).min()), day_dd),
+          "reversing the trades within each day leaves it unchanged")
+    # One point per DAY, not per trade.
+    check(len(got["ties"]["equity"]["points"]) == ties["date_closed"].nunique(),
+          f"the curve has one point per close date "
+          f"({len(got['ties']['equity']['points'])} for {ties['date_closed'].nunique()} days)")
 
 
 SECTION_DRIVER = r"""
@@ -1531,15 +1557,9 @@ def check_deployment_and_extra_stats() -> None:
         df["date_opened"] = pd.to_datetime(df["date_opened"])
         df["date_closed"] = pd.to_datetime(df["date_closed"])
         st = pystats.calculate_stats(df.copy())
-        # MAX DRAWDOWN WITH A STABLE TIE-BREAK, matching obByClose.
-        # utils/stats.py sorts with pandas' default quicksort, which is NOT
-        # stable, so its max drawdown can differ when several trades close on
-        # the same day. The page chose a stable sort deliberately and says so;
-        # comparing Calmar against the unstable value makes this check flap on
-        # the fixture's ties rather than test the formula.
-        sdf = df.sort_values("date_closed", kind="stable")
-        cum = sdf["pnl"].cumsum()
-        max_dd = float((cum - cum.cummax()).min())
+        # Straight from the reference now. Drawdown is evaluated at DAY END
+        # in both, so there is no tie to break and nothing here to stabilise.
+        max_dd = float(st["max_drawdown"])
         # CLOSE-TO-CLOSE, as obExtraStats measures it and as the old
         # Render app did. Measuring from the first ENTRY stretched the
         # window by the first position's holding period and understated

@@ -1567,7 +1567,7 @@ document.addEventListener('alpine:init', () => {
       if (OB_CHARTS.cum) { OB_CHARTS.cum.data = cumData; Object.assign(OB_CHARTS.cum.options.scales.x, xr); OB_CHARTS.cum.update('none'); }
       else {
         OB_CHARTS.cum = new Chart(cumEl.getContext('2d'), { type: 'line', data: cumData,
-          options: base(c => `Cumulative ${obMoney(c.raw.p.cumulative)} · trade ${obMoney(c.raw.p.pnl)}`) });
+          options: base(c => `Cumulative ${obMoney(c.raw.p.cumulative)} · day ${obMoney(c.raw.p.pnl)}`) });
       }
       if (OB_CHARTS.dd) { OB_CHARTS.dd.data = ddData; Object.assign(OB_CHARTS.dd.options.scales.x, xr); OB_CHARTS.dd.update('none'); }
       else {
