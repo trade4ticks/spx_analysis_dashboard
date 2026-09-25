@@ -395,9 +395,23 @@ stretch the filter was blind to.
   strict trades, per the brief — there is no toggle.
 - Capital deployed is NOT hatched and keeps the table's trades: it answers
   what would have been at risk UNDER the filter, a different question.
-- Two shadings can be visible at once, so they are different languages: the
-  live-strategy bands are a grey WASH, this is an amber HATCH, and each has
-  its own key.
+- **Both shadings are the same grey at two densities, and each is a BINARY
+  state** (simplified 2026-09-25). Strategy coverage: either every loaded
+  strategy is live or some is not — no band for "1 of 3" against "2 of 3",
+  and bands merge by that flag rather than by count. Metric coverage: either
+  every active filter could be evaluated or one could not — no per-metric
+  treatment. Grading them invited the reading that the shade MEASURED
+  something; an amber hatch (the first attempt) read as a different KIND of
+  information, because blue and pink already carry profit and loss on every
+  chart here. Where the two overlap they simply compound and the stretch is
+  darker; that is not special-cased, because "neither condition holds here"
+  is what darker should mean. `BP_SHADE` is the one colour, with
+  `BP_SHADE_STRATEGY` and `BP_SHADE_METRIC` its two densities.
+- Each has its own one-line key, and the metric key names the filter that
+  SET the boundary — the latest coverage among the active ones — rather than
+  listing every blind filter, because the boundary is one date and one
+  metric put it there.
+- **Ask before adding a colour or a pattern the page does not already use.**
 
 **The date-range dropdown still knows nothing about metric coverage** — it is
 `bpSpan()` over each strategy's `date_min`/`date_max` and nothing else. After

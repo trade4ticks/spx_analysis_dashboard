@@ -133,23 +133,38 @@ function bpSpan(payloads, mode) {
         end: highs.reduce((a, b) => (a > b ? a : b)) };
 }
 
-/* HOW MANY STRATEGIES WERE LIVE, over the portfolio's whole span.
+/* THE TWO SHADINGS. Both are the SAME GREY at two densities, and each is a
+ * BINARY state rather than a scale:
+ *
+ *   strategy coverage — either every loaded strategy is live, or not
+ *   metric coverage   — either every active filter could be evaluated, or not
+ *
+ * Grading them ("1 of 3" darker than "2 of 3") invited the reading that the
+ * shade measured something, and a second hue or a texture would have read as
+ * a different KIND of information. Where the two overlap they simply
+ * compound and the stretch is darker still; that is not special-cased,
+ * because "neither condition holds here" is exactly what darker should mean.
+ */
+const BP_SHADE = '154,154,154';
+const BP_SHADE_STRATEGY = 0.09;
+const BP_SHADE_METRIC = 0.20;
+
+/* WHEN FEWER THAN ALL STRATEGIES WERE LIVE.
  *
  * On union dates every strategy's trades count, so the equity curve steepens
  * each time one starts and flattens as one finishes — which reads as the
  * portfolio getting better and then worse when it is only the membership
- * changing. Nothing on the page said so, so the charts now shade it.
+ * changing.
  *
- * A strategy is live across its OWN span, first open to last close, so the
- * count rises and falls rather than only climbing. Spans are half-open in
- * epoch days ([open, close+1)) for the same reason the deployment count is:
- * a day is either inside a span or it is not, and the last day has to be
- * inside. Returns one band per DISTINCT count — adjacent stretches with the
- * same count are merged, so five strategies starting on one day is one edge,
- * not five.
+ * A strategy is live across its OWN span, first open to last close, so a
+ * strategy that finished stops counting. Spans are half-open in epoch days
+ * ([open, close+1)) for the same reason the deployment count is: a day is
+ * either inside a span or it is not, and the last day has to be inside.
  *
- * Fewer than two strategies gets no bands: there is nothing to be fewer
- * than, and shading the whole chart would say something false. */
+ * Bands are merged by WHETHER ALL ARE LIVE, not by how many — a stretch that
+ * goes from one strategy to two is one band, because both are "not all".
+ * Fewer than two strategies gets no bands at all: there is nothing to be
+ * fewer than, and shading the whole chart would say something false. */
 function bpLiveBands(payloads) {
   const spans = [];
   for (const p of payloads || []) {
@@ -164,47 +179,41 @@ function bpLiveBands(payloads) {
     const from = cuts[i], to = cuts[i + 1];
     let count = 0;
     for (const s of spans) if (s[0] <= from && s[1] >= to) count++;
+    const partial = count < total;
     const last = bands[bands.length - 1];
-    if (last && last.count === count && last.to === from) { last.to = to; continue; }
-    bands.push({ from, to, count });
+    if (last && last.partial === partial && last.to === from) { last.to = to; continue; }
+    bands.push({ from, to, partial });
   }
   return { total, bands };
 }
 
-/* The veil over a stretch where some strategies are missing. Neutral grey,
- * never the page's blue or pink: those two carry meaning on every chart here
- * and a third use of them would be read as data. Opacity by how much of the
- * portfolio is absent, and ZERO once every strategy is live — so the stretch
- * that needs no caveat is drawn plainly and the eye goes to it. */
-function bpShadeAlpha(count, total) {
-  if (!total || count >= total) return 0;
-  return 0.04 + 0.16 * ((total - count) / total);
+/* Drawn UNDER the datasets, so the curves stay legible on top. The bands
+ * ride in options.plugins.bpLiveShade rather than in the plugin array,
+ * because `draw` reuses a live chart and only reassigns data and options — a
+ * constructor array is read once and never again. */
+function bpFillBand(chart, from, to, alpha) {
+  const area = chart.chartArea, x = chart.scales && chart.scales.x;
+  if (!area || !x) return false;
+  const lo = Math.max(area.left, Math.min(area.right, x.getPixelForValue(from)));
+  const hi = Math.max(area.left, Math.min(area.right, x.getPixelForValue(to)));
+  if (hi - lo < 0.5) return false;
+  const ctx = chart.ctx;
+  ctx.save();
+  ctx.fillStyle = `rgba(${BP_SHADE},${alpha})`;
+  ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
+  ctx.restore();
+  return true;
 }
 
-/* Drawn UNDER the datasets, so the curves stay legible on top of it.
- * The bands ride in options.plugins.bpLiveShade rather than in the plugin
- * array, because `draw` reuses a live chart and only reassigns data and
- * options — a constructor array is read once and never again. */
 const bpLiveShade = {
   id: 'bpLiveShade',
   beforeDatasetsDraw(chart, args, opts) {
     const bands = (opts && opts.bands) || [];
-    const total = (opts && opts.total) || 0;
-    if (!bands.length || !total) return;
-    const area = chart.chartArea, x = chart.scales && chart.scales.x;
-    if (!area || !x) return;
-    const ctx = chart.ctx;
-    ctx.save();
+    if (!bands.length) return;
     for (const b of bands) {
-      const a = bpShadeAlpha(b.count, total);
-      if (a <= 0) continue;
-      const lo = Math.max(area.left, Math.min(area.right, x.getPixelForValue(b.from)));
-      const hi = Math.max(area.left, Math.min(area.right, x.getPixelForValue(b.to)));
-      if (hi - lo < 0.5) continue;
-      ctx.fillStyle = `rgba(154,154,154,${a.toFixed(3)})`;
-      ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
+      if (!b.partial) continue;
+      bpFillBand(chart, b.from, b.to, BP_SHADE_STRATEGY);
     }
-    ctx.restore();
   },
 };
 
@@ -286,50 +295,18 @@ function bpUnfilteredTo(chosen, registry) {
   return to;
 }
 
-/* Drawn as a HATCH, not a wash: the live-strategy bands are already a grey
- * wash and two washes on one chart would be read as one scale. Diagonal
- * lines also carry "nothing is being asserted here", which is exactly what
- * an unfiltered stretch means. */
-function bpHatch(ctx) {
-  const tile = document.createElement('canvas');
-  tile.width = 8; tile.height = 8;
-  const t = tile.getContext('2d');
-  t.strokeStyle = 'rgba(224,168,74,0.55)';
-  t.lineWidth = 1.5;
-  t.beginPath();
-  t.moveTo(0, 8); t.lineTo(8, 0);
-  t.moveTo(-2, 2); t.lineTo(2, -2);
-  t.moveTo(6, 10); t.lineTo(10, 6);
-  t.stroke();
-  return ctx.createPattern(tile, 'repeat');
-}
-
+/* The same grey as the strategy shade, denser. Not a texture and not a
+ * second hue: on these pages blue and pink carry profit and loss everywhere,
+ * and anything else reads as a new kind of information rather than as
+ * "nothing is being asserted about this stretch". */
 const bpUnfilteredShade = {
   id: 'bpUnfilteredShade',
   beforeDatasetsDraw(chart, args, opts) {
     const to = opts && opts.to;
-    if (to == null) return;
-    const area = chart.chartArea, x = chart.scales && chart.scales.x;
-    if (!area || !x) return;
-    const ctx = chart.ctx;
-    const lo = Math.max(area.left, Math.min(area.right, x.getPixelForValue(x.min)));
-    const hi = Math.max(area.left, Math.min(area.right, x.getPixelForValue(to)));
-    if (hi - lo < 0.5) return;
-    ctx.save();
-    if (!chart.$bpHatch) chart.$bpHatch = bpHatch(ctx);
-    ctx.fillStyle = 'rgba(224,168,74,0.07)';
-    ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
-    ctx.fillStyle = chart.$bpHatch;
-    ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
-    // The edge, so the boundary is a date and not an impression.
-    ctx.strokeStyle = 'rgba(224,168,74,0.75)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(hi, area.top);
-    ctx.lineTo(hi, area.bottom);
-    ctx.stroke();
-    ctx.restore();
+    const x = chart.scales && chart.scales.x;
+    if (to != null && x) {
+      bpFillBand(chart, x.min, to, BP_SHADE_METRIC);
+    }
   },
 };
 
@@ -989,7 +966,7 @@ document.addEventListener('alpine:init', () => {
       // blind to part of the history, in which case the equity and drawdown
       // charts keep drawing it and shade it instead of stopping short.
       const pooledDraw = { pnl: [], date_closed: [] };
-      let unfilteredTo = null;      // the hatch's right edge, by close date
+      let unfilteredTo = null;      // the metric shade's right edge, by close
 
       for (const c of this.chosen) {
         const p = BP_DATA.payloads[c.id];
@@ -999,7 +976,7 @@ document.addEventListener('alpine:init', () => {
         const idx = obApplyFilters(cols, p.n, specs);
         // The charts' set: identical to the table's unless some active
         // filter is blind before its coverage, in which case those trades
-        // are kept and the stretch is hatched rather than cut off.
+        // are kept and the stretch is shaded rather than cut off.
         const lenient = bpLenientColumns(c.filters, this.registry);
         const idxDraw = lenient.size
           ? obApplyFilters(cols, p.n, specs, lenient) : idx;
@@ -1011,7 +988,7 @@ document.addEventListener('alpine:init', () => {
           // date, because that is the axis these curves are drawn on.
           // Ending it at the metric's coverage date instead would leave a
           // trade entered before coverage but closed after it drawn
-          // unfiltered OUTSIDE the hatch -- mixing with nothing marking it,
+          // unfiltered OUTSIDE the shade -- mixing with nothing marking it,
           // which is the one thing this is here to prevent.
           if (kept && !kept.has(i)) {
             const d = p.columns.date_closed[i];
@@ -1104,7 +1081,7 @@ document.addEventListener('alpine:init', () => {
         curves.dd = daily;
         curves.maxDD = peq.maxDD;
       }
-      // Where the hatch stops: the latest coverage among every active
+      // Where the metric shade stops: the latest coverage among every active
       // blind-able filter on any strategy. Null when nothing active is
       // blind, and then these charts are exactly what they always were.
       curves.unfilteredTo = unfilteredTo;
@@ -1267,7 +1244,7 @@ document.addEventListener('alpine:init', () => {
         o.plugins.bpLiveShade = { bands: shade.bands, total: shade.total };
         return o;
       };
-      // The unfiltered hatch goes on the two charts that now draw the whole
+      // The metric shade goes on the two charts that now draw the whole
       // span -- equity and drawdown. Capital deployed keeps the table's
       // trades, because it answers what would have been at risk UNDER the
       // filter, which is a different question.
@@ -1549,32 +1526,31 @@ document.addEventListener('alpine:init', () => {
       return bpLiveBands(this.loaded);
     },
 
-    /* The hatch's own key, separate from the live-strategy one so the two
-     * are never read as one scale. Empty when no active filter is blind. */
+    /* The metric shade's key. It names the filter that SET THE BOUNDARY --
+     * the latest coverage among the active ones -- rather than listing
+     * every blind filter: the boundary is one date and one metric put it
+     * there. Null when no active filter is blind. */
     unfilteredKey() {
       void this.tick;
       const c = BP_DATA.curves || {};
       if (!c.unfilteredTo) return null;
-      const names = [];
+      let label = '';
       for (const ch of this.chosen) {
         for (const m of this.registry) {
           const f = ch.filters && ch.filters[m.key];
-          if (f && f.on && m.minDate && !names.includes(m.label)) names.push(m.label);
+          if (f && f.on && m.minDate === c.coverageFrom) label = m.label;
         }
       }
-      return { to: c.unfilteredTo, from: c.coverageFrom,
-               n: c.unfilteredN || 0, metrics: names.join(', ') };
+      return { to: c.unfilteredTo, from: c.coverageFrom, label,
+               n: c.unfilteredN || 0,
+               bg: `rgba(${BP_SHADE},${BP_SHADE_METRIC})` };
     },
 
-    liveLegend() {
+    /* ONE ENTRY, not one per count: the shade is a state, not a scale. */
+    liveKey() {
       const s = this.liveShade();
-      if (!s.bands.length) return [];
-      const counts = [...new Set(s.bands.map(b => b.count))].sort((a, b) => a - b);
-      return counts.map(n => ({
-        n,
-        bg: `rgba(154,154,154,${bpShadeAlpha(n, s.total).toFixed(3)})`,
-        label: `${n} of ${s.total}`,
-      }));
+      if (!s.bands.some(b => b.partial)) return null;
+      return { total: s.total, bg: `rgba(${BP_SHADE},${BP_SHADE_STRATEGY})` };
     },
 
     draw(key, id, data, options, plugins) {

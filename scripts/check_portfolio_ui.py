@@ -351,31 +351,32 @@ window.addEventListener('load', () => setTimeout(async () => {
   const shade = cS.liveShade();
   ok('there are three strategies to be fewer than', shade.total, 3);
   ok('the bands cover a rise and a fall', shade.bands.length >= 3, true);
-  const counts = shade.bands.map(b => b.count);
-  ok('the count peaks at every strategy', Math.max(...counts), 3);
-  ok('and is lower at the ends', counts[0] < 3 && counts[counts.length - 1] < 3, true);
-  // ONE BAND PER DISTINCT COUNT: adjacent stretches with the same count are
-  // merged, so a shared start date is one edge and not several.
+  // A BINARY STATE, NOT A SCALE: either every strategy is live or some is
+  // not. A stretch going from one strategy to two is ONE band, because both
+  // are "not all" -- there is no separate treatment for 1 of 3 vs 2 of 3.
   let merged = true;
   for (let i = 1; i < shade.bands.length; i++) {
-    if (shade.bands[i].count === shade.bands[i - 1].count) merged = false;
+    if (shade.bands[i].partial === shade.bands[i - 1].partial) merged = false;
     if (shade.bands[i].from !== shade.bands[i - 1].to) merged = false;
   }
-  ok('bands are contiguous and never repeat a count', merged, true);
+  ok('bands are contiguous and alternate state', merged, true);
+  ok('some stretch has them all', shade.bands.some(b => !b.partial), true);
+  ok('and the ends do not', shade.bands[0].partial
+     && shade.bands[shade.bands.length - 1].partial, true);
   // THE EDGES ARE THE STRATEGIES' OWN DATES, not the chart's.
   const spanStarts = cS.loaded.map(p => obDay(p.date_min)).sort((a, b) => a - b);
   ok('the first band starts at the earliest open', shade.bands[0].from, spanStarts[0]);
   const lastEnd = Math.max(...cS.loaded.map(p => obDay(p.date_max) + 1));
   ok('the last band ends after the latest close',
      shade.bands[shade.bands.length - 1].to, lastEnd);
-  // A FULL PORTFOLIO IS NOT SHADED -- that stretch needs no caveat.
-  ok('full coverage draws nothing', bpShadeAlpha(3, 3), 0);
-  ok('a thinner stretch is shaded', bpShadeAlpha(1, 3) > 0, true);
-  ok('the thinner the stretch the heavier the veil',
-     bpShadeAlpha(1, 3) > bpShadeAlpha(2, 3), true);
   // ONE STRATEGY HAS NOTHING TO BE FEWER THAN.
   ok('a single strategy gets no bands',
      bpLiveBands([cS.loaded[0]]).bands.length, 0);
+  // BOTH SHADES ARE THE SAME GREY at two densities -- no second hue, no
+  // texture. The only difference between them is how dense they are.
+  ok('the two shades are one colour', BP_SHADE, '154,154,154');
+  ok('and differ only in density',
+     BP_SHADE_METRIC > BP_SHADE_STRATEGY, true);
   // THE PLUGIN IS ON THE THREE DATE CHARTS AND NOWHERE ELSE: the pairwise
   // scatter's x is dollars, so a band there would be nonsense.
   const hasShade = (ch) => !!(ch && (ch.config.plugins || [])
@@ -388,12 +389,11 @@ window.addEventListener('load', () => setTimeout(async () => {
   // band data has to live in options.plugins to keep working.
   ok('the bands ride in options, not the constructor',
      eq.options.plugins.bpLiveShade.bands.length, shade.bands.length);
-  // THE KEY NAMES WHAT IS DRAWN. Unexplained shading is worse than none.
-  const legend = cS.liveLegend();
-  ok('the key has an entry per distinct count',
-     legend.length, new Set(counts).size);
-  ok('the key names the total', legend[0].label.endsWith(' of 3'), true);
-  const legendEl = document.querySelector('.bp-liveleg:not(.bp-unfkey)');
+  // THE KEY IS ONE ENTRY, not one per count.
+  const lk = cS.liveKey();
+  ok('the key is a single entry', !!lk && !Array.isArray(lk), true);
+  ok('it names the total', lk.total, 3);
+  const legendEl = document.querySelector('.bp-liveleg');
   ok('the key is on the page', !!legendEl, true);
   ok('it says what is being counted',
      /strategies live/i.test(legendEl.textContent), true);
@@ -738,7 +738,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   sU.filters.day_of_week = { on: true, allowed: [0] };
   cU.recompute();
   await wait(150);
-  ok('a filter that can judge everything hatches nothing',
+  ok('a filter that can judge everything shades nothing',
      BP_DATA.curves.unfilteredTo, null);
   ok('and draws no key for it', !!cU.unfilteredKey(), false);
   const rowD = cU.rows.find(r => r.id === 3);
@@ -780,6 +780,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   // reason, and that every added-back trade is inside the hatch (below).
   ok('the key names the coverage date as the reason',
      cU.unfilteredKey().from, vixM.minDate);
+  ok('and names the metric that set it', cU.unfilteredKey().label, vixM.label);
   // THE SUMMARY IS UNCHANGED -- it still drops what the filter could not
   // judge, which is what was asked for.
   const rowU = cU.rows.find(r => r.id === 3);
@@ -796,9 +797,9 @@ window.addEventListener('load', () => setTimeout(async () => {
      obIsoDay(eqU.scales.x.min) < vixM.minDate, true);
   ok('nor is the drawdown axis',
      obIsoDay(ddU.scales.x.min) < vixM.minDate, true);
-  ok('equity carries the hatch',
+  ok('equity carries the metric shade',
      eqU.options.plugins.bpUnfilteredShade.to, obDay(BP_DATA.curves.unfilteredTo));
-  ok('drawdown carries the hatch',
+  ok('drawdown carries the metric shade',
      ddU.options.plugins.bpUnfilteredShade.to, obDay(BP_DATA.curves.unfilteredTo));
   // THE INVARIANT THAT MAKES THE HATCH HONEST: every trade the chart adds
   // back sits inside it. One drawn unfiltered outside the hatch is mixing
@@ -807,13 +808,13 @@ window.addEventListener('load', () => setTimeout(async () => {
   const keptU = new Set(rowU.idx);
   const addedU = rowU.idxDraw.filter(i => !keptU.has(i));
   ok('the chart added trades back', addedU.length > 0, true);
-  ok('and every one of them closes inside the hatch',
+  ok('and every one of them closes inside the shade',
      addedU.every(i => pU.columns.date_closed[i] <= BP_DATA.curves.unfilteredTo), true);
   ok('the key counts exactly those trades', cU.unfilteredKey().n, addedU.length);
   // Capital deployed answers what was at risk UNDER the filter, which is a
   // different question, so it keeps the table's trades and no hatch.
   const capU = Chart.getChart('bp-cap-chart');
-  ok('capital deployed is not hatched',
+  ok('capital deployed carries no metric shade',
      !!(capU.options.plugins || {}).bpUnfilteredShade, false);
 
   // 3. TWO BLIND FILTERS HATCH TO THE LATER COVERAGE, NOT THE EARLIER:
@@ -824,19 +825,23 @@ window.addEventListener('load', () => setTimeout(async () => {
   await wait(150);
   ok('the later coverage wins', cU.unfilteredKey().from, v9.minDate);
   ok('and it really is the later of the two', v9.minDate > vixM.minDate, true);
-  ok('the hatch grew with it',
+  ok('the shade grew with it',
      BP_DATA.curves.unfilteredTo >= v9.minDate, true);
 
   // 4. BOTH KEYS ON THE PAGE, AND THEY ARE NOT THE SAME THING.
   const keyU = cU.unfilteredKey();
   ok('the key names the boundary', keyU.from, v9.minDate);
-  ok('the key names the metrics', /VIX/.test(keyU.metrics), true);
+  ok('the key names the metric that set the boundary', keyU.label, v9.label);
   ok('the key counts the unfiltered trades', keyU.n > 0, true);
-  ok('the hatch key is rendered', !!document.querySelector('.bp-hatchsw'), true);
-  ok('the live-strategy key is still rendered too',
-     !!document.querySelector('.bp-liveleg:not(.bp-unfkey)'), true);
-  ok('they are different elements',
-     document.querySelectorAll('.bp-liveleg').length >= 2, true);
+  // BOTH KEYS RENDER, and they are two rows rather than one combined one.
+  const keyRows = [...document.querySelectorAll('.bp-liveleg')];
+  ok('both keys render', keyRows.length >= 2, true);
+  ok('one is the strategy key',
+     keyRows.some(el => /strategies live/i.test(el.textContent)), true);
+  ok('the other is the metric key',
+     keyRows.some(el => /not filtered/i.test(el.textContent)), true);
+  ok('the metric key names its coverage date',
+     keyRows.some(el => el.textContent.includes(v9.minDate)), true);
 
   // 5. AND IT ALL COMES BACK OFF.
   sU.filters.vix = { on: false, lo: 9, hi: 80 };
@@ -844,12 +849,12 @@ window.addEventListener('load', () => setTimeout(async () => {
   sU.filters.day_of_week = { on: false, allowed: [] };
   cU.recompute();
   await wait(150);
-  ok('clearing the filters clears the hatch',
+  ok('clearing the filters clears the shade',
      BP_DATA.curves.unfilteredTo, null);
   // A HATCH WITHOUT A NAMED REASON IS A BUG: anything drawn unfiltered has
   // to be explained by a coverage-limited filter, or the page is shading a
   // stretch it cannot account for.
-  ok('a hatch never appears without a reason',
+  ok('a shade never appears without a reason',
      !BP_DATA.curves.unfilteredTo || !!BP_DATA.curves.coverageFrom, true);
   ok('and the charts are what they were',
      cU.rows.find(r => r.id === 3).dropped, 0);

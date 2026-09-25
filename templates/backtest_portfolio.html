@@ -215,16 +215,10 @@
     .bp-livekey { display:flex; align-items:center; gap:4px; }
     .bp-livesw { width:18px; height:10px; border-radius:2px;
                  border:1px solid rgba(255,255,255,0.16); }
-    /* The hatch key, matching the canvas pattern: diagonal amber lines, so
-       it cannot be confused with the grey wash above it. */
-    .bp-unfkey { color:var(--muted); align-items:flex-start; }
-    .bp-unfkey b { color:#e0a84a; font-weight:600; }
-    .bp-hatchsw { width:18px; height:12px; border-radius:2px; flex:none;
-                  margin-top:1px;
-                  border:1px solid rgba(224,168,74,0.55);
-                  background:repeating-linear-gradient(45deg,
-                    rgba(224,168,74,0.55) 0 1.5px,
-                    rgba(224,168,74,0.07) 1.5px 5.5px); }
+    /* Both key swatches are the same grey at two densities, like the shades
+       themselves; the outline is what makes the lighter one a swatch. */
+    .bp-liveleg { align-items:flex-start; }
+    .bp-liveleg b { color:var(--text); font-weight:600; }
     .bp-sel { background:var(--raised); border:1px solid var(--border);
               color:var(--text); font-size:11px; padding:3px 6px;
               border-radius:4px; color-scheme:dark; }
@@ -610,37 +604,32 @@
               </span>
             </template>
           </div>
-          {# THE HATCH. Its own key, kept apart from the live-strategy one:
-             two shadings on one chart must not read as one scale. #}
-          <template x-if="unfilteredKey()">
-            <div class="bp-liveleg bp-unfkey">
-              <span class="bp-hatchsw"></span>
+          {# THE TWO KEYS. Both shades are the same grey at two densities, so
+             each says plainly what it means and the overlap is left to read
+             as what it is: neither condition holds there. #}
+          <template x-if="liveKey()">
+            <div class="bp-liveleg">
+              <span class="bp-livesw" :style="'background:' + liveKey().bg"></span>
               <span>
-                <b>hatched — not filtered</b>:
-                <span x-text="unfilteredKey().metrics"></span>
-                <span x-text="unfilteredKey().metrics.includes(',') ? ' have ' : ' has '"></span>
-                no data before
-                <span x-text="unfilteredKey().from"></span>, so the
-                <span x-text="unfilteredKey().n.toLocaleString()"></span>
-                trades in that stretch could not be judged by
-                <span x-text="unfilteredKey().metrics.includes(',') ? 'them' : 'it'"></span>
-                and are drawn <b>unfiltered</b>. The hatch ends at
-                <span x-text="unfilteredKey().to"></span>, the last of them
-                to close.
+                fewer than all <span x-text="liveKey().total"></span>
+                strategies live
               </span>
             </div>
           </template>
-          {# WHAT THE SHADING MEANS. Both charts above carry it, so the key
-             sits under the pair rather than being repeated twice. #}
-          <template x-if="liveLegend().length">
+          <template x-if="unfilteredKey()">
             <div class="bp-liveleg">
-              <span>strategies live:</span>
-              <template x-for="s in liveLegend()" :key="s.n">
-                <span class="bp-livekey">
-                  <span class="bp-livesw" :style="'background:' + s.bg"></span>
-                  <span x-text="s.label"></span>
-                </span>
-              </template>
+              <span class="bp-livesw" :style="'background:' + unfilteredKey().bg"></span>
+              <span>
+                <b>not filtered</b> —
+                <span x-text="unfilteredKey().label"></span>
+                has no data before
+                <span x-text="unfilteredKey().from"></span>, so the
+                <span x-text="unfilteredKey().n.toLocaleString()"></span>
+                trades there could not be judged by it and are drawn
+                unfiltered. Ends at
+                <span x-text="unfilteredKey().to"></span>, the last of them to
+                close.
+              </span>
             </div>
           </template>
           <div class="ob-note" style="margin-top:6px">
@@ -654,18 +643,18 @@
                 <b>These two charts draw the whole range; the table does
                 not.</b> A filter that cannot see a stretch of history no
                 longer shortens the curve — the trades are drawn and the
-                stretch is hatched. The summary above still counts only
+                stretch is shaded. The summary above still counts only
                 trades a filter could judge and keep, so while anything is
-                hatched the end of this curve is above the table's Total P/L
+                shaded the end of this curve is above the table's Total P/L
                 and the trough may be deeper than its Max DD. That is the
                 same difference read two ways, not a disagreement.
               </span>
             </template>
-            <template x-if="liveLegend().length">
+            <template x-if="liveKey()">
               <span>
-                The background is shaded where fewer strategies were live —
-                darker the more of the portfolio is missing, and clear once
-                all of them are running. On union dates every strategy's
+                The background is shaded wherever some strategy was not
+                yet running or had already finished, and clear where all of
+                them are live. On union dates every strategy's
                 trades count, so the curve steepens as each one starts and
                 flattens as each one finishes; a shaded stretch is not
                 comparable with an unshaded one. It follows each strategy's
@@ -687,15 +676,13 @@
             <canvas id="bp-cap-chart" role="img"
                     aria-label="Capital deployed per SPX session across the portfolio"></canvas>
           </div>
-          <template x-if="liveLegend().length">
+          <template x-if="liveKey()">
             <div class="bp-liveleg">
-              <span>strategies live:</span>
-              <template x-for="s in liveLegend()" :key="s.n">
-                <span class="bp-livekey">
-                  <span class="bp-livesw" :style="'background:' + s.bg"></span>
-                  <span x-text="s.label"></span>
-                </span>
-              </template>
+              <span class="bp-livesw" :style="'background:' + liveKey().bg"></span>
+              <span>
+                fewer than all <span x-text="liveKey().total"></span>
+                strategies live
+              </span>
             </div>
           </template>
           <div class="ob-note" style="margin-top:6px">
