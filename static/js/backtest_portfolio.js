@@ -271,10 +271,29 @@ function bpSpecs(filters, registry, dateSpan) {
  * evaluable.
  */
 function bpLenientColumns(filters, registry) {
-  const out = new Set();
+  const out = new Map();
   for (const m of registry) {
     const f = filters && filters[m.key];
-    if (f && f.on && m.minDate) out.add(m.column);
+    if (f && f.on && m.minDate) out.set(m.column, m.minDate);
+  }
+  return out;
+}
+
+/* Trades an active blind-able filter could not judge even though its metric
+ * HAD data by then -- no bar at the entry time. They are scattered through
+ * the series rather than forming a stretch, so they are dropped exactly as
+ * the table drops them; this counts them so the page can say where they
+ * went instead of leaving a gap between the table and the shaded stretch. */
+function bpNoBarCount(cols, n, lenient) {
+  if (!lenient.size) return 0;
+  const entry = cols.date_opened || [];
+  let out = 0;
+  for (let i = 0; i < n; i++) {
+    for (const [column, from] of lenient) {
+      const col = cols[column];
+      if (!obNull(col ? col[i] : null)) continue;
+      if (entry[i] && entry[i] >= from) { out++; break; }
+    }
   }
   return out;
 }
@@ -967,6 +986,7 @@ document.addEventListener('alpine:init', () => {
       // charts keep drawing it and shade it instead of stopping short.
       const pooledDraw = { pnl: [], date_closed: [] };
       let unfilteredTo = null;      // the metric shade's right edge, by close
+      let noBar = 0;                // dropped for no bar at entry, not shaded
 
       for (const c of this.chosen) {
         const p = BP_DATA.payloads[c.id];
@@ -980,6 +1000,7 @@ document.addEventListener('alpine:init', () => {
         const lenient = bpLenientColumns(c.filters, this.registry);
         const idxDraw = lenient.size
           ? obApplyFilters(cols, p.n, specs, lenient) : idx;
+        noBar += bpNoBarCount(cols, p.n, lenient);
         const kept = lenient.size ? new Set(idx) : null;
         for (const i of idxDraw) {
           pooledDraw.pnl.push(cols.pnl[i]);
@@ -1086,6 +1107,7 @@ document.addEventListener('alpine:init', () => {
       // blind, and then these charts are exactly what they always were.
       curves.unfilteredTo = unfilteredTo;
       curves.unfilteredN = pooledDraw.pnl.length - pooled.pnl.length;
+      curves.noBarN = noBar;
       // Why, as opposed to how far: the latest coverage among the active
       // blind filters. Stated in the key; the edge itself is the data.
       curves.coverageFrom = bpUnfilteredTo(this.chosen, this.registry);
@@ -1542,7 +1564,7 @@ document.addEventListener('alpine:init', () => {
         }
       }
       return { to: c.unfilteredTo, from: c.coverageFrom, label,
-               n: c.unfilteredN || 0,
+               n: c.unfilteredN || 0, noBar: c.noBarN || 0,
                bg: `rgba(${BP_SHADE},${BP_SHADE_METRIC})` };
     },
 

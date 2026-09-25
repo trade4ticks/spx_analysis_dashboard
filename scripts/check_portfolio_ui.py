@@ -102,7 +102,12 @@ def build_page() -> str:
                 "premium": [None if i % 7 == 0 else 100.0 + i for i in range(n)],
                 # A metric whose coverage starts late, so a filter on it has
                 # a cost the panel has to state.
-                "vix_level": [None if i < vix_from else 14 + (i % 9) for i in range(n)],
+                # Nulls of TWO KINDS, as the real column has: the first
+                # vix_from trades predate the series (before coverage), and
+                # a scattered few later ones have no bar at the entry time
+                # (a 09:30 entry). Only the first kind is a STRETCH.
+                "vix_level": [None if (i < vix_from or i % 17 == 5)
+                               else 14 + (i % 9) for i in range(n)],
             },
         }
 
@@ -303,7 +308,12 @@ window.addEventListener('load', () => setTimeout(async () => {
   const trough = Math.min(...ddPts.map(p => p.y));
   const tableDD = document.querySelector('.bp-table tr.total td:nth-child(9)').textContent;
   // THE TROUGH IS THE TABLE'S MAX DD, not a shallower day-end reading.
-  ok('the trough equals the table Max DD', bpFmtMoney(trough), tableDD);
+  // ...when nothing is shaded. Once a filter is blind to part of the
+  // history these charts deliberately draw trades the table does not count,
+  // so the trough can be deeper than the table's Max DD. Same exception as
+  // the curve's end total above.
+  ok('the trough equals the table Max DD, nothing being shaded',
+     BP_DATA.curves.unfilteredTo ? tableDD : bpFmtMoney(trough), tableDD);
   ok('the deepest point is marked', dd.data.datasets[1].data.length, 1);
 
   // ── TRADES THAT PREDATE THE MARKET DATA ───────────────────────────
@@ -827,6 +837,15 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('and it really is the later of the two', v9.minDate > vixM.minDate, true);
   ok('the shade grew with it',
      BP_DATA.curves.unfilteredTo >= v9.minDate, true);
+  // AND IT STOPS SOON AFTER THE COVERAGE DATE, not at the end of the data.
+  // A scattered no-bar null late in the series used to drag it years past
+  // the boundary; the shade is only ever as long as the trades it explains.
+  const held = Math.max(...BP_DATA.payloads[3].columns.days_in_trade) + 1;
+  const edge = obDay(BP_DATA.curves.unfilteredTo) - obDay(v9.minDate);
+  ok('the shade stops within one holding period of coverage',
+     edge >= 0 && edge <= held, true);
+  ok('and nowhere near the end of the data',
+     BP_DATA.curves.unfilteredTo < BP_DATA.payloads[3].date_max, true);
 
   // 4. BOTH KEYS ON THE PAGE, AND THEY ARE NOT THE SAME THING.
   const keyU = cU.unfilteredKey();

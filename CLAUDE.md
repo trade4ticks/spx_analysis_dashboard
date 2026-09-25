@@ -379,11 +379,24 @@ stretch the filter was blind to.
 - Which columns: active filters with a registry `minDate`. A metric with
   gaps but no coverage start (a missing `premium`) is NOT blind — those
   trades are dropped from the charts too, and a gate plants that.
-- The hatch ends at the **last unfiltered trade to CLOSE**, not at the
+- The shade ends at the **last unfiltered trade to CLOSE**, not at the
   coverage date, because the curves are drawn on a close-date axis: a trade
   entered before coverage can close after it, and ending at the coverage date
-  would leave it drawn unfiltered OUTSIDE the hatch. Gated as an invariant —
-  every trade the chart adds back closes inside the hatch.
+  would leave it drawn unfiltered OUTSIDE the shade. Gated as an invariant —
+  every trade the chart adds back closes inside the shade.
+- **A metric column holds TWO kinds of null and only one of them is a
+  stretch** (2026-09-25). Everything before the metric's coverage begins, and
+  a scattered few after it where the entry had no bar (a 09:30 entry). So
+  `lenient` is a Map of column → COVERAGE DATE, and a null passes only for a
+  trade entered before it; a no-bar trade is dropped from the charts exactly
+  as the table drops it. Treating both as blind let a single late no-bar
+  trade drag the shaded stretch to the last close in the series — six years
+  past the coverage date, reported as "the shade ends 2026-09-11" on a log
+  whose coverage starts 2018-06-08. The gate now asserts the shade stops
+  within one holding period of the coverage date and nowhere near the end of
+  the data, and the fixture carries both kinds of null. The key states the
+  no-bar count separately, so the trades that are neither shaded nor counted
+  are accounted for rather than missing.
 - With several blind filters active the reason date is the **latest**
   coverage among them, not the earliest: nothing before it has passed all of
   them.

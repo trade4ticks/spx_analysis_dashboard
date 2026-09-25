@@ -58,6 +58,7 @@ const obNull = v => v === null || v === undefined || (typeof v === 'number' && N
  *   {kind:'range', column, lo, hi}     inclusive, as filter_dataframe had it
  *   {kind:'set',   column, allowed}    a Set of permitted values */
 function obApplyFilters(cols, n, specs, lenient) {
+  const entry = lenient ? (cols.date_opened || []) : null;
   const idx = [];
   outer:
   for (let i = 0; i < n; i++) {
@@ -65,14 +66,24 @@ function obApplyFilters(cols, n, specs, lenient) {
       const col = cols[f.column];
       const v = col ? col[i] : null;
       const isNull = obNull(v);
-      // A FILTER THAT CANNOT BE EVALUATED MAY BE TOLD TO PASS. `lenient` is a
-      // set of columns whose nulls mean "no data to judge this trade by",
-      // not "judged and rejected" -- a metric before its coverage starts.
+      // A FILTER THAT CANNOT BE EVALUATED MAY BE TOLD TO PASS. `lenient` maps
+      // a column to the date its metric's data STARTS, and a null passes
+      // only for a trade entered BEFORE that date.
+      //
+      // The date is the whole point. A metric's column holds two kinds of
+      // null: everything before its coverage begins, and a scattered few
+      // after it where the entry had no bar (a 09:30 entry). Only the first
+      // is a STRETCH of history the filter was blind to. Treating both as
+      // blind let one 2023 no-bar trade drag the shaded stretch six years
+      // past the coverage date, which is how this was found.
+      //
       // Dropping is still the default and the summary table always uses it;
-      // this exists so a chart can draw the whole history and SHADE the
-      // stretch a filter was blind to, rather than silently shortening
-      // itself to wherever the metric happens to begin.
-      if (isNull && lenient && lenient.has(f.column)) continue;
+      // a no-bar trade is dropped from the charts too, exactly as the table
+      // drops it.
+      if (isNull && lenient) {
+        const from = lenient.get(f.column);
+        if (from && entry[i] && entry[i] < from) continue;
+      }
       if (f.kind === 'range') {
         if (isNull || v < f.lo || v > f.hi) continue outer;
       } else if (f.kind === 'set') {

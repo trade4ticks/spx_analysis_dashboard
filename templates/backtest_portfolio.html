@@ -625,10 +625,18 @@
                 has no data before
                 <span x-text="unfilteredKey().from"></span>, so the
                 <span x-text="unfilteredKey().n.toLocaleString()"></span>
-                trades there could not be judged by it and are drawn
-                unfiltered. Ends at
+                trades entered before that are drawn unfiltered. Ends at
                 <span x-text="unfilteredKey().to"></span>, the last of them to
                 close.
+                <template x-if="(unfilteredKey() || {}).noBar">
+                  <span>
+                    A further
+                    <span x-text="((unfilteredKey() || {}).noBar || 0).toLocaleString()"></span>
+                    entered after it with no bar at their entry time; those
+                    are scattered rather than a stretch, so they are dropped
+                    here exactly as the table drops them.
+                  </span>
+                </template>
               </span>
             </div>
           </template>
