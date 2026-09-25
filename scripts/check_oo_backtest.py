@@ -1454,8 +1454,20 @@ process.stdout.write(JSON.stringify(out, (k, v) => (v === Infinity ? 'Infinity' 
 
 
 def _weekdays(lo: str, hi: str, drop=()) -> list[str]:
-    days = pd.bdate_range(lo, hi)
-    return [d.strftime("%Y-%m-%d") for d in days if d.strftime("%Y-%m-%d") not in set(drop)]
+    """EXCHANGE SESSIONS between two dates, from the same calendar the page
+    uses.
+
+    This was pd.bdate_range minus a hand-written list of three holidays --
+    a second, worse trading calendar living in a test, which would drift
+    from the real one the moment anything moved. `drop` is kept for the
+    cases that deliberately remove a session the calendar HAS, and it is
+    asserted to name only real sessions so a typo cannot quietly do nothing.
+    """
+    from app.oo_backtest import market_calendar as mc
+    days = mc.sessions(lo, hi)
+    unknown = [d for d in drop if d not in set(days)]
+    assert not unknown, f"drop names days that are not sessions anyway: {unknown}"
+    return [d for d in days if d not in set(drop)]
 
 
 def _weekly_handover() -> dict:
@@ -1483,8 +1495,9 @@ def check_deployment_and_extra_stats() -> None:
     from app.oo_backtest.market import session_days
 
     rng = random.Random(23)
-    holidays = ["2021-07-05", "2021-11-25", "2022-01-17"]
-    sessions = _weekdays("2021-01-04", "2022-12-30", holidays)
+    # No holiday list: the calendar already knows 07-05, Thanksgiving and
+    # MLK Day are not sessions, and it knows the ones nobody remembers too.
+    sessions = _weekdays("2021-01-04", "2022-12-30")
     # Trades avoid 2021-09-01 .. 2022-02-28 entirely: six months flat at zero.
     usable = [d for d in sessions if not ("2021-08-20" <= d <= "2022-02-28")]
     trades = []
@@ -1518,6 +1531,15 @@ def check_deployment_and_extra_stats() -> None:
         df["date_opened"] = pd.to_datetime(df["date_opened"])
         df["date_closed"] = pd.to_datetime(df["date_closed"])
         st = pystats.calculate_stats(df.copy())
+        # MAX DRAWDOWN WITH A STABLE TIE-BREAK, matching obByClose.
+        # utils/stats.py sorts with pandas' default quicksort, which is NOT
+        # stable, so its max drawdown can differ when several trades close on
+        # the same day. The page chose a stable sort deliberately and says so;
+        # comparing Calmar against the unstable value makes this check flap on
+        # the fixture's ties rather than test the formula.
+        sdf = df.sort_values("date_closed", kind="stable")
+        cum = sdf["pnl"].cumsum()
+        max_dd = float((cum - cum.cummax()).min())
         # CLOSE-TO-CLOSE, as obExtraStats measures it and as the old
         # Render app did. Measuring from the first ENTRY stretched the
         # window by the first position's holding period and understated
@@ -1525,7 +1547,7 @@ def check_deployment_and_extra_stats() -> None:
         years = (df["date_closed"].max() - df["date_closed"].min()).days / 365.25
         ann = st["total_pnl"] / years
         gw, gl = df.loc[df["pnl"] > 0, "pnl"].sum(), df.loc[df["pnl"] < 0, "pnl"].sum()
-        return {"avg_annual_pnl": ann, "calmar": ann / abs(st["max_drawdown"]),
+        return {"avg_annual_pnl": ann, "calmar": ann / abs(max_dd),
                 "profit_factor": gw / abs(gl), "avg_pnl_pct": st["avg_pnl"] / capital * 100,
                 "avg_annual_return_pct": ann / (peak * capital) * 100}
 

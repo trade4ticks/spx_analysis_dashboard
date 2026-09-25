@@ -60,8 +60,9 @@ Annual Return %). Every session in the span is a point, so a stretch with
 nothing open is a run of zeros. One stepped line; the right axis is the left × capital,
 pinned to the same range, not a second trace. Still-open MesoSim positions are excluded by
 the parser and so contribute nothing (gate-checked against the v3.1 fixture). Trades
-opening or closing off an SPX session (e.g. 2026-04-08) are counted from the next session
-and reported under the chart.
+opening or closing off an exchange session (a weekend or holiday) are counted from the
+next session and reported under the chart. 2026-04-08 is no longer an example of this —
+it IS a session; see the exchange-calendar section.
 
 ## Live trading: the broker interface (2026-09-17)
 
@@ -914,7 +915,8 @@ The **Market-data checks** pane is collapsed by default (header toggles it).
 - **Every non-trading day has 78 rows of zeros** (weekends and holidays alike). The table
   is a complete calendar scaffold with real data written only into sessions.
 - **Holidays also carry 19–25 "artifact" VIX bars** — stale/partial rows on closed days.
-  Not data.
+  Not data. The calendar names them for what they are: values written while the market was
+  shut, reported as artifacts with no threshold involved.
 - **Postgres NaN:** NaN sorts above every number. `x <= 0` is false for NaN, `x > 0` is
   true, `x = 'NaN'` is true. A validity test needs `> 0 AND <> 'NaN'` (not null, not NaN,
   positive). Make values valid *before* any aggregate — `max()` over a column with one NaN
@@ -923,13 +925,54 @@ The **Market-data checks** pane is collapsed by default (header toggles it).
 - **2026-04-08** is a real trading day (full VIX session) with zero SPX bars — missing
   data, not a non-session.
 
-**Session rule** (`MIN_SESSION_BARS = 34` in `market.py`): a series has a session on a day
-when it has ≥ 34 valid bars in 09:30–15:55. Artifact holidays peak at 25; the shortest
-real session (early close) is 41. Margins are shown in the Market data detail panel.
+### The exchange calendar decides what a session is (2026-09-25)
 
-Sessions are **per series**. SPX's previous close is from the previous day SPX had a
-session; VIX's from the previous day VIX had one. **No trading-day calendar anywhere** —
-it would disagree with the table on days like 2026-04-08. The rule is derived from data.
+**This reverses "no trading-day calendar anywhere", which was wrong.** The old rule —
+`MIN_SESSION_BARS = 34`, a series has a session when it has ≥ 34 valid bars in
+09:30–15:55 — was reverse-engineered to sit between a real session (78 bars, 42 on an
+early close) and the 11–25 stale bars VIX ingestion writes on holidays. The argument for
+it was that a calendar would disagree with the table on days like 2026-04-08. **It
+disagreed because the table was wrong**: 2026-04-08 was an ordinary NYSE session with a
+full VIX session and zero SPX bars — a missing day in the upstream pipeline that the rule
+reported as "not an SPX session", indistinguishable from a holiday. Do not restore the
+data-derived rule as a cleanup.
+
+**Two questions, answered separately.** `app/oo_backtest/market_calendar.py` (NYSE, via
+`pandas_market_calendars`, rules bundled — no network) says whether a day was a SESSION.
+The bars say whether a SERIES has usable data on one. `MIN_SESSION_BARS` is gone.
+
+- **Expected bars come from each day's own close**: 78 for 09:30–16:00, 42 for a 13:00
+  early close, so a SHORT half-day is detectable where a single floor could never see one.
+  `BAR_SHORTFALL_TOLERANCE = 2` is set by this table's own behaviour — VIX3M and VIX9D can
+  arrive a bar or two behind.
+- **The rollup is one row per exchange session** in the table's range, sessions and
+  expected counts passed in as two arrays. A session the writer left empty is a row with
+  nulls and its flags off, not an absent day.
+- **`session_report` reports three things apart**: non-session days; bars written while the
+  market was SHUT (an artifact — no threshold needed to recognise one); and per series on a
+  real session, complete / partial / **missing**. Shortfalls are grouped by size ("short by
+  53 on 1 session") and a series with no data on a session gets a log WARNING naming the
+  dates. It is a pipeline hole, not a quiet day.
+- **The deployment axis is a market fact**: `session_days` asks the calendar, so it no
+  longer stops where `index_ohlc` starts (a 2013 strategy had four years of blank capital
+  deployed beside a full equity curve) and a session with SPX missing is still a day, since
+  a position was held over it either way.
+- **Freshness is counted in COMPLETED sessions** (`STALE_AFTER_SESSIONS = 1`), not five
+  calendar days. A session that has not finished is not counted, so it cannot fire every
+  afternoon; weekends and holidays cost nothing, which is what the five days used to buy.
+
+Sessions are still **per series** for DATA: SPX's previous close is from the previous
+session SPX had usable data on, VIX's from the previous session VIX did.
+
+`scripts/check_market_calendar.py` (offline, runs on the VPS) pins the cases that decided
+this, 2026-04-08 by name. The test helper's hand-written holiday list is gone too — a
+second, worse trading calendar living in a gate.
+
+**The dependency is hard, and install order matters**: `pandas_market_calendars>=5.0`, and
+on the VPS it goes in BEFORE the pull —
+`sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'`. The
+module raises ImportError rather than falling back, deliberately: a silent fallback to the
+bar-count rule would restore exactly the hiding this removed.
 
 **Known upstream data problems (not page bugs):**
 - 2026 16:00 bars stopped: ~249 valid/year through 2025, 65 of 174 in 2026. Ingestion

@@ -207,6 +207,25 @@ ordinary failure. Gates in the order `gates.py` runs them:
 `check_oo_market_sql` needs `initdb`; `check_portfolio_ui` needs a browser
 and skips without one. None of the three can run on the VPS.
 
+### 2c. Runtime dependency added 2026-09-25
+
+`pandas_market_calendars>=5.0` is a HARD dependency of `app/oo_backtest`. The
+exchange calendar (NYSE) decides whether a day was a trading session; the OHLC
+data decides whether a series has usable values on one. It replaced a rule that
+inferred sessions from the data it was meant to be checking, which reported a
+missing day (2026-04-08) as a non-trading day.
+
+**Install on the VPS BEFORE pulling**, or the dashboard will not start:
+
+```bash
+sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'
+```
+
+Rules ship in the package — no network at runtime. It pulls four transitive
+dependencies (`exchange-calendars`, `toolz`, `pyluach`, `korean_lunar_calendar`).
+`app/oo_backtest/market_calendar.py` raises ImportError rather than falling back,
+deliberately. Gate: `scripts/check_market_calendar.py`, offline, runs on the VPS.
+
 ### Script notes
 
 - **NO bin-builder script in this repo.** Verified by grepping `CREATE TABLE.*(is\|wf\|tt)_bins` and `build_bins|populate_bins|fill_bins`. The bin tables and `tt_thresholds` are populated by an external pipeline (likely the Open_Interest sibling repo). If those tables get truncated, recovery requires running the external pipeline — not anything in this repo.
