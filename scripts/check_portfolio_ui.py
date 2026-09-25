@@ -79,10 +79,19 @@ def build_page() -> str:
 
     sessions = [d.date().isoformat() for d in pd.bdate_range("2017-01-03", "2026-12-31")]
 
-    def payload(sid, name, color, cap, n, start, step, hold, pnls, vix_from):
+    def payload(sid, name, color, cap, n, start, step, hold, pnls, vix_from,
+                first_hold=None):
+        # first_hold: the FIRST trade held far longer than the rest, which is
+        # ordinary for options held days to months and is what pulls a
+        # strategy's earliest OPEN away from its earliest CLOSE. The charts
+        # plot by close, so the two are not interchangeable.
         d0 = dt.date.fromisoformat(start)
         op = [(d0 + dt.timedelta(days=i * step)).isoformat() for i in range(n)]
-        cl = [(dt.date.fromisoformat(o) + dt.timedelta(days=hold)).isoformat() for o in op]
+        holds = [hold] * n
+        if first_hold:
+            holds[0] = first_hold
+        cl = [(dt.date.fromisoformat(o) + dt.timedelta(days=holds[i])).isoformat()
+              for i, o in enumerate(op)]
         return {
             "saved": {"id": sid, "name": name, "capital_per_position": cap,
                       "trade_count": n},
@@ -94,7 +103,7 @@ def build_page() -> str:
             "columns": {
                 "date_opened": op, "date_closed": cl,
                 "pnl": [pnls[i % len(pnls)] for i in range(n)],
-                "days_in_trade": [hold] * n,
+                "days_in_trade": holds,
                 "day_of_week": [dt.date.fromisoformat(d).weekday() for d in op],
                 "exit_reason": ["profit target"] * n,
                 # Gaps, but no coverage START: a missing premium is missing
@@ -112,7 +121,10 @@ def build_page() -> str:
         }
 
     a = payload(1, "monthly", "#3498db", 25000, 40, "2023-01-03", 30, 30, [100.0], 0)
-    old = payload(3, "since2013", "#4ec9a0", 20000, 84, "2013-01-02", 60, 20, [250.0, -90.0], 30)
+    # Its first trade is held 400 days, so its earliest OPEN (2013-01-02) and
+    # the start of its LINE are well over a year apart.
+    old = payload(3, "since2013", "#4ec9a0", 20000, 84, "2013-01-02", 60, 20,
+                  [250.0, -90.0], 30, first_hold=400)
     b = payload(2, "weekly", "#e84393", 10000, 40, "2023-01-06", 7, 7, [300.0, -100.0], 10)
     # index_ohlc's real per-series starts, so the registry carries the
     # minDates the hatch is derived from. Fixture values: the app reads
@@ -373,12 +385,40 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('some stretch has them all', shade.bands.some(b => !b.partial), true);
   ok('and the ends do not', shade.bands[0].partial
      && shade.bands[shade.bands.length - 1].partial, true);
-  // THE EDGES ARE THE STRATEGIES' OWN DATES, not the chart's.
-  const spanStarts = cS.loaded.map(p => obDay(p.date_min)).sort((a, b) => a - b);
-  ok('the first band starts at the earliest open', shade.bands[0].from, spanStarts[0]);
-  const lastEnd = Math.max(...cS.loaded.map(p => obDay(p.date_max) + 1));
-  ok('the last band ends after the latest close',
-     shade.bands[shade.bands.length - 1].to, lastEnd);
+  // THE BANDS ARE THE DRAWN LINES' OWN EDGES, in the charts' own units.
+  //
+  // These charts plot by CLOSE date. The payload's date_min is the earliest
+  // OPEN and date_max the latest CLOSE -- a mixed basis -- so a strategy
+  // whose first position was held for months had a span that began long
+  // before its line did, and the band called it live over a stretch where it
+  // had drawn nothing. The fixture's third strategy holds its first trade
+  // 400 days precisely so the two cannot be confused.
+  const lines = BP_DATA.curves.eq.filter(sv => !sv.total && sv.points.length);
+  const starts = lines.map(sv => obDay(sv.points[0].date)).sort((a, b) => a - b);
+  const ends = lines.map(sv => obDay(sv.points[sv.points.length - 1].date) + 1);
+  ok('the first band starts where the first line starts',
+     shade.bands[0].from, starts[0]);
+  ok('the last band ends where the last line ends',
+     shade.bands[shade.bands.length - 1].to, Math.max(...ends));
+  // ALL LIVE ONLY ONCE EVERY LINE HAS STARTED.
+  const firstFull = shade.bands.find(b => !b.partial);
+  ok('all-live begins when the last line begins',
+     firstFull.from, starts[starts.length - 1]);
+  // AND IT IS NOT THE EARLIEST OPEN. A line begins at the EARLIEST CLOSE,
+  // which is a whole holding period after the earliest entry -- and not
+  // even the first trade's, since obByClose orders by exit and this
+  // strategy holds its first position 400 days while the next closes in 20.
+  // A band built on date_min would start at the entry and be wrong by that
+  // gap, which on positions held days to months is months.
+  const pLong = cS.loaded.find(x => x.saved.id === 3);
+  const lineLong = BP_DATA.curves.eq.find(
+    sv => sv.name === cS.rows.find(r => r.id === 3).name);
+  const gap = obDay(lineLong.points[0].date) - obDay(pLong.date_min);
+  ok('its earliest open is well before its line starts', gap > 60, true);
+  ok('and the band starts with the line, not the open',
+     starts[0], obDay(lineLong.points[0].date));
+  ok('which is not where date_min is',
+     shade.bands[0].from === obDay(pLong.date_min), false);
   // ONE STRATEGY HAS NOTHING TO BE FEWER THAN.
   ok('a single strategy gets no bands',
      bpLiveBands([cS.loaded[0]]).bands.length, 0);

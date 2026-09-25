@@ -156,20 +156,29 @@ const BP_SHADE_METRIC = 0.20;
  * portfolio getting better and then worse when it is only the membership
  * changing.
  *
- * A strategy is live across its OWN span, first open to last close, so a
- * strategy that finished stops counting. Spans are half-open in epoch days
- * ([open, close+1)) for the same reason the deployment count is: a day is
- * either inside a span or it is not, and the last day has to be inside.
+ * TAKEN FROM THE DRAWN CURVES, not from the payload's date_min/date_max.
+ * Those two mean different things — date_min is the earliest OPEN and
+ * date_max the latest CLOSE — while these charts plot by CLOSE, so a
+ * strategy's span started at its first trade's ENTRY while its line did not
+ * begin until that trade EXITED. On positions held days to months that is a
+ * gap of months, and the band claimed a strategy was live over a stretch
+ * where it had drawn nothing. Reading the spans off the curves makes the two
+ * agree by construction rather than by keeping two date bases in step.
+ *
+ * It also means the bands follow what is actually plotted: a filter that
+ * removes a strategy's early trades moves its line, and the band moves with
+ * it.
  *
  * Bands are merged by WHETHER ALL ARE LIVE, not by how many — a stretch that
  * goes from one strategy to two is one band, because both are "not all".
- * Fewer than two strategies gets no bands at all: there is nothing to be
- * fewer than, and shading the whole chart would say something false. */
-function bpLiveBands(payloads) {
+ * Fewer than two strategies with a line gets no bands: there is nothing to
+ * be fewer than, and shading the whole chart would say something false. */
+function bpLiveBands(series) {
   const spans = [];
-  for (const p of payloads || []) {
-    if (!p || !p.date_min || !p.date_max) continue;
-    spans.push([obDay(p.date_min), obDay(p.date_max) + 1]);
+  for (const sv of series || []) {
+    if (!sv || sv.total || !sv.points || !sv.points.length) continue;
+    const pts = sv.points;
+    spans.push([obDay(pts[0].date), obDay(pts[pts.length - 1].date) + 1]);
   }
   const total = spans.length;
   if (total < 2) return { total, bands: [] };
@@ -1545,7 +1554,8 @@ document.addEventListener('alpine:init', () => {
      * name reads as a rendering fault. */
     liveShade() {
       void this.tick;
-      return bpLiveBands(this.loaded);
+      // The DRAWN curves, so the bands and the lines cannot disagree.
+      return bpLiveBands((BP_DATA.curves || {}).eq || []);
     },
 
     /* The metric shade's key. It names the filter that SET THE BOUNDARY --
