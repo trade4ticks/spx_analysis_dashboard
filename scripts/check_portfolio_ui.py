@@ -154,6 +154,22 @@ window.fetch = async (u) => ({ok: true, json: async () => {
     {id:3,name:'since2013',trade_count:84,capital_per_position:20000}],
     colors:['#3498db','#e84393'], max:12};
   if (String(u).includes('/registry')) return {metrics: %s};
+  // THE OO PAGE'S SURFACE ENDPOINTS, reused rather than duplicated.
+  if (String(u).includes('/surface/catalog')) return {
+    metrics: [
+      {column_name: 'iv_30d_atm', family: 'iv', form: 'level', units: 'vol_decimal',
+       description: 'ATM implied vol, 30d', min_date: '2020-01-02'},
+      {column_name: 'z_iv_30d_atm', family: 'iv', form: 'z', units: 'zscore',
+       description: 'ATM implied vol, 30d, z-scored', min_date: '2021-04-05'},
+      {column_name: 'skew_25d', family: 'skew', form: 'level', units: 'vol_decimal',
+       description: '25-delta skew', min_date: '2020-01-02'}],
+    family_groups: [{label: 'IV', color: '#3987e5', families: ['iv']},
+                    {label: 'Skew', color: '#d95926', families: ['skew']}],
+    other_group: {label: 'Other', color: '#8a8a8a'},
+    unit_formats: {vol_decimal: {scale: 100, decimals: 2, suffix: 'vol pts'},
+                   zscore: {scale: 1, decimals: 2, suffix: ''}},
+    default_unit_format: {scale: 1, decimals: 4, suffix: ''},
+  };
   if (String(u).includes('/load')) return {strategies: LOADED,
     load: {seconds: 0.2, n: 2, from_cache: 2, parsed: 0}};
   return {};
@@ -161,10 +177,22 @@ window.fetch = async (u) => ({ok: true, json: async () => {
 
 // A profile store, in memory, behaving like the endpoints: 409 on a name
 // that exists, and a load that reports which strategies are gone.
+window.__surfCalls = [];
 window.__profiles = [];
 const realFetch = window.fetch;
 window.fetch = async (u, init) => {
   const url = String(u);
+  if (url.includes('/surface/values')) {
+    const body = JSON.parse(init.body);
+    window.__surfCalls.push({column: body.column, n: body.trades.length});
+    const from = body.column === 'z_iv_30d_atm' ? '2021-04-05' : '2020-01-02';
+    const values = body.trades.map((t, i) =>
+      (t[0] < from ? null : (i %% 13 === 4 ? null : 0.10 + (i %% 17) * 0.002)));
+    return {ok: true, status: 200, json: async () => ({
+      column: body.column, values,
+      bar_times: values.map(v => (v === null ? null : '09:35:00')),
+      report: {trades: values.length, no_bar: values.filter(v => v === null).length}})};
+  }
   if (url.includes('/profiles')) {
     const m = url.match(/profiles\/(\d+)/);
     if (init && init.method === 'POST') {
@@ -211,7 +239,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     pre.textContent = out.concat(['FAIL|the driver did not finish|hung|done',
       'errs|' + (window.__errs.slice(0, 3).join(' ~ ') || 'clean')]).join(String.fromCharCode(10));
     document.body.appendChild(pre);
-  }, 12000);
+  }, 40000);
   try {
   const ok = (k, got, want) => out.push(
     (String(got) === String(want) ? 'ok|' : 'FAIL|') + k + '|' + got + '|' + want);
@@ -942,6 +970,102 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('and the charts are what they were',
      cU.rows.find(r => r.id === 3).dropped, 0);
 
+  // ── SURFACE METRICS AS PER-STRATEGY FILTERS ───────────────────────
+  const cS2 = Alpine.$data(document.querySelector('[x-data]'));
+  for (const ch of cS2.chosen) cS2.resetFilters(ch);
+  cS2.recompute();
+  await wait(120);
+
+  // The panel is where the picker lives, and opening it loads the catalog.
+  const sfSid = 3, sfOther = 1;
+  cS2.toggleEdit(sfSid);
+  await wait(200);
+  ok('the surface catalog loaded', (cS2.surf.catalog || []).length, 3);
+  ok('grouped by family, in the legend order',
+     cS2.surfaceOptions().map(g => g.label).join(' | '), 'IV · iv | Skew · skew');
+
+  const sfBefore = cS2.rows.find(r => r.id === sfSid).n;
+  const sfOtherBefore = cS2.rows.find(r => r.id === sfOther).n;
+  await cS2.addSurfaceMetric(sfSid, 'iv_30d_atm');
+  await wait(200);
+  const sc = cS2.chosen.find(c => c.id === sfSid);
+  const sfM = (sc.surface || [])[0];
+  ok('the metric was added to that strategy', !!sfM, true);
+  ok('and to NO sfOther strategy',
+     (cS2.chosen.find(c => c.id === sfOther).surface || []).length, 0);
+  ok('it was fetched once, for every trade of that strategy',
+     window.__surfCalls.length && window.__surfCalls[0].n,
+     BP_DATA.payloads[sfSid].n);
+
+  // VALUES ALIGN BY INDEX. A shifted column is the failure that looks like
+  // data, so the length is checked against the trade count, not trusted.
+  const sfVals = BP_DATA.payloads[sfSid].columns[sfM.column];
+  ok('the column is as long as the trade list', sfVals.length, BP_DATA.payloads[sfSid].n);
+  ok('and is scaled to display units',
+     Math.max(...sfVals.filter(v => v !== null)) > 1, true);
+  ok("it enters that strategy's registry",
+     cS2.registryFor(sc).some(x => x.key === sfM.key), true);
+  ok('and not the shared one', cS2.registry.some(x => x.key === sfM.key), false);
+  ok('the filter cell exists for it',
+     [...document.querySelectorAll('.bp-fcell')]
+       .some(el => el.textContent.includes('iv_30d_atm')), true);
+
+  // THE COVERAGE COST, STATED BEFORE THE SLIDER MOVES. Split the way the
+  // single-backtest page splits it: a stretch of history the metric does not
+  // reach, and scattered entries with no bar.
+  const sfCost = cS2.surfaceCost(sc, sfM);
+  const sfDates = BP_DATA.payloads[sfSid].columns.date_opened;
+  const sfHandBefore = sfVals.filter((v, i) => v === null && sfDates[i] < '2020-01-02').length;
+  const sfHandNoBar = sfVals.filter((v, i) => v === null && sfDates[i] >= '2020-01-02').length;
+  ok('the sfCost counts every trade with no value',
+     sfCost.dropped, sfVals.filter(v => v === null).length);
+  ok('sfBefore-coverage matches a hand count', sfCost.before, sfHandBefore);
+  ok('no-bar matches a hand count', sfCost.noBar, sfHandNoBar);
+  ok('both kinds really occur in the fixture',
+     sfCost.before > 0 && sfCost.noBar > 0, true);
+  const sfTxt = cS2.surfaceCostText(sc, sfM);
+  ok('the text names the coverage date', sfTxt.includes('2020-01-02'), true);
+  ok('and says it WOULD drop, sfBefore the filter is on',
+     sfTxt.includes('would drop'), true);
+
+  // TURNING IT ON NARROWS THIS STRATEGY AND LEAVES THE OTHERS ALONE.
+  sc.filters[sfM.key] = { on: true, lo: sfM.min, hi: sfM.max };
+  cS2.recompute();
+  await wait(150);
+  const sfAfter = cS2.rows.find(r => r.id === sfSid).n;
+  ok('the filtered strategy lost exactly the trades with no value',
+     sfBefore - sfAfter, sfCost.dropped);
+  ok('the sfOther strategy is untouched',
+     cS2.rows.find(r => r.id === sfOther).n, sfOtherBefore);
+  ok('the badge names it',
+     cS2.badges(sc).some(b => b.key === sfM.key), true);
+  ok('and the text now says it IS dropping',
+     cS2.surfaceCostText(sc, sfM).includes('is dropping'), true);
+
+  // IT IS A COVERAGE-LIMITED FILTER, so it drives the charts' metric shade.
+  ok('it sets the unfiltered boundary',
+     BP_DATA.curves.coverageFrom, '2020-01-02');
+
+  // A SECOND METRIC WITH A LATER START WINS THE BOUNDARY.
+  await cS2.addSurfaceMetric(sfSid, 'z_iv_30d_atm');
+  await wait(200);
+  const sfMz = sc.surface.find(x => x.surfColumn === 'z_iv_30d_atm');
+  sc.filters[sfMz.key] = { on: true, lo: sfMz.min, hi: sfMz.max };
+  cS2.recompute();
+  await wait(150);
+  ok('the later coverage sets the boundary',
+     BP_DATA.curves.coverageFrom, '2021-04-05');
+
+  // REMOVING PUTS IT BACK, and re-adding does NOT hit the server again.
+  const sfCalls = window.__surfCalls.length;
+  cS2.removeSurfaceMetric(sfSid, sfMz.key);
+  await wait(150);
+  ok('removing drops the cell', (sc.surface || []).length, 1);
+  ok('and its column', BP_DATA.payloads[sfSid].columns[sfMz.column], undefined);
+  await cS2.addSurfaceMetric(sfSid, 'z_iv_30d_atm');
+  await wait(200);
+  ok('re-adding is served from the cache', window.__surfCalls.length, sfCalls);
+
   } catch (e) {
     // A THROW IS A FINDING, not a lost run: without this the page simply
     // never reports and the gate can only say "it did not get that far".
@@ -978,12 +1102,12 @@ def main() -> int:
             subprocess.run(
                 [browser, "--headless=new", "--disable-gpu",
                  "--window-size=1600,3800", f"--screenshot={shot}",
-                 "--virtual-time-budget=20000", tmp.as_uri()],
+                 "--virtual-time-budget=60000", tmp.as_uri()],
                 capture_output=True, timeout=180)
             print(f"  wrote {shot}")
         p = subprocess.run(
             [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1000",
-             "--dump-dom", "--virtual-time-budget=20000", tmp.as_uri()],
+             "--dump-dom", "--virtual-time-budget=60000", tmp.as_uri()],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=180)
     finally:

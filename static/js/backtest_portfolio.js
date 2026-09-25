@@ -24,6 +24,11 @@
 'use strict';
 
 const BP_DATA = {
+  // Per (strategy, surface metric) values, so removing and re-adding a
+  // metric costs nothing. Cleared by a load: the file behind a saved
+  // strategy can have been re-saved since.
+  surface: {},
+  loadToken: 0,
   payloads: {},      // strategy id -> the server's payload
   scaled: {},        // strategy id -> { qty, cols } with pnl x qty
   extents: {},       // "id:metric" -> the observed range, for the sliders
@@ -265,6 +270,19 @@ function bpSpecs(filters, registry, dateSpan) {
   return specs;
 }
 
+/* A slider step for a metric whose scale we do not know in advance.
+ * Surface metrics range from 0.0001 to hundreds depending on the family, so
+ * the step comes from the DATA's own span rather than a registry field that
+ * does not exist for them. ~100 notches, snapped to a 1/2/2.5/5 decade so
+ * the readout has a sane number of decimals. */
+function bpNiceStep(span) {
+  if (!(span > 0) || !isFinite(span)) return 0.01;
+  const raw = span / 100;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const mult = [1, 2, 2.5, 5, 10].find(m => raw <= m * mag) || 10;
+  return Number((mult * mag).toPrecision(12));
+}
+
 /* FILTERS THAT CANNOT SEE THE WHOLE HISTORY.
  *
  * A filter either judges a trade or is blind to it, and the two are not the
@@ -314,7 +332,9 @@ function bpNoBarCount(cols, n, lenient) {
 function bpUnfilteredTo(chosen, registry) {
   let to = null;
   for (const c of chosen || []) {
-    for (const m of registry) {
+    // A surface metric has a coverage date like any other, and it is the
+    // one most likely to set the boundary -- z-scores start years late.
+    for (const m of [...registry, ...(c.surface || [])]) {
       const f = c.filters && c.filters[m.key];
       if (!f || !f.on || !m.minDate) continue;
       if (!to || m.minDate > to) to = m.minDate;
@@ -369,6 +389,11 @@ document.addEventListener('alpine:init', () => {
     // ── state ───────────────────────────────────────────────────────────
     saved: [],
     registry: [],
+    surfPick: '',
+    /* The surface catalog, fetched once and lazily: 452 metrics and a ~4s
+     * index walk on the VPS, so a portfolio nobody filters never pays it. */
+    surf: { catalog: null, groups: [], other: null, unitFormats: {},
+            defaultUnit: null, loading: false, error: '' },
     colors: [],
     maxStrategies: 12,
     chosen: [],           // [{id, name, qty, capital, savedCapital, filters}]
@@ -635,6 +660,205 @@ document.addEventListener('alpine:init', () => {
       this.recompute();
     },
 
+    /* THE REGISTRY THIS STRATEGY FILTERS ON: the shared one plus whatever
+     * surface metrics were added to IT. Per strategy on purpose -- adding a
+     * metric to one row must not put a slider on every other. */
+    registryFor(c) {
+      return (c && c.surface && c.surface.length)
+        ? [...this.registry, ...c.surface] : this.registry;
+    },
+
+    async loadSurfaceCatalog() {
+      if (this.surf.catalog || this.surf.loading) return;
+      this.surf.loading = true;
+      this.surf.error = '';
+      try {
+        // THE OO PAGE'S ENDPOINT, not a second one. The catalog is cached in
+        // that process on the table's own key, so this is a cheap call.
+        const r = await fetch('/api/oo-backtest/surface/catalog');
+        const b = await r.json();
+        if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
+        this.surf.catalog = b.metrics || [];
+        this.surf.groups = b.family_groups || [];
+        this.surf.other = b.other_group || { label: 'Other' };
+        this.surf.unitFormats = b.unit_formats || {};
+        this.surf.defaultUnit = b.default_unit_format
+          || { scale: 1, decimals: 4, suffix: '' };
+      } catch (e) {
+        this.surf.error = 'Surface metrics unavailable: ' + (e.message || e);
+      } finally {
+        this.surf.loading = false;
+        this.tick++;
+      }
+    },
+
+    /* One optgroup per family, in the legend's order, exactly as the OO page
+     * groups them -- the display names come from the server so neither page
+     * names a family itself. */
+    surfaceOptions() {
+      void this.tick;
+      const cat = this.surf.catalog || [];
+      if (!cat.length) return [];
+      const fams = new Set(cat.map(m => m.family));
+      const groups = (this.surf.groups || [])
+        .map(g => ({ ...g, families: (g.families || []).filter(f => fams.has(f)) }))
+        .filter(g => g.families.length);
+      const seen = new Set(groups.flatMap(g => g.families));
+      const rest = [...fams].filter(f => !seen.has(f)).sort();
+      if (rest.length) groups.push({ ...(this.surf.other || { label: 'Other' }), families: rest });
+      const out = [];
+      for (const g of groups) {
+        for (const f of g.families) {
+          const ms = cat.filter(m => m.family === f)
+            .sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
+          out.push({ label: `${g.label} · ${f}`, options: ms.map(m => ({
+            value: m.column_name,
+            label: m.column_name + (m.description ? ' — ' + String(m.description).slice(0, 60) : ''),
+          })) });
+        }
+      }
+      return out;
+    },
+
+    async addSurfaceMetric(id, column) {
+      if (!column) return;
+      const c = this.chosen.find(x => x.id === id);
+      const meta = (this.surf.catalog || []).find(m => m.column_name === column);
+      if (!c || !meta) return;
+      if (!c.surface) c.surface = [];
+      if (c.surface.some(m => m.surfColumn === column)) return;
+      const u = this.surf.unitFormats[meta.units] || this.surf.defaultUnit
+             || { scale: 1, decimals: 4, suffix: '' };
+      const entry = {
+        key: `surface__${column}`, column: `surface__${column}`,
+        surfColumn: column, label: column, type: 'range', filter: true,
+        categories: null, min: null, max: null, step: null,
+        // The object form of `format`; fmtVal branches on it. Surface values
+        // arrive in the metric's own units and are scaled to display units
+        // once, here, so everything downstream reads display units.
+        format: { decimals: u.decimals, suffix: u.suffix }, scale: u.scale,
+        minDate: meta.min_date || null, description: meta.description || '',
+        family: meta.family, removable: true, loading: true, error: '',
+      };
+      c.surface = [...c.surface, entry];
+      this.tick++;
+      await this.fetchSurface(c, entry);
+    },
+
+    removeSurfaceMetric(id, key) {
+      const c = this.chosen.find(x => x.id === id);
+      if (!c || !c.surface) return;
+      c.surface = c.surface.filter(m => m.key !== key);
+      if (c.filters) delete c.filters[key];
+      const p = BP_DATA.payloads[c.id];
+      if (p && p.columns) delete p.columns[key];
+      delete BP_DATA.extents[c.id + ':' + key];
+      delete BP_DATA.scaled[c.id];
+      this.recompute();
+    },
+
+    /* Values for EVERY trade of this strategy, cached per (strategy, metric)
+     * so removing and re-adding costs nothing. The server is asked for the
+     * whole log, not the filtered subset, so a later filter change is free. */
+    async fetchSurface(c, entry) {
+      const p = BP_DATA.payloads[c.id];
+      if (!p || !p.columns) {
+        entry.loading = false;
+        entry.error = 'load the portfolio first';
+        this.tick++;
+        return;
+      }
+      const cacheKey = c.id + '|' + entry.surfColumn;
+      const token = BP_DATA.loadToken;
+      const hit = BP_DATA.surface[cacheKey];
+      if (hit && hit.n === p.n) {
+        p.columns[entry.column] = hit.values;
+        this.finishSurface(c, entry, hit.report);
+        return;
+      }
+      const cols = p.columns;
+      const trades = cols.date_opened.map((d, i) => [d, (cols.time_opened || [])[i] ?? null]);
+      try {
+        const r = await fetch('/api/oo-backtest/surface/values', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ column: entry.surfColumn, trades }),
+        });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
+        // A LOAD SINCE THIS WAS ASKED FOR, or the row removed meanwhile:
+        // writing now would put a column on the wrong trades.
+        if (token !== BP_DATA.loadToken || !(c.surface || []).includes(entry)) return;
+        if (!Array.isArray(b.values) || b.values.length !== p.n) {
+          throw new Error(`server returned ${(b.values || []).length} values `
+                        + `for ${p.n} trades`);
+        }
+        const vals = b.values.map(v => (v === null || v === undefined ? null : v * entry.scale));
+        p.columns[entry.column] = vals;
+        BP_DATA.surface[cacheKey] = { values: vals, n: p.n, report: b.report || {} };
+        this.finishSurface(c, entry, b.report || {});
+      } catch (e) {
+        if (token !== BP_DATA.loadToken) return;
+        entry.loading = false;
+        entry.error = String(e.message || e);
+        this.tick++;
+      }
+    },
+
+    finishSurface(c, entry, report) {
+      const p = BP_DATA.payloads[c.id];
+      const ext = obExtent((p.columns || {})[entry.column] || []);
+      entry.loading = false;
+      entry.error = '';
+      entry.report = report || {};
+      if (ext) {
+        entry.step = bpNiceStep(ext.max - ext.min);
+        entry.min = Math.min(obClampStep(ext.min, entry.step, 'floor'), ext.min);
+        entry.max = Math.max(obClampStep(ext.max, entry.step, 'ceil'), ext.max);
+      }
+      delete BP_DATA.extents[c.id + ':' + entry.key];
+      // scaledCols CACHES A COPY of the columns, so a column added after it
+      // was built is invisible to every filter -- and a range spec drops
+      // nulls, so the filter did not narrow, it emptied the strategy.
+      delete BP_DATA.scaled[c.id];
+      if (!c.filters) c.filters = {};
+      if (!c.filters[entry.key]) {
+        c.filters[entry.key] = { on: false, lo: entry.min, hi: entry.max };
+      }
+      this.recompute();
+    },
+
+    /* WHAT FILTERING ON THIS WOULD COST, for THIS strategy, split the way
+     * the single-backtest page splits it: trades that entered before the
+     * metric's data starts, and trades whose entry had no bar. The first is
+     * a stretch of history, the second is scattered -- and a filter drops
+     * both, which is why it is said before the slider moves and not after. */
+    surfaceCost(c, m) {
+      void this.tick;
+      const p = c && BP_DATA.payloads[c.id];
+      const vals = p && p.columns && p.columns[m.column];
+      if (!vals) return null;
+      const dates = p.columns.date_opened;
+      let before = 0, noBar = 0;
+      for (let i = 0; i < vals.length; i++) {
+        if (vals[i] !== null && vals[i] !== undefined) continue;
+        if (m.minDate && dates[i] && dates[i] < m.minDate) before++; else noBar++;
+      }
+      return { n: vals.length, dropped: before + noBar, before, noBar };
+    },
+
+    surfaceCostText(c, m) {
+      const k = this.surfaceCost(c, m);
+      if (!k) return '';
+      if (!k.dropped) return 'every trade in this strategy has a value';
+      const why = [
+        k.before ? `${bpFmtInt(k.before)} entered before its data starts (${m.minDate})` : '',
+        k.noBar ? `${bpFmtInt(k.noBar)} with no bar at the entry time` : '',
+      ].filter(Boolean).join(', ');
+      const verb = (c.filters[m.key] || {}).on ? 'is dropping' : 'would drop';
+      return `Filtering on this ${verb} ${bpFmtInt(k.dropped)} of `
+           + `${bpFmtInt(k.n)} trades — ${why}`;
+    },
+
     colorOf(i) {
       return this.colors.length ? this.colors[i % this.colors.length] : '#3498db';
     },
@@ -657,6 +881,12 @@ document.addEventListener('alpine:init', () => {
         BP_DATA.payloads = {};
         BP_DATA.scaled = {};
         BP_DATA.extents = {};
+        // A LOAD REPLACES THE COLUMNS, so any surface metric added before it
+        // is now pointing at nothing, and any request still in flight is for
+        // the previous trades. Bump the token, drop the cache (the file
+        // behind a saved strategy may have been re-saved), and refetch.
+        BP_DATA.loadToken++;
+        BP_DATA.surface = {};
         for (const p of this.loaded) BP_DATA.payloads[p.saved.id] = p;
         const wall = (performance.now() - t0) / 1000;
         const srv = b.load || {};
@@ -668,6 +898,13 @@ document.addEventListener('alpine:init', () => {
                       + `${bpFmtSeconds(wall)} in the browser`;
         this.slowLoad = (srv.parsed || 0) > 0;
         this.recompute();
+        for (const c of this.chosen) {
+          for (const m of (c.surface || [])) {
+            m.loading = true;
+            m.error = '';
+            this.fetchSurface(c, m);
+          }
+        }
       } catch (e) {
         this.error = 'Load failed: ' + (e.message || e);
         this.loaded = [];
@@ -693,6 +930,7 @@ document.addEventListener('alpine:init', () => {
      * it says which of the two it is. */
     toggleEdit(id) {
       this.ensureFilters(id);
+      this.loadSurfaceCatalog();
       this.editing = (this.editing === id ? 0 : id);
     },
 
@@ -705,7 +943,7 @@ document.addEventListener('alpine:init', () => {
       const c = this.chosen.find(x => x.id === id);
       if (!c) return;
       if (!c.filters) c.filters = {};
-      for (const m of this.registry) {
+      for (const m of this.registryFor(c)) {
         if (c.filters[m.key]) continue;
         c.filters[m.key] = (m.type === 'range')
           ? { on: false, lo: m.min, hi: m.max }
@@ -810,9 +1048,15 @@ document.addEventListener('alpine:init', () => {
       const key = c.id + ':' + m.key;
       if (!(key in BP_DATA.extents)) {
         const ext = obExtent(p.columns[m.column] || []);
-        BP_DATA.extents[key] = ext && { min: obClampStep(ext.min, m.step, 'floor'),
-                                        max: obClampStep(ext.max, m.step, 'ceil'),
-                                        n: ext.n };
+        // SNAPPED OUTWARD, AND NEVER INSIDE THE REAL EXTENT. obClampStep
+        // rounds through toPrecision(12), so a ceil can land a float's
+        // breadth BELOW the true maximum -- and a slider parked at its own
+        // maximum then drops the very trades that set it. Seen as two
+        // trades vanishing from a full-range filter.
+        BP_DATA.extents[key] = ext && {
+          min: Math.min(obClampStep(ext.min, m.step, 'floor'), ext.min),
+          max: Math.max(obClampStep(ext.max, m.step, 'ceil'), ext.max),
+          n: ext.n };
       }
       return BP_DATA.extents[key];
     },
@@ -842,6 +1086,13 @@ document.addEventListener('alpine:init', () => {
       if (m.format === 'pct') return v.toFixed(2) + '%';
       if (m.format === 'ratio') return v.toFixed(2);
       if (m.format === 'int') return String(Math.round(v));
+      // Surface metrics carry {decimals, suffix} instead of a name: their
+      // scales run from 0.0001 to hundreds, so two decimals is not a
+      // readout, it is a row of zeros.
+      if (m.format && typeof m.format === 'object') {
+        return v.toFixed(m.format.decimals ?? 4)
+             + (m.format.suffix ? ' ' + m.format.suffix : '');
+      }
       return v.toFixed(2);
     },
 
@@ -903,7 +1154,7 @@ document.addEventListener('alpine:init', () => {
 
     activeCount(c) {
       let n = 0;
-      for (const m of this.registry) {
+      for (const m of this.registryFor(c)) {
         const f = c.filters[m.key];
         if (f && f.on) n++;
       }
@@ -919,7 +1170,7 @@ document.addEventListener('alpine:init', () => {
     badges(c) {
       void this.tick;
       const out = [];
-      for (const m of this.registry) {
+      for (const m of this.registryFor(c)) {
         const f = c.filters && c.filters[m.key];
         if (!f || !f.on) continue;
         const [bg, fg] = BP_BADGE[m.key] || BP_BADGE_FALLBACK;
@@ -1006,12 +1257,13 @@ document.addEventListener('alpine:init', () => {
         const p = BP_DATA.payloads[c.id];
         if (!p) continue;
         const cols = this.scaledCols(c);
-        const specs = bpSpecs(c.filters, this.registry, span);
+        const reg = this.registryFor(c);
+        const specs = bpSpecs(c.filters, reg, span);
         const idx = obApplyFilters(cols, p.n, specs);
         // The charts' set: identical to the table's unless some active
         // filter is blind before its coverage, in which case those trades
         // are kept and the stretch is shaded rather than cut off.
-        const lenient = bpLenientColumns(c.filters, this.registry);
+        const lenient = bpLenientColumns(c.filters, reg);
         const idxDraw = lenient.size
           ? obApplyFilters(cols, p.n, specs, lenient) : idx;
         noBar += bpNoBarCount(cols, p.n, lenient);
@@ -1060,7 +1312,7 @@ document.addEventListener('alpine:init', () => {
           total: false, idx, idxDraw,
           n: idx.length, nAll: p.n,
           dropped: p.n - idx.length,
-          cost: bpCoverageCost(p.columns, p.n, c.filters, this.registry),
+          cost: bpCoverageCost(p.columns, p.n, c.filters, reg),
           stats, extra, conc,
           sharpe: obSharpe(cols, idx),
           capital,
@@ -1582,7 +1834,7 @@ document.addEventListener('alpine:init', () => {
       if (!c.unfilteredTo) return null;
       let label = '';
       for (const ch of this.chosen) {
-        for (const m of this.registry) {
+        for (const m of this.registryFor(ch)) {
           const f = ch.filters && ch.filters[m.key];
           if (f && f.on && m.minDate === c.coverageFrom) label = m.label;
         }
