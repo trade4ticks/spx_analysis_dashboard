@@ -293,6 +293,61 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the trough equals the table Max DD', bpFmtMoney(trough), tableDD);
   ok('the deepest point is marked', dd.data.datasets[1].data.length, 1);
 
+  // ── THE LIVE-STRATEGY SHADING ─────────────────────────────────────
+  // On union dates the curve steepens as each strategy starts and flattens
+  // as each finishes. The bands say so. The fixture is two strategies with
+  // DIFFERENT spans, so there is a real edge to find.
+  const cS = Alpine.$data(document.querySelector('[x-data]'));
+  const shade = cS.liveShade();
+  ok('there are two strategies to be fewer than', shade.total, 2);
+  ok('the bands cover a rise and a fall', shade.bands.length >= 3, true);
+  const counts = shade.bands.map(b => b.count);
+  ok('the count peaks at every strategy', Math.max(...counts), 2);
+  ok('and is lower at the ends', counts[0] < 2 && counts[counts.length - 1] < 2, true);
+  // ONE BAND PER DISTINCT COUNT: adjacent stretches with the same count are
+  // merged, so a shared start date is one edge and not several.
+  let merged = true;
+  for (let i = 1; i < shade.bands.length; i++) {
+    if (shade.bands[i].count === shade.bands[i - 1].count) merged = false;
+    if (shade.bands[i].from !== shade.bands[i - 1].to) merged = false;
+  }
+  ok('bands are contiguous and never repeat a count', merged, true);
+  // THE EDGES ARE THE STRATEGIES' OWN DATES, not the chart's.
+  const spanStarts = cS.loaded.map(p => obDay(p.date_min)).sort((a, b) => a - b);
+  ok('the first band starts at the earliest open', shade.bands[0].from, spanStarts[0]);
+  const lastEnd = Math.max(...cS.loaded.map(p => obDay(p.date_max) + 1));
+  ok('the last band ends after the latest close',
+     shade.bands[shade.bands.length - 1].to, lastEnd);
+  // A FULL PORTFOLIO IS NOT SHADED -- that stretch needs no caveat.
+  ok('full coverage draws nothing', bpShadeAlpha(2, 2), 0);
+  ok('a thinner stretch is shaded', bpShadeAlpha(1, 2) > 0, true);
+  ok('the thinner the stretch the heavier the veil',
+     bpShadeAlpha(1, 3) > bpShadeAlpha(2, 3), true);
+  // ONE STRATEGY HAS NOTHING TO BE FEWER THAN.
+  ok('a single strategy gets no bands',
+     bpLiveBands([cS.loaded[0]]).bands.length, 0);
+  // THE PLUGIN IS ON THE THREE DATE CHARTS AND NOWHERE ELSE: the pairwise
+  // scatter's x is dollars, so a band there would be nonsense.
+  const hasShade = (ch) => !!(ch && (ch.config.plugins || [])
+    .some(pl => pl.id === 'bpLiveShade'));
+  ok('equity is shaded', hasShade(eq), true);
+  ok('drawdown is shaded', hasShade(dd), true);
+  ok('capital deployed is shaded', hasShade(cap), true);
+  // AND THE BANDS SURVIVE AN UPDATE. draw() reuses the instance and only
+  // reassigns options, so a constructor-array plugin is read once -- the
+  // band data has to live in options.plugins to keep working.
+  ok('the bands ride in options, not the constructor',
+     eq.options.plugins.bpLiveShade.bands.length, shade.bands.length);
+  // THE KEY NAMES WHAT IS DRAWN. Unexplained shading is worse than none.
+  const legend = cS.liveLegend();
+  ok('the key has an entry per distinct count',
+     legend.length, new Set(counts).size);
+  ok('the key names the total', legend[0].label.endsWith(' of 2'), true);
+  const legendEl = document.querySelector('.bp-liveleg');
+  ok('the key is on the page', !!legendEl, true);
+  ok('it says what is being counted',
+     /strategies live/i.test(legendEl.textContent), true);
+
   ok('the deployed chart exists', !!cap, true);
   ok('deployment is a step', cap && cap.data.datasets[0].stepped, 'before');
   const capPeak = Math.max(...cap.data.datasets[0].data.map(p => p.y));

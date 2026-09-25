@@ -207,6 +207,14 @@
     .bp-corrgrid { display:grid; gap:14px;
                    grid-template-columns:minmax(320px, 1fr) minmax(320px, 1fr); }
     @media (max-width: 1100px) { .bp-corrgrid { grid-template-columns:1fr; } }
+    /* The key for the live-strategy shading. The swatch for "all of them"
+       is transparent on purpose — an unshaded chart IS the full portfolio —
+       so it needs an outline to be a swatch at all. */
+    .bp-liveleg { display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+                  font-size:9.5px; color:var(--dim); margin-top:6px; }
+    .bp-livekey { display:flex; align-items:center; gap:4px; }
+    .bp-livesw { width:18px; height:10px; border-radius:2px;
+                 border:1px solid rgba(255,255,255,0.16); }
     .bp-sel { background:var(--raised); border:1px solid var(--border);
               color:var(--text); font-size:11px; padding:3px 6px;
               border-radius:4px; color-scheme:dark; }
@@ -592,12 +600,37 @@
               </span>
             </template>
           </div>
+          {# WHAT THE SHADING MEANS. Both charts above carry it, so the key
+             sits under the pair rather than being repeated twice. #}
+          <template x-if="liveLegend().length">
+            <div class="bp-liveleg">
+              <span>strategies live:</span>
+              <template x-for="s in liveLegend()" :key="s.n">
+                <span class="bp-livekey">
+                  <span class="bp-livesw" :style="'background:' + s.bg"></span>
+                  <span x-text="s.label"></span>
+                </span>
+              </template>
+            </div>
+          </template>
           <div class="ob-note" style="margin-top:6px">
             One point per close date; the drawdown keeps each day's WORST
             reading, so the trough here is the Max DD in the table rather
             than a shallower day-end version of it. Only the portfolio's
             drawdown is drawn — one curve per strategy on the same axes is a
             picture of nothing in particular.
+            <template x-if="liveLegend().length">
+              <span>
+                The background is shaded where fewer strategies were live —
+                darker the more of the portfolio is missing, and clear once
+                all of them are running. On union dates every strategy's
+                trades count, so the curve steepens as each one starts and
+                flattens as each one finishes; a shaded stretch is not
+                comparable with an unshaded one. It follows each strategy's
+                own first-open-to-last-close span and has nothing to do with
+                metric coverage or the date-range setting.
+              </span>
+            </template>
           </div>
         </div>
       </div>
@@ -612,6 +645,17 @@
             <canvas id="bp-cap-chart" role="img"
                     aria-label="Capital deployed per SPX session across the portfolio"></canvas>
           </div>
+          <template x-if="liveLegend().length">
+            <div class="bp-liveleg">
+              <span>strategies live:</span>
+              <template x-for="s in liveLegend()" :key="s.n">
+                <span class="bp-livekey">
+                  <span class="bp-livesw" :style="'background:' + s.bg"></span>
+                  <span x-text="s.label"></span>
+                </span>
+              </template>
+            </div>
+          </template>
           <div class="ob-note" style="margin-top:6px">
             Each strategy's concurrent positions times its own capital, summed
             per SPX session. <b>Half-open</b>: a position is deployed on the

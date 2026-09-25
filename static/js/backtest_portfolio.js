@@ -133,6 +133,81 @@ function bpSpan(payloads, mode) {
         end: highs.reduce((a, b) => (a > b ? a : b)) };
 }
 
+/* HOW MANY STRATEGIES WERE LIVE, over the portfolio's whole span.
+ *
+ * On union dates every strategy's trades count, so the equity curve steepens
+ * each time one starts and flattens as one finishes — which reads as the
+ * portfolio getting better and then worse when it is only the membership
+ * changing. Nothing on the page said so, so the charts now shade it.
+ *
+ * A strategy is live across its OWN span, first open to last close, so the
+ * count rises and falls rather than only climbing. Spans are half-open in
+ * epoch days ([open, close+1)) for the same reason the deployment count is:
+ * a day is either inside a span or it is not, and the last day has to be
+ * inside. Returns one band per DISTINCT count — adjacent stretches with the
+ * same count are merged, so five strategies starting on one day is one edge,
+ * not five.
+ *
+ * Fewer than two strategies gets no bands: there is nothing to be fewer
+ * than, and shading the whole chart would say something false. */
+function bpLiveBands(payloads) {
+  const spans = [];
+  for (const p of payloads || []) {
+    if (!p || !p.date_min || !p.date_max) continue;
+    spans.push([obDay(p.date_min), obDay(p.date_max) + 1]);
+  }
+  const total = spans.length;
+  if (total < 2) return { total, bands: [] };
+  const cuts = [...new Set(spans.flat())].sort((a, b) => a - b);
+  const bands = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const from = cuts[i], to = cuts[i + 1];
+    let count = 0;
+    for (const s of spans) if (s[0] <= from && s[1] >= to) count++;
+    const last = bands[bands.length - 1];
+    if (last && last.count === count && last.to === from) { last.to = to; continue; }
+    bands.push({ from, to, count });
+  }
+  return { total, bands };
+}
+
+/* The veil over a stretch where some strategies are missing. Neutral grey,
+ * never the page's blue or pink: those two carry meaning on every chart here
+ * and a third use of them would be read as data. Opacity by how much of the
+ * portfolio is absent, and ZERO once every strategy is live — so the stretch
+ * that needs no caveat is drawn plainly and the eye goes to it. */
+function bpShadeAlpha(count, total) {
+  if (!total || count >= total) return 0;
+  return 0.04 + 0.16 * ((total - count) / total);
+}
+
+/* Drawn UNDER the datasets, so the curves stay legible on top of it.
+ * The bands ride in options.plugins.bpLiveShade rather than in the plugin
+ * array, because `draw` reuses a live chart and only reassigns data and
+ * options — a constructor array is read once and never again. */
+const bpLiveShade = {
+  id: 'bpLiveShade',
+  beforeDatasetsDraw(chart, args, opts) {
+    const bands = (opts && opts.bands) || [];
+    const total = (opts && opts.total) || 0;
+    if (!bands.length || !total) return;
+    const area = chart.chartArea, x = chart.scales && chart.scales.x;
+    if (!area || !x) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    for (const b of bands) {
+      const a = bpShadeAlpha(b.count, total);
+      if (a <= 0) continue;
+      const lo = Math.max(area.left, Math.min(area.right, x.getPixelForValue(b.from)));
+      const hi = Math.max(area.left, Math.min(area.right, x.getPixelForValue(b.to)));
+      if (hi - lo < 0.5) continue;
+      ctx.fillStyle = `rgba(154,154,154,${a.toFixed(3)})`;
+      ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
+    }
+    ctx.restore();
+  },
+};
+
 /* Portfolio capital: the SUM of each strategy's planned capital, and each
  * strategy's is capital-per-position x qty — qty multiplies the position, so
  * it multiplies the capital behind it as well as the P/L it produces. */
@@ -1063,6 +1138,16 @@ document.addEventListener('alpine:init', () => {
         },
       });
 
+      // HOW MANY STRATEGIES ARE LIVE, shaded under the three DATE charts --
+      // and only those three. The pairwise scatter's x is dollars and the
+      // distribution's is a P/L bin, so a band drawn there would be nonsense
+      // dressed as information.
+      const shade = this.liveShade();
+      const shaded = (o) => {
+        o.plugins.bpLiveShade = { bands: shade.bands, total: shade.total };
+        return o;
+      };
+
       // EQUITY: a line per strategy plus the portfolio, sharing an axis.
       const total = c.eq.find(s => s.total);
       const xr = span(total ? total.points : (c.eq[0] && c.eq[0].points));
@@ -1077,7 +1162,8 @@ document.addEventListener('alpine:init', () => {
         order: sv.total ? 0 : 1,
       })) };
       this.draw('eq', 'bp-eq-chart', eqData,
-                base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr));
+                shaded(base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr)),
+                [bpLiveShade]);
 
       // DRAWDOWN: the portfolio's only, with its deepest point marked.
       const dd = c.dd || [];
@@ -1092,8 +1178,9 @@ document.addEventListener('alpine:init', () => {
           pointBorderWidth: 2, showLine: false },
       ] };
       this.draw('dd', 'bp-dd-chart', ddData,
-                base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
-                           + bpFmtMoney(it.parsed.y), xr));
+                shaded(base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
+                            + bpFmtMoney(it.parsed.y), xr)),
+                [bpLiveShade]);
 
       // CAPITAL DEPLOYED: a step per session, since it changes at a close.
       const cap = [];
@@ -1307,8 +1394,9 @@ document.addEventListener('alpine:init', () => {
       }
 
       this.draw('cap', 'bp-cap-chart', capData,
-                base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
-                     cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}));
+                shaded(base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
+                            cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {})),
+                [bpLiveShade]);
     },
 
     drawBar(key, id, data, options) {
@@ -1325,7 +1413,26 @@ document.addEventListener('alpine:init', () => {
       BP_CHARTS[key] = new Chart(el.getContext('2d'), { type: 'bar', data, options });
     },
 
-    draw(key, id, data, options) {
+    /* The live-strategy bands, and the key that says what they mean.
+     * Unexplained shading is worse than none: a grey stretch nobody can
+     * name reads as a rendering fault. */
+    liveShade() {
+      void this.tick;
+      return bpLiveBands(this.loaded);
+    },
+
+    liveLegend() {
+      const s = this.liveShade();
+      if (!s.bands.length) return [];
+      const counts = [...new Set(s.bands.map(b => b.count))].sort((a, b) => a - b);
+      return counts.map(n => ({
+        n,
+        bg: `rgba(154,154,154,${bpShadeAlpha(n, s.total).toFixed(3)})`,
+        label: `${n} of ${s.total}`,
+      }));
+    },
+
+    draw(key, id, data, options, plugins) {
       const el = document.getElementById(id);
       if (!el) return;
       const live = BP_CHARTS[key];
@@ -1336,7 +1443,8 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       if (live) live.destroy();
-      BP_CHARTS[key] = new Chart(el.getContext('2d'), { type: 'line', data, options });
+      BP_CHARTS[key] = new Chart(el.getContext('2d'),
+                                 { type: 'line', data, options, plugins: plugins || [] });
     },
 
     // ── readouts ────────────────────────────────────────────────────────
