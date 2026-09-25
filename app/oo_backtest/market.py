@@ -14,12 +14,14 @@ a close of 0: every Monday's previous row was that Sunday, every Monday gap
 came out null. _valid() applies at the BAR level, so a zero bar inside a
 real session is missing too.
 
-SESSIONS ARE PER SERIES and need MIN_SESSION_BARS valid closing bars (see
-there). The next finding: VIX ingestion writes 11-25 valid bars on market
-holidays, so "any valid bar" kept every holiday as a day, and the day after a
-holiday took it as its previous session. Now a holiday with only VIX
-artifacts is no session at all, and a day like 2026-04-08 (a full VIX
-session, no SPX) is a VIX session and not an SPX one.
+THE EXCHANGE CALENDAR SAYS WHETHER A DAY WAS A SESSION (market_calendar.py);
+the bars say whether a SERIES has usable values on it. The rollup has one row
+per session in the table's range, so a session the writer left empty is a row
+with nulls and its flags off -- not an absent day. VIX ingestion writes 11-25
+valid bars on market holidays; those are now simply bars on a closed day, an
+ARTIFACT, with no threshold needed to recognise one. And 2026-04-08 -- a full
+VIX session, zero SPX -- is a trading day with SPX MISSING, which is reported
+as such instead of reading like a holiday.
 
 Postgres sorts NaN ABOVE every number, so max() over a raw column with one
 NaN bar returns NaN. Values are made valid before any aggregate runs.
@@ -70,6 +72,8 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+from app.oo_backtest import market_calendar as cal
+
 SERIES = ("spx", "vix", "vix3m", "vix9d")
 SESSION_OPEN = time(9, 30)
 LAST_BAR = time(15, 55)
@@ -108,22 +112,27 @@ def _nan_bar(s: str) -> str:
     return "(" + " OR ".join(f"{s}_{f} = 'NaN'::float8" for f in OHLC_FIELDS) + ")"
 
 
-# A SERIES HAS A SESSION on a day when it has at least MIN_SESSION_BARS valid
-# closing bars in 09:30-15:55. Sessions are per series, not per day.
+# THE EXCHANGE CALENDAR DECIDES WHETHER A DAY WAS A SESSION; the bars decide
+# whether a SERIES has usable values on it. Two questions, two answers, and
+# conflating them is what hid a missing day.
 #
-# Measured on the VPS (2026-09-14): VIX ingestion writes 11-25 valid bars on
-# market holidays -- stale/partial artifacts, against 78 on a real session
-# and 42 on an early close (09:30-12:55). The threshold sits between them. It
-# is a count and not "a valid 09:30 open and a close" because the writer's own
-# notes say VIX3M/VIX9D can arrive a bar or two behind: a real session whose
-# first bar is missing must keep its close (the next day's prior close), and
-# only its own gap goes null. The shortest session kept and the longest
-# artifact rejected are reported per series (session_report), so a real
-# early close falling under the line, or an artifact rising over it, shows.
+# This replaces MIN_SESSION_BARS, which was 34: reverse-engineered to sit
+# between a real session (78 bars, or 42 on an early close) and the 11-25
+# stale bars VIX ingestion writes on market holidays. The calendar separates
+# those without a threshold, and a floor tuned for full days could never see
+# a SHORT half-day. Expected bars now come from each day's own close, and
+# market_calendar.BAR_SHORTFALL_TOLERANCE says how far short is still
+# complete -- 2 bars, because VIX3M and VIX9D can arrive a bar or two behind.
 #
-# 2026-04-08 is the other shape: 78 valid VIX bars, zero SPX. That is a VIX
-# session and not an SPX one -- a rollup row with SPX null.
-MIN_SESSION_BARS = 34
+# 2026-04-08 is the day that forced this: 78 valid VIX bars, zero SPX. The
+# old rule called it "not an SPX session". It was a TRADING DAY WITH SPX
+# MISSING, and it is now reported as one.
+_TOL = cal.BAR_SHORTFALL_TOLERANCE
+
+
+def _complete(s_: str) -> str:
+    """SQL: this series has enough bars for THIS day's close."""
+    return f"coalesce(a.{s_}_bars, 0) >= c.expected_bars - {_TOL}"
 
 
 def _agg_select() -> str:
@@ -143,11 +152,11 @@ def _agg_select() -> str:
 def _session_select() -> str:
     parts = []
     for s in SERIES:
-        ok = f"{s}_bars >= {MIN_SESSION_BARS}"
-        parts += [f"{s}_bars", f"({ok}) AS {s}_session"]
-        # Outside a session NOTHING of that series survives -- not its close,
-        # high or low -- so an artifact can never become a price.
-        parts += [f"CASE WHEN {ok} THEN {s}_{f}_x END AS {s}_{f}"
+        ok = _complete(s)
+        parts += [f"coalesce(a.{s}_bars, 0) AS {s}_bars", f"({ok}) AS {s}_session"]
+        # Without usable data NOTHING of that series survives -- not its
+        # close, high or low -- so a partial day can never become a price.
+        parts += [f"CASE WHEN {ok} THEN a.{s}_{f}_x END AS {s}_{f}"
                   for f in ("open", "high", "low", "close", "close_time")]
     return ",\n           ".join(parts)
 
@@ -157,13 +166,19 @@ _BAR_COLS = ",\n           ".join(f"{_valid(f'{s}_{f}')} AS {s}_{f}" for s in SE
 
 _PREV_SERIES = ("spx", "vix")   # the series with an overnight gap
 
-# One row per day on which ANY series has a session. Everything downstream
-# reads this, never the bars.
+# ONE ROW PER EXCHANGE SESSION in the table's range -- including a session
+# the writer left empty, which is the whole point: a day with no SPX bars is
+# now a row with SPX null and a session flag of false, not an absent day.
+# Everything downstream reads this, never the bars.
+#
+# The sessions and their expected bar counts arrive as two arrays ($1, $2)
+# from market_calendar, so the SQL asks the calendar rather than inferring a
+# session from the data it is meant to be checking.
 #
 # The previous close is PER SERIES: the previous row among days where THAT
-# series had a session. Not the previous row of the rollup (a VIX-only day
-# like 2026-04-08 would be SPX's "previous session"), not trade_date - 1, and
-# no calendar: the table's own validity is the definition of a session.
+# series had usable data. Not the previous row of the rollup (a VIX-only day
+# like 2026-04-08 would otherwise be SPX's "previous session") and not
+# trade_date - 1.
 DAILY_ROLLUP_SQL = f"""
 WITH bars AS (
     SELECT trade_date, quote_time,
@@ -177,11 +192,15 @@ agg AS (
     FROM bars
     GROUP BY trade_date
 ),
+cal AS (
+    SELECT unnest($1::date[]) AS trade_date,
+           unnest($2::int[])  AS expected_bars
+),
 daily AS (
-    SELECT trade_date,
+    SELECT c.trade_date, c.expected_bars,
            {_session_select()}
-    FROM agg
-    WHERE {" OR ".join(f"{s}_bars >= {MIN_SESSION_BARS}" for s in SERIES)}
+    FROM cal c
+    LEFT JOIN agg a USING (trade_date)
 ),
 {",".join(f'''
 {s}_prev AS (
@@ -249,7 +268,11 @@ LIMIT 1
 # How the table labels its bars, per year, over SPX SESSIONS only: a
 # start-labeled session has a 09:30 bar and no valid 16:00 bar.
 BAR_LABEL_SQL = f"""
-WITH per_day AS (
+WITH cal AS (
+    SELECT unnest($1::date[]) AS trade_date,
+           unnest($2::int[])  AS expected_bars
+),
+per_day AS (
     SELECT trade_date,
            count(*) FILTER (WHERE quote_time BETWEEN TIME '09:30' AND TIME '15:55'
                             AND {_valid('spx_close')} IS NOT NULL) AS spx_bars,
@@ -259,17 +282,36 @@ WITH per_day AS (
            bool_or(quote_time < TIME '09:30') AS premarket
     FROM index_ohlc
     GROUP BY trade_date
+),
+marked AS (
+    -- c.trade_date, NOT p.*: on a session the table never wrote, every p
+    -- column is NULL including its trade_date, and joining on that dropped
+    -- exactly the days this exists to count.
+    SELECT c.trade_date, c.expected_bars,
+           coalesce(p.spx_bars, 0) AS spx_bars,
+           coalesce(p.has_0930, false) AS has_0930,
+           coalesce(p.has_1555, false) AS has_1555,
+           coalesce(p.valid_1600, false) AS valid_1600,
+           coalesce(p.premarket, false) AS premarket,
+           (coalesce(p.spx_bars, 0) >= c.expected_bars - {_TOL}) AS ok
+    FROM cal c LEFT JOIN per_day p USING (trade_date)
 )
-SELECT extract(year FROM trade_date)::int AS year,
-       count(*) FILTER (WHERE spx_bars >= {MIN_SESSION_BARS}) AS days,
-       count(*) FILTER (WHERE spx_bars >= {MIN_SESSION_BARS} AND has_0930) AS days_with_0930,
-       count(*) FILTER (WHERE spx_bars >= {MIN_SESSION_BARS} AND has_1555) AS days_with_1555,
-       count(*) FILTER (WHERE spx_bars >= {MIN_SESSION_BARS} AND valid_1600) AS days_with_valid_1600,
-       count(*) FILTER (WHERE spx_bars >= {MIN_SESSION_BARS} AND premarket) AS days_with_premarket,
-       count(*) FILTER (WHERE spx_bars < {MIN_SESSION_BARS}) AS non_spx_session_days
-FROM per_day
+SELECT extract(year FROM c.trade_date)::int AS year,
+       count(*) FILTER (WHERE ok) AS days,
+       count(*) FILTER (WHERE ok AND has_0930) AS days_with_0930,
+       count(*) FILTER (WHERE ok AND has_1555) AS days_with_1555,
+       count(*) FILTER (WHERE ok AND valid_1600) AS days_with_valid_1600,
+       count(*) FILTER (WHERE ok AND premarket) AS days_with_premarket,
+       count(*) FILTER (WHERE NOT ok) AS spx_incomplete_sessions
+FROM marked c
 GROUP BY 1 ORDER BY 1
 """
+
+# The span the rollup covers: the calendar is asked for exactly this range,
+# so a session the table has never held is not invented here. (The deployment
+# axis DOES reach beyond it -- that is the calendar's job, not the rollup's.)
+RANGE_SQL = "SELECT min(trade_date) AS lo, max(trade_date) AS hi FROM index_ohlc"
+
 
 # Per day and series, over the session window: valid closing bars, zero bars
 # and 'NaN' bars. One row per date in the table (a few thousand), from which
@@ -310,11 +352,19 @@ async def get_daily(pool) -> tuple[pd.DataFrame, dict]:
         if _CACHE["key"] != key or _CACHE["daily"] is None:
             t0 = _time.monotonic()
             async with pool.acquire() as conn:
-                rows = await conn.fetch(DAILY_ROLLUP_SQL)
-                labels = await conn.fetch(BAR_LABEL_SQL)
+                rng = await conn.fetchrow(RANGE_SQL)
+                # THE CALENDAR IS ASKED FOR THE TABLE'S OWN RANGE, and the
+                # rollup is built against its answer rather than inferring a
+                # session from the data it exists to check.
+                day_table = (cal.day_table(rng["lo"], rng["hi"])
+                             if rng and rng["lo"] and rng["hi"] else {})
+                cal_dates = [date.fromisoformat(d) for d in day_table]
+                cal_bars = [v["expected_bars"] for v in day_table.values()]
+                rows = await conn.fetch(DAILY_ROLLUP_SQL, cal_dates, cal_bars)
+                labels = await conn.fetch(BAR_LABEL_SQL, cal_dates, cal_bars)
                 per_day = await conn.fetch(DAY_SERIES_SQL)
             daily = pd.DataFrame([dict(r) for r in rows])
-            sessions = session_report([dict(r) for r in per_day])
+            sessions = session_report([dict(r) for r in per_day], day_table)
             _CACHE.update(key=key, daily=daily, labels=[dict(r) for r in labels], sessions=sessions,
                           built_at=datetime.now().isoformat(timespec="seconds"),
                           build_s=round(_time.monotonic() - t0, 2))
@@ -322,11 +372,20 @@ async def get_daily(pool) -> tuple[pd.DataFrame, dict]:
             log.info("oo-backtest daily rollup: %d days through %s in %.2fs; close fallback "
                      "early-close=%d full-session=%s", len(daily), key[0], _CACHE["build_s"],
                      len(rep["spx"]["early_close_days"]), {s: rep[s]["full_session_count"] for s in SERIES})
-            log.info("oo-backtest index_ohlc sessions: %d zero-filled days, %d artifact-only days; "
-                     "shortest kept %s; longest rejected %s", sessions["zero_filled_days"],
-                     sessions["artifact_only_days"],
-                     {s: v["shortest_kept"] for s, v in sessions["by_series"].items()},
-                     {s: v["longest_rejected"] for s, v in sessions["by_series"].items()})
+            log.info("oo-backtest %s calendar: %d sessions, %d non-session days, "
+                     "%d carrying artifact bars; per series %s", sessions["market"],
+                     sessions["sessions"], sessions["non_session_days"],
+                     sessions["artifact_days"],
+                     {s: v["summary"] for s, v in sessions["by_series"].items()})
+            # A TRADING DAY WITH NO DATA IS A PIPELINE HOLE, not a quiet day.
+            # It gets its own warning with the dates, because the whole
+            # reason for moving to a calendar was that this was invisible.
+            for s in SERIES:
+                miss = sessions["by_series"][s]["missing"]
+                if miss:
+                    log.warning("oo-backtest: %s has NO DATA on %d exchange session(s) "
+                                "-- e.g. %s. The market was open; the table is not.",
+                                s, len(miss), [m["date"] for m in miss[:5]])
             for s in SERIES:
                 if rep[s]["full_session_count"]:
                     log.warning("oo-backtest: %s close fell back on %d FULL sessions (e.g. %s) -- "
@@ -344,61 +403,98 @@ def sessions() -> dict | None:
     return _CACHE["sessions"]
 
 
-def session_report(rows: list[dict], min_bars: int = MIN_SESSION_BARS) -> dict:
-    """Every date in the table, classified by the per-series session rule.
+def session_report(rows: list[dict], day_table: dict) -> dict:
+    """Every date in the table, classified against the EXCHANGE CALENDAR.
 
-      zero-filled     no valid bar in any series (weekends, most holidays)
-      artifact-only   some valid bars, but no series reaches a session
-                      (the VIX holiday artifacts)
-      session day     at least one series has a session; per series it may
-                      still be MISSING (0 bars, e.g. SPX on 2026-04-08) or an
-                      ARTIFACT (1..min-1 bars)
+    The two questions are answered separately and reported separately,
+    because telling them apart is the point:
 
-    Per series: the shortest session KEPT and the longest artifact REJECTED,
-    with dates, so a threshold sitting too close to either side is visible.
-    Invalid (zero or 'NaN') bars are counted inside sessions only.
+      NON-SESSION   the market was shut. Carrying valid bars anyway makes it
+                    an ARTIFACT -- the writer put values on a closed day.
+      SESSION       the market was open. Per series the data is then
+                      complete  enough bars for THAT day's close
+                      partial   some bars, short by more than the tolerance
+                      missing   no valid bar at all
+
+    `missing` is the category that did not exist before. SPX on 2026-04-08
+    was a trading day with no SPX data, and the old rule reported it as "not
+    an SPX session" -- indistinguishable from a holiday, so a hole in the
+    pipeline looked like the market being shut.
+
+    Shortfalls are counted per series AND grouped by size, so "SPX was 3 bars
+    short on 12 sessions" is something you can read rather than infer.
     """
     iso = lambda d: d.isoformat() if hasattr(d, "isoformat") else str(d)   # noqa: E731
-    zero_filled, artifact_only = [], []
-    by = {s: {"sessions": 0, "shortest_kept": None, "longest_rejected": None,
-              "missing_on_session_days": [], "artifact_on_session_days": [],
-              "zero_bars_in_sessions": 0, "nan_bars_in_sessions": 0} for s in SERIES}
-    for r in rows:
+    seen = {iso(r["trade_date"]): r for r in rows}
+    artifacts, non_sessions = [], 0
+    by = {s: {"complete": 0, "missing": [], "partial": [], "by_shortfall": {},
+              "worst": None, "zero_bars_in_sessions": 0,
+              "nan_bars_in_sessions": 0} for s in SERIES}
+
+    # NON-SESSIONS FIRST, from what the table holds: a day the market was
+    # shut is only interesting when it carries values anyway.
+    for d, r in seen.items():
+        if d in day_table:
+            continue
+        non_sessions += 1
+        if any(r[f"{s}_bars"] for s in SERIES):
+            artifacts.append({"date": d, "isodow": r["isodow"],
+                              **{s: r[f"{s}_bars"] for s in SERIES}})
+
+    # THEN EVERY SESSION THE CALENDAR KNOWS OF, not every session the table
+    # happens to hold a row for. Iterating the table's rows missed the case
+    # this whole change exists for: a trading day the writer never wrote at
+    # all is absent from the data, so asking the data about it can only ever
+    # answer "nothing here".
+    empty = {f"{s}_bars": 0 for s in SERIES}
+    empty.update({f"{s}_zero_bars": 0 for s in SERIES})
+    empty.update({f"{s}_nan_bars": 0 for s in SERIES})
+    sessions_seen = len(day_table)
+    for d, day in day_table.items():
+        r = seen.get(d, empty)
         counts = {s: r[f"{s}_bars"] for s in SERIES}
-        has_session = [s for s in SERIES if counts[s] >= min_bars]
-        if not any(counts.values()):
-            zero_filled.append(r)
-        elif not has_session:
-            artifact_only.append({"date": iso(r["trade_date"]), "isodow": r["isodow"],
-                                  **{s: counts[s] for s in SERIES}})
+        expected = day["expected_bars"]
         for s in SERIES:
             n, v = counts[s], by[s]
-            if n >= min_bars:
-                v["sessions"] += 1
+            if cal.is_complete(n, expected):
+                v["complete"] += 1
                 v["zero_bars_in_sessions"] += r[f"{s}_zero_bars"]
                 v["nan_bars_in_sessions"] += r[f"{s}_nan_bars"]
-                if v["shortest_kept"] is None or n < v["shortest_kept"]["bars"]:
-                    v["shortest_kept"] = {"date": iso(r["trade_date"]), "bars": n}
-            elif n > 0:
-                if v["longest_rejected"] is None or n > v["longest_rejected"]["bars"]:
-                    v["longest_rejected"] = {"date": iso(r["trade_date"]), "bars": n}
-                if has_session:
-                    v["artifact_on_session_days"].append({"date": iso(r["trade_date"]), "bars": n})
-            elif has_session:
-                v["missing_on_session_days"].append(iso(r["trade_date"]))
-    weekday_zero = [r for r in zero_filled if r["isodow"] <= 5]
+                continue
+            short = cal.shortfall(n, expected)
+            entry = {"date": d, "bars": n, "expected": expected, "short": short,
+                     "early": day["early"]}
+            if n == 0:
+                v["missing"].append(entry)
+            else:
+                v["partial"].append(entry)
+                v["by_shortfall"][short] = v["by_shortfall"].get(short, 0) + 1
+            if v["worst"] is None or short > v["worst"]["short"]:
+                v["worst"] = entry
+    for s in SERIES:
+        v = by[s]
+        v["missing_days"] = len(v["missing"])
+        v["partial_days"] = len(v["partial"])
+        v["incomplete_days"] = v["missing_days"] + v["partial_days"]
+        # The sentence the pane prints, built where the numbers are.
+        bits = []
+        if v["missing_days"]:
+            bits.append(f"{v['missing_days']} with no data at all")
+        for short, n_days in sorted(v["by_shortfall"].items()):
+            bits.append(f"{n_days} short by {short}")
+        v["summary"] = ("complete on every session" if not bits
+                        else f"{v['incomplete_days']} of {sessions_seen} sessions "
+                             f"incomplete — " + ", ".join(bits))
     return {
-        "min_session_bars": min_bars,
-        "zero_filled_days": len(zero_filled),
-        "zero_filled_weekdays": len(weekday_zero),
-        "zero_filled_weekday_dates": [iso(r["trade_date"]) for r in weekday_zero],
-        "artifact_only_days": len(artifact_only),
-        "artifact_only": artifact_only,
+        "market": cal.MARKET,
+        "tolerance": cal.BAR_SHORTFALL_TOLERANCE,
+        "sessions": sessions_seen,
+        "non_session_days": non_sessions,
+        "artifact_days": len(artifacts),
+        "artifacts": artifacts,
         "by_series": by,
     }
 
-
-# ── pure functions over the rollup (tested without a database) ─────────────
 
 def _t(v) -> time | None:
     if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -617,8 +713,14 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
     out: dict = {}
 
     def no_session(r, s):
-        return (f"no {s.upper()} session that day ({int(r.get(f'{s}_bars') or 0)} valid {s.upper()} bars; "
-                f"{MIN_SESSION_BARS} required)")
+        # The market was OPEN -- this row exists only for exchange sessions.
+        # So this is never "no session", it is the series having too little
+        # data on a day that had one, and the sentence says so.
+        got = int(r.get(f"{s}_bars") or 0)
+        need = int(r.get("expected_bars") or 0)
+        what = "no bars at all" if got == 0 else f"only {got} of {need} bars"
+        return (f"{s.upper()} has {what} on this exchange session "
+                f"(short by more than {_TOL})")
 
     for name, col, s in (("spx_gap", "gap", "spx"), ("vix_gap", "vix_overnight_gap", "vix")):
         counts, sample = {}, []
@@ -627,7 +729,7 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
                 continue
             r = by_date.get(d)
             if r is None:
-                why = "entry date is not a session in index_ohlc (no series has a session that day)"
+                why = "entry date is not an exchange session (the market was shut)"
             elif not r.get(f"{s}_session"):
                 why = no_session(r, s)
             elif _float(r.get(f"{s}_open")) is None:
@@ -652,7 +754,7 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
             elif first and d.isoformat() < first:
                 why = f"entry date before {s.upper()} coverage ({first})"
             elif d not in by_date:
-                why = "entry date is not a session in index_ohlc (no series has a session that day)"
+                why = "entry date is not an exchange session (the market was shut)"
             elif not by_date[d].get(f"{s}_session"):
                 why = no_session(by_date[d], s)
             else:

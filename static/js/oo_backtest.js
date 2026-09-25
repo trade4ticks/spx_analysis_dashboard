@@ -1952,25 +1952,35 @@ document.addEventListener('alpine:init', () => {
       return Object.values(fb).some(v => v.full_session_count > 0);
     },
 
-    /* How the per-series session rule classified the table. The shortest
-     * session kept and the longest artifact rejected sit either side of the
-     * threshold -- if either comes close to it, the threshold needs a look. */
+    /* How the table measures up against the EXCHANGE CALENDAR.
+     *
+     * Two questions, reported apart: was the market open, and does this
+     * series have usable data on a day it was. The second used to be
+     * invisible -- a trading day with no SPX bars read as "not an SPX
+     * session", the same as a holiday -- so the missing days are named. */
     sessionLines() {
       const z = this.market && this.market.sessions;
       if (!z) return [];
       const out = [
-        `a series has a session with ≥ ${z.min_session_bars} valid bars`,
-        `${z.zero_filled_days} zero-filled days (${z.zero_filled_weekdays} weekdays)`,
-        `${z.artifact_only_days} artifact-only days (bars, but no series reaches a session)` +
-          (z.artifact_only.length ? `: ${z.artifact_only.slice(0, 12).map(a => a.date).join(', ')}` +
-                                    (z.artifact_only.length > 12 ? ', …' : '') : ''),
+        `${z.market} calendar: ${z.sessions.toLocaleString()} sessions in range, ` +
+          `${z.non_session_days.toLocaleString()} non-session days. Expected bars come ` +
+          `from each day's own close; a series may be up to ${z.tolerance} short.`,
       ];
+      if (z.artifact_days) {
+        out.push(`${z.artifact_days} day(s) carry bars while the market was SHUT` +
+          (z.artifacts.length ? `: ${z.artifacts.slice(0, 12).map(a => a.date).join(', ')}` +
+                                (z.artifacts.length > 12 ? ', …' : '') : ''));
+      }
       for (const [s, v] of Object.entries(z.by_series || {})) {
-        const kept = v.shortest_kept ? `${v.shortest_kept.bars} (${v.shortest_kept.date})` : '—';
-        const rej = v.longest_rejected ? `${v.longest_rejected.bars} (${v.longest_rejected.date})` : '—';
-        let line = `${s.toUpperCase()}: ${v.sessions} sessions; shortest kept ${kept}; longest rejected ${rej}`;
-        if (v.missing_on_session_days.length) {
-          line += `; missing on ${v.missing_on_session_days.length} session days (e.g. ${v.missing_on_session_days.slice(0, 3).join(', ')})`;
+        let line = `${s.toUpperCase()}: ${v.summary}`;
+        if (v.missing_days) {
+          // THE DAYS THEMSELVES, because "12 sessions" is a number and
+          // "2026-04-08" is something you can go and look at.
+          line += ` — no data on ${v.missing.slice(0, 5).map(m => m.date).join(', ')}` +
+                  (v.missing.length > 5 ? `, … (${v.missing_days} in all)` : '');
+        }
+        if (v.worst && v.worst.short && !v.worst.date.startsWith('x')) {
+          line += `; worst ${v.worst.bars}/${v.worst.expected} on ${v.worst.date}`;
         }
         if (v.zero_bars_in_sessions || v.nan_bars_in_sessions) {
           line += `; invalid bars in sessions: ${v.zero_bars_in_sessions} zero, ${v.nan_bars_in_sessions} NaN`;

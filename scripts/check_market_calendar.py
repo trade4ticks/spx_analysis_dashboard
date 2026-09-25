@@ -140,6 +140,43 @@ def main() -> int:
     check(mc.first_session_on_or_after("2023-07-08") == "2023-07-10",
           "a Saturday resolves to the Monday")
 
+    # ── THE REPORT NAMES THE DAY ──────────────────────────────────────────
+    # session_report is pure given the per-day bar counts and the calendar,
+    # so the exact shape of 2026-04-08 can be asserted with no database: a
+    # full VIX session, zero SPX, on a day the exchange was open.
+    from app.oo_backtest.market import session_report, SERIES
+
+    def day(d, **bars):
+        r = {"trade_date": d, "isodow": 3}
+        for s in SERIES:
+            r[f"{s}_bars"] = bars.get(s, 0)
+            r[f"{s}_zero_bars"] = 0
+            r[f"{s}_nan_bars"] = 0
+        return r
+
+    tbl = mc.day_table("2026-04-06", "2026-04-10")
+    rep = session_report([
+        day("2026-04-07", spx=78, vix=78, vix3m=78, vix9d=78),
+        day("2026-04-08", vix=78),                 # the real shape: no SPX
+        day("2026-04-09", spx=78, vix=78, vix3m=78, vix9d=78),
+        day("2026-04-11", vix=20),                 # a Saturday carrying bars
+    ], tbl)
+    spx = rep["by_series"]["spx"]
+    missing = [m["date"] for m in spx["missing"]]
+    check("2026-04-08" in missing,
+          f"2026-04-08 is reported as SPX MISSING ON A SESSION -- the case "
+          f"that used to read as a holiday ({missing})")
+    check(rep["by_series"]["vix"]["complete"] >= 3,
+          "while VIX is complete on it, which is why it looked like data")
+    check(next(m for m in spx["missing"] if m["date"] == "2026-04-08")["expected"] == 78,
+          "and the report says how many bars were expected of it")
+    check("no data at all" in spx["summary"],
+          f"the SPX summary says so in words ({spx['summary']})")
+    check(rep["artifact_days"] == 1 and rep["artifacts"][0]["date"] == "2026-04-11",
+          "bars on the Saturday are an artifact, counted apart from it")
+    check(rep["sessions"] == len(tbl) and "2026-04-08" in tbl,
+          "and the day is counted as a session, not skipped")
+
     print(f"\ncalendar cases: {len(FAILURES)} failed"
           if FAILURES else "\nPASS: exchange calendar")
     return 1 if FAILURES else 0
