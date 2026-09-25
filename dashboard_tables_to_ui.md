@@ -7,6 +7,11 @@ what to preserve, and what regenerates automatically.
 Sibling doc to `daily_features_data_dictionary.md`. Update this when
 adding a new cache table or moving a UI pane.
 
+**Current to 2026-09-24.** The three sections below the original ones cover
+the tables added since 2026-08-16 — the backtest pages' saved work, the
+Equity IV and Equities Scalp tables, and the live service's files, which are
+not in Postgres at all.
+
 ---
 
 ## Cache / derived tables (the ones you most often want to clear)
@@ -109,3 +114,45 @@ For reference; full discussion in housekeeping notes / chat history.
 4. `scripts/precompute_ic_all.py --force`
 5. Cache invalidates (any order): `/secondary-scan/invalidate`, `/global-metric-bins/invalidate`, `/analyze-primary/invalidate`, `/analyze-cache/invalidate`, `/threshold-drift/invalidate`
 6. `POST /api/factor-analysis/signals/refresh` with all signal IDs
+
+---
+
+## Saved work — added since 2026-08-16 (these do NOT regenerate)
+
+Everything in the first section is a cache: clear it and it rebuilds. These
+hold work that was typed or uploaded, and nothing rebuilds them.
+
+| Table | DB | Populated by | UI pane / label | Clearing affects | Safe to clear? |
+|---|---|---|---|---|---|
+| `oo_backtest_strategies` | MAIN | POST `/api/oo-backtest/strategies` — the Save box on **OO/Mesosim Backtest** | Saved-strategy dropdown there, and the strategy picker on **Backtest Portfolio** | Every saved trade log is gone. The row holds the **original uploaded file** (`file_gz`) and it exists nowhere else — re-upload the CSV/JSON | **N** |
+| ↳ its `parsed_*` columns only | MAIN | `app/oo_backtest/parsed_cache.py`, on first load of each file | (nothing visible) | Speed only: the next load re-parses, ~3 s per log — a five-strategy portfolio pays it five times, ~17 s cold against ~0.2 s warm. Keyed on `file_sha256` + a hash of `data_loader.py`, so it self-invalidates | **Y** (`UPDATE … SET parsed_gz = NULL`) |
+| `backtest_portfolio_profiles` | MAIN | POST `/api/backtest-portfolio/profiles` — Save on the profiles card | **Backtest Portfolio** — the saved-profile dropdown | Saved combinations (which strategies, qty, capital, per-strategy filters, date-range mode, rolling window) are gone. The strategies they point at are not | **N** |
+| `equity_structure_presets` | OI | POST `/api/equity-iv/structures` | **Equity IV** — saved structure presets | Saved presets are gone | **N** |
+| `fills`, `fills_daily` | SCALP | POST `/api/equities-scalp/upload-fills` (a Schwab statement) | **Equities Scalp** — traded markers, realized P/L, the traded columns | Uploaded fills are gone; re-upload the statements | **N** |
+
+## Source tables for the newer pages (external pipelines — DO NOT clear)
+
+None of these is built in this repo, and nothing here can rebuild them.
+
+| Table | DB | Built by | UI pane / label |
+|---|---|---|---|
+| `equity_metrics`, `equity_metrics_z`, `equity_metrics_catalog` | OI | External equity-IV pipeline | **Equity IV** — every metric pane, the scanner, the cross-section, the Base/Z toggle |
+| `equity_atm`, `equity_surface` | OI | External equity-IV pipeline | Equity IV ticker header and rails; all six surface panels (curve band, tent, sticky strike, surface grid, time scatter, spot-vol) |
+| `earnings_calendar`, `earnings_coverage` | OI | External equity-IV pipeline | Earnings markers, and the coverage statement made before anything is drawn from them |
+| `universe`, `daily_metrics` | SCALP | Open_Interest `scalp/` pipeline | **Equities Scalp** — the scan grid, the filter pane's ranges, every daily chart |
+| `intraday_metrics` (~14 days), `intraday_monthly` (kept) | SCALP | same | Scalp **ticker detail**, `scope=sessions` and `scope=months` |
+| `provenance` | SCALP | same | The freshness / coverage line on the scalp page |
+
+The SCALP database is reached through an **optional** pool: when it is absent
+the page says "not connected" and the rest of the dashboard starts normally.
+
+## Not tables at all — the live service (port 8001)
+
+`spx-live` writes no Postgres. Its state is two things on disk and the tape
+in memory.
+
+| Path | Written by | UI | Clearing affects | Safe to clear? |
+|---|---|---|---|---|
+| `data/wall_watchlist.json` | POST `/wall/watchlist` (temp file + rename) | **Equities Wall** — the symbols and each pane's scale override | The wall comes back empty and the list is retyped by hand | **N** (user-entered) |
+| `data/scan_history/scan_cells_<date>.npz` | `live/scan_history.py`, once a minute, one file per session date, **not pruned** | **Equities Scan** — the grid's accumulated minutes | Today's grid is blank until it re-accumulates; past dates stop being loadable | Y (loses history) |
+| (memory only) the tape rings | `live/hub.py`, `scan.py`, `wall.py` | All three live pages | Nothing persists — trades and quotes are discarded as they age out of the tier's window. A restart empties every pane **and silently disarms trading** | — |

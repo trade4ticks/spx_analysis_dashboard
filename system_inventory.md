@@ -8,6 +8,12 @@ scripts, every endpoint, and dead/vestigial flags.
 Update this when adding a table, script, or endpoint, or when retiring
 one of the cleanup candidates flagged below.
 
+**Current to 2026-09-24.** Sections 0–5 were written 2026-08-16 and describe
+the OI / IV-surface side; everything added since — the Equity IV, Equities
+Scalp, OO/Mesosim Backtest and Backtest Portfolio pages, and the separate
+live service on port 8001 — is folded into the same sections (1a, 1b, 2,
+3j–3o) rather than kept in an appendix, so there is still one place to look.
+
 How the app is *served* — the Cloudflare 100-second origin limit that
 `/api/factor-trades/grid` runs into, response compression, and the
 sizing of an async-job endpoint — is in `DEPLOYMENT_NOTES.md`.
@@ -46,7 +52,7 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 
 ## 1. All Tables
 
-### 1a. MAIN DB (`spx_interpolated`) — 22 tables
+### 1a. MAIN DB (`spx_interpolated`) — 24 tables
 
 | Table | Category | Grain / PK | Populated by | Read by | UI pane / label | Safe to clear? |
 |---|---|---|---|---|---|---|
@@ -71,8 +77,11 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `research_backtest_uploads` | annotation | id UUID | POST `/research2/finalize-backtest` | GET `/research2/backtest-uploads`; `backtest_iv.py` endpoints; orchestrator | "Backtest Uploads" on Research2 page AND Backtest IV Analysis page | N |
 | `research_backtest_staging` | derived-cache | id SERIAL | POST `/research2/upload-backtest` (per-chunk) | POST `/research2/finalize-backtest` (consumes) | internal (transient between upload and finalize) | Y |
 | `research2_results`, `research2_followups`, `research2_charts`, `research2_runs` | annotation | (Research2's mirror of v1) | `research/db.py` v2 path | research2.py endpoints | Research2 page | N |
+| `oo_backtest_strategies` | annotation (+ cached cols) | id SERIAL, name UNIQUE | POST `/api/oo-backtest/strategies` (Save on the backtest page); `app/oo_backtest/store.py` creates it lazily | GET `/strategies`, `/strategies/{id}/load`; `/api/backtest-portfolio/{strategies,load}` | **OO/Mesosim Backtest** saved-strategy dropdown, and the strategy picker on **Backtest Portfolio** | **N** — holds the ORIGINAL uploaded trade log (`file_gz`), which lives nowhere else |
+| ↳ its `parsed_*` columns | derived-cache | same row | `app/oo_backtest/parsed_cache.py` on first load of each file | the same loads | (nothing visible — speed only) | Y — `UPDATE … SET parsed_gz = NULL`. Next load re-parses (~3 s a log; a five-strategy portfolio pays it five times). Keyed on `file_sha256` + a fingerprint hash of `data_loader.py`, so it self-invalidates when either moves |
+| `backtest_portfolio_profiles` | annotation | id SERIAL, name UNIQUE | POST `/api/backtest-portfolio/profiles`; `app/oo_backtest/portfolio_store.py` creates it lazily | GET `/profiles`, `/profiles/{id}` | **Backtest Portfolio** — the saved-profile card | **N** — a saved combination (strategy ids, qty, capital, per-strategy filters, range mode, rolling window as JSONB). Points at strategies; holds no trades |
 
-### 1b. OI DB (`open_interest`) — 21 tables
+### 1b. OI DB (`open_interest`) — 29 tables
 
 | Table | Category | Grain / PK | Populated by | Read by | UI pane / label | Safe to clear? |
 |---|---|---|---|---|---|---|
@@ -98,7 +107,37 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `tracked_signals` | annotation | signal_id PK | POST `/api/factor-signals/tracked` | `oi_signals.py` `/firing`, `/roster` | OI Signals page — Tracked Signals watchlist | N |
 | `oi_signal_calendar` | annotation | id SERIAL, partial-unique (ticker, outcome, entry_date) | POST `/api/factor-signals/calendar` | `oi_signals.py` `/calendar` | "Open Positions Calendar" (Gantt) on OI Signals page | N |
 | `ticker_analysis_layouts` | annotation | id SERIAL, name UNIQUE | POST `/api/ticker-analysis/layouts` (upsert by name) | GET/DELETE `/api/ticker-analysis/layouts` | Ticker Analysis page — saved metric-pane layouts (metric+onPrice per pane, shade, horizon); ticker-agnostic. Created lazily by `ticker_analysis.py`. | N (user-entered) |
+| `equity_metrics` | source | (ticker, trade_date) | **External equity-IV pipeline (NOT in repo)** | `equity_iv.py` (`METRICS_TABLE`) — catalog, cross-section, scanner, rails, series, unusual | Every **Equity IV** metric pane, the scanner and the cross-section | N |
+| `equity_metrics_z` | source | (ticker, trade_date) | **External pipeline** | `equity_iv.py` (`Z_TABLE`) — the `form=z` branch and the z-join | Equity IV in z-score form (the Base/Z toggle) | N |
+| `equity_metrics_catalog` | config | metric name PK | **External pipeline** | `equity_iv.py` (`CATALOG_TABLE`) | Metric labels, groups, units and tooltips on Equity IV | N |
+| `equity_atm` | source | (ticker, trade_date, dte) | **External pipeline** | `equity_iv.py` (`ATM_TABLE`) | ATM term/level reads behind the ticker header and rails | N |
+| `equity_surface` | source | (ticker, trade_date, dte, delta) | **External pipeline** | `equity_iv_surface.py` (`SURFACE_TABLE`) — curve-band, tent, sticky-strike, surface-grid, time-scatter, spot-vol | All six **Equity IV** surface panels | N |
+| `earnings_calendar` | source | (ticker, earnings_date) | **External pipeline** | `equity_iv.py` (`EARNINGS_TABLE`) | Earnings markers and the earnings-relative views | N |
+| `earnings_coverage` | source | ticker | **External pipeline** | `equity_iv.py` (`EARNINGS_COVERAGE_TABLE`) | States which tickers have usable earnings dates before anything is drawn from them | N |
+| `equity_structure_presets` | annotation | id SERIAL | POST `/api/equity-iv/structures`; `equity_structures.py` creates it lazily | GET `/structures`, DELETE `/structures/{id}` | **Equity IV** — saved option-structure presets | **N** (user-entered) |
 | `ticker_analysis_chain_cache` | derived-cache | cache_key TEXT PK | read-through on GET `/api/ticker-analysis/chain/*`; force=1 rewrites | same chain GETs | Ticker Analysis option-chain views (profile, ΔOI, vol-oi, strike×DTE, flow, surface, IV smile/term). Created lazily by `ticker_chain.py`; cleared via POST `/chain/invalidate`. | Y |
+
+### 1b2. SCALP DB (`equities_scalp`) — 7 tables
+
+A **third** Postgres database, reached through `app/db.py:get_scalp_pool()`.
+Its pool is **optional**: `_record(..., required=False)`, so when it is absent
+or unreachable the page reports "not connected" and the rest of the dashboard
+starts normally. DSN is `SCALP_DATABASE_URL`, or `DATABASE_URL` with the
+database name swapped for `SCALP_PG_DB` (default `equities_scalp`).
+
+The first five are built by the scalp pipeline in the **Open_Interest** repo
+(`scalp/`), not here; `fills` and `fills_daily` are created and written by
+this repo.
+
+| Table | Category | Populated by | Read by | UI pane / label | Safe to clear? |
+|---|---|---|---|---|---|
+| `universe` | source | **External scalp pipeline** | `equities_scalp.py` | The ticker set behind every scalp view | N |
+| `daily_metrics` | source | **External scalp pipeline** | `equities_scalp.py` — meta, candidates, compare, series, calibration, rank-stability, metric-correlation | **Equities Scalp** scan grid, the filter pane's ranges, every daily chart | N |
+| `intraday_metrics` | source | **External scalp pipeline** | `equities_scalp.py` (`INTRADAY_TABLE`, f-string interpolated — a literal `FROM intraday_metrics` grep will not find it) | **Ticker detail** → `scope=sessions`. Retains ~14 days | N |
+| `intraday_monthly` | source | **External scalp pipeline** | `equities_scalp.py` (`INTRADAY_MONTHLY_TABLE`) | **Ticker detail** → `scope=months`; the rollup is kept indefinitely | N |
+| `provenance` | source | **External scalp pipeline** | `equities_scalp.py` `/health` | The freshness/coverage line on the scalp page | N |
+| `fills` | annotation | POST `/api/equities-scalp/upload-fills` (a Schwab statement) | GET `/fills`, `/ticker-detail` | Traded markers and realized P/L on **Equities Scalp** | **N** — re-upload the statements |
+| `fills_daily` | annotation | same upload (the daily rollup) | GET `/fills`, `/candidates`, `/compare` | The per-day traded columns | **N** — same |
 
 ### 1c. In-memory only — no Postgres table
 
@@ -109,6 +148,14 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `_ic_batch_running`, `_ic_batch_status`, `_IC_DECOMP_CACHE` | `oi_analysis.py:4648-4650` | Same pattern |
 | `_GLOBAL_BINS_CACHE` (in-memory mirror) | `oi_analysis.py:4260` | Memoization on top of `global_bins_cache` table; `/global-metric-bins/invalidate` clears both |
 | `_columns_catalog_cache` | `meta.py:82` | Memoization of `surface_metrics_catalog` |
+| the live tape's rings | `live/hub.py`, `live/scan.py`, `live/wall.py` | Every trade and quote the pages draw. Nothing is written to Postgres — the tape is Polygon's and it is discarded as it ages out of its tier's window |
+
+### 1c2. On disk, not in Postgres — the live service's own state
+
+| Path | Written by | Read by | Clearing affects | Safe to clear? |
+|---|---|---|---|---|
+| `data/wall_watchlist.json` (`LIVE_WALL_STORE_PATH`) | POST `/wall/watchlist` via `live/wall_store.py`, whole-file through a temp file and a rename | `WallRunner.apply()` on start and on every change | **Equities Wall** comes back empty and the list — and each pane's scale override — is retyped by hand | **N** (user-entered) |
+| `data/scan_history/scan_cells_<date>.npz` (`LIVE_SCAN_HISTORY_DIR`) | `live/scan_history.py`, once a minute, one file per session date, **not pruned** | `/scan/seed`, `/scan/sessions` | That session's grid is blank until it re-accumulates; past dates stop being loadable | Y (loses history) |
 
 ### 1d. Possibly-dead legacy tables (check pgAdmin)
 
@@ -135,6 +182,30 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `scripts/measure_secondary_corr_bins.py` | EXPLAIN ANALYZE: narrow vs wide primary-bin filter on `is_bins` to gate Group-4 migration | OI DB (`is_bins`, `daily_features`, `metric_classification`) | None | Manual on VPS | one-off-diagnostic |
 | `scripts/tt_bin_tie_diff.py` | Step-7k one-shot: walks every numeric `daily_features` column under `searchsorted` `side='right'` vs `'left'`; reports any TT-bin shifts at ties | OI DB (`daily_features`, `metric_classification`) | None | Manual; "Run on the VPS once" per docstring. Bug it audits has been fixed. | one-off-diagnostic (cleanup candidate) |
 | `research/batch_score.py` | Exhaustive batch-scorer: every ticker × metric × fwd-return; results upserted into `oi_score_matrix`. Has both `__main__` CLI and background-task entry | OI DB (`daily_features`, `wf_bins`, `metric_classification`) | MAIN DB (`oi_score_matrix`) | POST `/api/factor-analysis/run-batch-score` (BackgroundTask) OR `python -m research.batch_score [--walk-forward]` | active |
+
+### 2b. The gate suite (`scripts/check_*.py`, run by `scripts/gates.py`)
+
+31 `check_*.py` scripts plus two dry-runs. `GATES` in `gates.py` is an
+**explicit list**, not a directory scan: a script that is not in it does not
+run, and `--vps --deploy` selects only the two that can run on the box.
+**Nothing reports PASS that it did not run** — a gate that declares
+`can_skip` and exits 3 is reported SKIP, and for any other gate a 3 is an
+ordinary failure. Gates in the order `gates.py` runs them:
+
+| Group | Gates | What the group protects |
+|---|---|---|
+| syntax & references | `check_alpine_syntax`, `check_alpine_refs`, `check_asset_versions`, `check_nav`, `check_rendered_assets`, `check_orphaned_handlers`, `node --check` | Every `x-*` expression parses and resolves to a real component member; assets are content-hashed and every rendered `src`/`href` resolves; every page is in exactly one nav category |
+| Equity IV | `equity_iv_dryrun` (85+ endpoint cases), `check_tenor_retarget` | Endpoint SQL, contamination, JS/Python retarget parity |
+| Equities Scalp | `scalp_dryrun`, `check_scalp_fills`, `check_scalp_metrics`, `check_scalp_filters` | The statement parser; **no hardcoded metric names**; that a filter the pane accepts actually reaches the request |
+| Replay & scatter | `check_replay`, `check_scatter_invariants` | |
+| Backtest | `check_oo_backtest` (JS binning vs `pd.cut`, stats, auto-bins, half-open deployment), `check_portfolio`, `check_portfolio_ui` (the page driven **by clicking**, headless Edge), `check_oo_market_sql` (a real temp Postgres) | The numbers on both backtest pages, and that the portfolio page's controls work rather than merely exist |
+| Live service | `check_live_hub`, `check_wall`, `check_live_axis`, `check_live_layout`, `check_live_reconcile`, `check_arrival_norm` | Tier caps, no aggregation, resubscribe on reconnect, and that the wall **cannot reach a broker** |
+| Brokers | `check_broker`, `check_das` | The switches and guards (the adapter is asserted NOT CALLED when one refuses); the DAS line protocol against a fake socket |
+| Repo-wide | `check_pool_wiring`, `check_vendored`, `check_chart_contract`, `check_routes_smoke`, `check_template_render`, `check_grid_equivalence` | |
+
+`check_oo_backtest` needs node and the Options-Backtest-Dashboard checkout;
+`check_oo_market_sql` needs `initdb`; `check_portfolio_ui` needs a browser
+and skips without one. None of the three can run on the VPS.
 
 ### Script notes
 
@@ -361,6 +432,155 @@ and, where applicable, `dte_bands`/`moneyness`/`side=all|call|put`.
 | POST | `/chain/invalidate` | W: `ticker_analysis_chain_cache` | (none) | ops curl (optional `?ticker=`) | internal-only |
 
 New files: `app/split_factors.py` (split factors vendored from Open_Interest/lib/split_factors.py), `app/routers/ticker_chain.py`. Page route `GET /ticker-analysis` → `templates/ticker_analysis.html` (loads Three.js r128 + OrbitControls from CDN for the 3D surface).
+
+---
+
+### 3j. Equity IV (`/api/equity-iv`) — 20 routes, three routers, one prefix
+
+Page `GET /equity-iv` → `templates/equity_iv.html`. All three routers read the
+**OI DB** (`get_oi_pool`) and share the `/api/equity-iv` prefix, so the page
+sees one API; they are split by subject, not by mount point.
+
+| Method | Path | Router | Tables |
+|---|---|---|---|
+| GET | `/catalog` | `equity_iv.py` | `equity_metrics_catalog` |
+| GET | `/calendar` | `equity_iv.py` | `equity_metrics` |
+| GET | `/cross-section` | `equity_iv.py` | `equity_metrics`(+`_z`) |
+| GET | `/universe-stats` | `equity_iv.py` | `equity_metrics` |
+| GET | `/universe-spot-breadth` | `equity_iv.py` | `equity_metrics`, `underlying_ohlc` |
+| GET | `/universe-term-state` | `equity_iv.py` | `equity_metrics`, `equity_atm` |
+| GET | `/scanner` | `equity_iv.py` | `equity_metrics`(+`_z`) |
+| GET | `/ticker-header` | `equity_iv.py` | `equity_metrics`, `equity_atm`, `earnings_calendar` |
+| GET | `/unusual` | `equity_iv.py` | `equity_metrics`, `earnings_coverage` |
+| GET | `/rails` | `equity_iv.py` | `equity_metrics`, `underlying_ohlc` |
+| GET | `/series` | `equity_iv.py` | `equity_metrics`(+`_z`), `underlying_ohlc` |
+| GET | `/curve-band` | `equity_iv_surface.py` | `equity_surface` |
+| GET | `/tent` | `equity_iv_surface.py` | `equity_surface` |
+| GET | `/sticky-strike` | `equity_iv_surface.py` | `equity_surface` |
+| GET | `/surface-grid` | `equity_iv_surface.py` | `equity_surface` |
+| GET | `/time-scatter` | `equity_iv_surface.py` | `equity_surface` |
+| GET | `/spot-vol` | `equity_iv_surface.py` | `equity_surface`, `underlying_ohlc` |
+| GET | `/structures` | `equity_structures.py` | R: `equity_structure_presets` |
+| POST | `/structures` | `equity_structures.py` | W: `equity_structure_presets` |
+| DELETE | `/structures/{preset_id}` | `equity_structures.py` | W: `equity_structure_presets` |
+
+### 3k. Equities Scalp (`/api/equities-scalp`) — 11 routes
+
+Page `GET /equities-scalp` → `templates/equities_scalp.html`. The **only**
+router on the scalp pool (`get_scalp_pool`, optional — see 1b2).
+**No hardcoded metric names anywhere**, gated by `check_scalp_metrics`:
+column names come from the vendored `scalp_config.py`, and the filter pane
+screens on whatever metrics the chosen date actually holds.
+
+| Method | Path | Tables | UI |
+|---|---|---|---|
+| GET | `/meta` | `daily_metrics`, `universe` | Metric catalog + the date list |
+| GET | `/health` | `provenance` | The freshness / coverage line |
+| POST | `/upload-fills` | W: `fills`, `fills_daily` | Schwab statement upload |
+| GET | `/fills` | `fills`, `fills_daily` | Traded markers and realized P/L |
+| GET | `/calibration` | `daily_metrics` | Calibration pane |
+| GET | `/metric-correlation` | `daily_metrics` | Metric-correlation pane |
+| GET | `/rank-stability` | `daily_metrics` | Rank-stability pane |
+| GET | `/series` | `daily_metrics` | Per-metric series |
+| GET | `/ticker-detail` | `intraday_metrics` (`scope=sessions`) \| `intraday_monthly` (`scope=months`) | Ticker detail |
+| GET | `/compare` | `daily_metrics`, `fills_daily` | Compare pane |
+| GET | `/candidates` | `daily_metrics`, `fills_daily` | The scan grid. Takes `filters=<key>:<op>:<value>,…` — the pane's constraints, which `check_scalp_filters` asserts actually reach the request |
+
+### 3l. OO/Mesosim Backtest (`/api/oo-backtest`) — 11 routes
+
+Page `GET /oo-backtest` → `templates/oo_backtest.html`. MAIN DB
+(`get_pool`). The trade log is parsed server-side and shipped once; **every
+filter, bin and statistic after that is computed in the browser** from
+`static/js/backtest_core.js`. See `CLAUDE.md` for the decision record.
+
+| Method | Path | Tables | Note |
+|---|---|---|---|
+| GET | `/registry` | — | `registry.py` — the one list driving the filter sidebar, the sections and the payload whitelist |
+| POST | `/parse` | R: `index_ohlc` | Upload: parse + the market join |
+| GET | `/strategies` | R: `oo_backtest_strategies` | Saved-log dropdown |
+| POST | `/strategies` | W: `oo_backtest_strategies` | Saves the ORIGINAL file, not parsed trades |
+| GET | `/strategies/{id}/load` | R/W: `oo_backtest_strategies` (parse cache), R: `index_ohlc` | Re-parses and re-joins, so a saved log never freezes save-day market data |
+| PUT | `/strategies/{id}/capital` | W: `capital_per_position` | Leaves `updated_at` — the list order — alone |
+| DELETE | `/strategies/{id}` | W: `oo_backtest_strategies` | |
+| GET | `/market-status` | R: `index_ohlc` | Read-only freshness indicator; there is **no market-data cron here** |
+| GET | `/surface/catalog` | R: `surface_metrics_catalog` | P6 surface metrics |
+| POST | `/surface/rank` | R: `surface_metrics_core` | Ranks 452 metrics against the filtered trades |
+| POST | `/surface/values` | R: `surface_metrics_core` | One metric for every trade, for an added row |
+
+### 3m. Backtest Portfolio (`/api/backtest-portfolio`) — 7 routes
+
+Page `GET /backtest-portfolio` → `templates/backtest_portfolio.html`. MAIN DB.
+**The prefix is declared on the `APIRouter` itself**, not at
+`include_router` (`app.include_router(backtest_portfolio.router)` takes no
+prefix) — the router reuses `oo_backtest._analyze`, and the two must not look
+like one API split across two mount points. `MAX_STRATEGIES = 12`.
+
+| Method | Path | Tables | Note |
+|---|---|---|---|
+| GET | `/registry` | — | The same registry as the backtest page |
+| GET | `/strategies` | R: `oo_backtest_strategies` | The picker |
+| POST | `/load` | R: `oo_backtest_strategies` + parse cache, `index_ohlc` | Loads several strategies **sequentially**, reusing `oo_backtest._analyze`. The parse cache is what makes this ~0.2 s warm against ~17 s cold for five |
+| GET | `/profiles` | R: `backtest_portfolio_profiles` | |
+| POST | `/profiles` | W: `backtest_portfolio_profiles` | A name collision raises `NameTaken` carrying `existing_id` — an answer, not an overwrite |
+| GET | `/profiles/{id}` | R: `backtest_portfolio_profiles` | |
+| DELETE | `/profiles/{id}` | W: `backtest_portfolio_profiles` | |
+
+Everything drawn — filters, stats, equity, drawdown, half-open concurrency,
+monthly and annual P/L, correlation, rolling risk — is computed in the
+browser by `static/js/backtest_core.js`, shared with `/oo-backtest` so the
+two pages cannot give different answers about the same strategy.
+
+### 3n. Replay (`/api/replay`) — 5 routes
+
+| Method | Path |
+|---|---|
+| GET | `/sessions`, `/symbols`, `/candles`, `/window`, `/status` |
+
+### 3o. The live service (`live/`, port 8001) — 25 routes
+
+**A separate FastAPI app, process and systemd unit** (`spx-live`), not part of
+the dashboard's route table. It shares the stylesheet and `app/assets.py` and
+nothing else; it reads no Postgres at all.
+
+**One upstream Polygon socket.** The account permits exactly one connection
+and a second evicts the first, so all three pages share it as tiers:
+
+| Tier | Holds | Cap (`live/config.py`) |
+|---|---|---|
+| pane | every field of every trade and quote, 15 min | `MAX_SYMBOLS` 8 |
+| scan | trades as three float64 arrays, 6 min, + a spread accumulator | `SCAN_MAX_SYMBOLS` 600 |
+| wall | trades + a sampled quote, 2 min | `WALL_MAX_SYMBOLS` 120 |
+
+`Hub.holders(sym, exclude=tier)` is the single place answering "does another
+tier still hold this", and every add and drop asks it — the failure it
+prevents (an unsubscribe pulled out from under another tier) shows as a pane
+that has gone QUIET rather than blank, which is the one distinction these
+pages exist to make. Browsers are capped at `MAX_CLIENTS` 8, which is why the
+wall carries **all** its panes over the single `/wall/ws`.
+
+| Method | Path | Note |
+|---|---|---|
+| GET | `/` | Equities Live — the tape and the ladder |
+| GET | `/status` | Upstream socket + tier state |
+| GET | `/arrival-norm` | |
+| GET/POST | `/broker/trading` | The runtime trading switch |
+| GET | `/broker/health`, `/broker/state`, `/broker/orders`, `/broker/positions` | |
+| POST | `/broker/order`, `/broker/replace`, `/broker/reconcile`, `/broker/cancel`, `/broker/flatten` | 11 broker routes in all |
+| GET | `/scan` | Equities Scan — the quietness grid |
+| GET | `/scan/defaults`, `/scan/seed`, `/scan/sessions` | Seed reads `data/scan_history/*.npz` |
+| POST | `/scan/symbols` | |
+| WS | `/scan/ws` | |
+| GET | `/wall` | Equities Wall — watching only; `check_wall` refuses any broker reference from the wall's modules or endpoints |
+| GET/POST | `/wall/watchlist` | R/W `data/wall_watchlist.json` |
+| WS | `/wall/ws` | **One connection for the whole page**; 1 Hz delta frames, and a symbol with nothing new is not sent |
+| WS | `/ws` | The pane's tape |
+
+Brokers sit behind an interface: **`live/broker.py` is the façade** and owns
+the policy (the four switches, the guards, flatten ordering); `live/brokers/`
+holds `base.py` (the ABC), `schwab.py` and `das.py`, selected by
+`LIVE_BROKER`. Arming and the guards are checked once, in the façade, above
+the adapter — so a new adapter cannot trade while disarmed by forgetting to
+ask. `CLAUDE.md` carries the full record.
 
 ---
 
