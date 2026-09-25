@@ -406,8 +406,17 @@ stretch the filter was blind to.
   same pass from the same filtered indices" below; the card says so, and the
   gate asserts they match only when nothing is hatched. The summary keeps the
   strict trades, per the brief — there is no toggle.
-- Capital deployed is NOT hatched and keeps the table's trades: it answers
-  what would have been at risk UNDER the filter, a different question.
+- **All three charts in the pane draw the whole span** (2026-09-25).
+  Capital deployed was clipped to the table's trades on the argument that it
+  answers what would have been at risk UNDER the filter; three charts side by
+  side behaving differently is worse than that inconsistency, so it is shaded
+  like the other two. Its TABLE figure stays strict, so the drawn peak can
+  run above **peak deployed** — and **ann ret %** divides by the table's
+  figure, not the chart's. The card says so.
+- **Two shades, THREE tones.** They compound where both hold, so the key has
+  a third entry for the overlap whose colour is `1 - (1-a)(1-b)`, computed
+  rather than a third constant to keep in step. Without it the darkest region
+  on screen matched nothing in the key.
 - **Both shadings are the same grey at two densities, and each is a BINARY
   state** (simplified 2026-09-25). Strategy coverage: either every loaded
   strategy is live or some is not — no band for "1 of 3" against "2 of 3",
@@ -562,7 +571,15 @@ OO page before and after to an identical PNG.
   ignoring concurrency. Ours divides by **peak deployed capital** (peak
   concurrent × capital). The old figure reads ~5–8× higher at 5–8 concurrent
   positions.
-- `years` — old measures **close-to-close**; ours **open-to-close**.
+- `years` — **close-to-close on both now** (changed 2026-09-25). Ours was
+  open-to-close, which was never a decision: it stretched the window by the
+  first position's holding period, inflating `years` and so understating
+  **avg annual P/L**, **Calmar** and **ann ret %** — all three scale by
+  exactly `years_old / years_new`. Close-to-close matches Max DD, Sharpe, the
+  axis the equity curve is drawn on, and what the old Render app did. The
+  parity gate's pandas reference moved with it, and a filtered set whose
+  trades all close on one day now reports "—" rather than annualising a
+  zero-length window.
 - `calmar` — old is `avg_annual_pct / (|max_dd| / capital × 100)`, which is
   algebraically **the same number as ours** (capital cancels). No conflict.
 - `sharpe` — `mean/std × √252` over days that HAD A CLOSE, not zero-filled

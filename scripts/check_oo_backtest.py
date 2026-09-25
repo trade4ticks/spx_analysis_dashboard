@@ -1518,7 +1518,11 @@ def check_deployment_and_extra_stats() -> None:
         df["date_opened"] = pd.to_datetime(df["date_opened"])
         df["date_closed"] = pd.to_datetime(df["date_closed"])
         st = pystats.calculate_stats(df.copy())
-        years = (df["date_closed"].max() - df["date_opened"].min()).days / 365.25
+        # CLOSE-TO-CLOSE, as obExtraStats measures it and as the old
+        # Render app did. Measuring from the first ENTRY stretched the
+        # window by the first position's holding period and understated
+        # every figure derived from it.
+        years = (df["date_closed"].max() - df["date_closed"].min()).days / 365.25
         ann = st["total_pnl"] / years
         gw, gl = df.loc[df["pnl"] > 0, "pnl"].sum(), df.loc[df["pnl"] < 0, "pnl"].sum()
         return {"avg_annual_pnl": ann, "calmar": ann / abs(st["max_drawdown"]),

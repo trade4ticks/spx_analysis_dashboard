@@ -452,7 +452,11 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('deployment is a step', cap && cap.data.datasets[0].stepped, 'before');
   const capPeak = Math.max(...cap.data.datasets[0].data.map(p => p.y));
   const tablePeak = document.querySelector('.bp-table tr.total td:nth-child(16)').textContent;
-  ok('its peak is the table peak', bpFmtMoney(capPeak), tablePeak);
+  // ...when nothing is shaded. Once the chart draws trades the table does
+  // not count, its peak can run above the table's figure -- the same
+  // exception as the curve's end total and the drawdown trough.
+  ok('its peak is the table peak, nothing being shaded',
+     BP_DATA.curves.unfilteredTo ? tablePeak : bpFmtMoney(capPeak), tablePeak);
 
   // THE MONTHLY GRID sums to the same total.
   const cells = [...document.querySelectorAll('.bp-mcell')];
@@ -861,11 +865,31 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('and every one of them closes inside the shade',
      addedU.every(i => pU.columns.date_closed[i] <= BP_DATA.curves.unfilteredTo), true);
   ok('the key counts exactly those trades', cU.unfilteredKey().n, addedU.length);
-  // Capital deployed answers what was at risk UNDER the filter, which is a
-  // different question, so it keeps the table's trades and no hatch.
+  // CAPITAL DEPLOYED DRAWS THE WHOLE SPAN TOO. Three charts in one pane
+  // behaving differently is worse than the inconsistency the clipping
+  // avoided, so it is shaded like the other two -- while the TABLE's peak
+  // stays strict, which is the divergence the card has to state.
   const capU = Chart.getChart('bp-cap-chart');
-  ok('capital deployed carries no metric shade',
-     !!(capU.options.plugins || {}).bpUnfilteredShade, false);
+  ok('capital deployed carries the metric shade',
+     capU.options.plugins.bpUnfilteredShade.to, obDay(BP_DATA.curves.unfilteredTo));
+  ok('its drawn peak is at or above the table figure',
+     BP_DATA.curves.capPeakDrawn >= BP_DATA.curves.capPeakStrict, true);
+  ok('and the card says the two can differ',
+     /peak deployed/i.test(capU.canvas.closest('.ob-card').textContent), true);
+
+  // THE THIRD TONE. Two shades are drawn but three appear, because they
+  // compound where both hold. The key has to name what is on screen.
+  const both = cU.bothKey();
+  ok('the overlap has its own key entry', !!both, true);
+  const composited = 1 - (1 - BP_SHADE_STRATEGY) * (1 - BP_SHADE_METRIC);
+  ok('its tone is what compositing produces',
+     both.bg, 'rgba(' + BP_SHADE + ',' + composited.toFixed(3) + ')');
+  ok('which is darker than either alone',
+     composited > BP_SHADE_METRIC && composited > BP_SHADE_STRATEGY, true);
+  const keyEls = [...document.querySelectorAll('.bp-liveleg')];
+  ok('three key rows render', keyEls.length >= 3, true);
+  ok('one of them names both conditions',
+     keyEls.some(el => /both at once/i.test(el.textContent)), true);
 
   // 3. TWO BLIND FILTERS HATCH TO THE LATER COVERAGE, NOT THE EARLIER:
   // nothing before the later one has passed both.

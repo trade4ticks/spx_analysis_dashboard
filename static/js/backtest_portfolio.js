@@ -990,6 +990,11 @@ document.addEventListener('alpine:init', () => {
       for (const m of this.registry) pooled.cols[m.column] = [];
       const pctParts = [];          // per-trade P/L %, each against its own capital
       let deployed = new Array(sessions.length).fill(0);
+      // The CHART's series. Identical to `deployed` unless a filter is
+      // blind to part of the history, in which case Capital deployed draws
+      // the whole span like the two charts beside it. The TABLE's peak
+      // stays on the strict set, so the two can differ and the card says so.
+      let deployedDraw = new Array(sessions.length).fill(0);
       // THE CHARTS' OWN POOL. Same trades as `pooled` unless a filter is
       // blind to part of the history, in which case the equity and drawdown
       // charts keep drawing it and shade it instead of stopping short.
@@ -1031,6 +1036,11 @@ document.addEventListener('alpine:init', () => {
         const extra = obExtraStats(cols, idx, stats, capital, conc.peak);
         const series = obDeployedSeries(conc, sessions, capital);
         for (let i = 0; i < deployed.length; i++) deployed[i] += series[i];
+        const concDraw = lenient.size
+          ? obConcurrency(p.columns, idxDraw, sessions) : conc;
+        const seriesDraw = lenient.size
+          ? obDeployedSeries(concDraw, sessions, capital) : series;
+        for (let i = 0; i < deployedDraw.length; i++) deployedDraw[i] += seriesDraw[i];
 
         for (const i of idx) {
           pooled.idx.push(pooled.pnl.length);
@@ -1120,7 +1130,11 @@ document.addEventListener('alpine:init', () => {
       // Why, as opposed to how far: the latest coverage among the active
       // blind filters. Stated in the key; the edge itself is the data.
       curves.coverageFrom = bpUnfilteredTo(this.chosen, this.registry);
-      curves.cap = deployed;
+      curves.cap = deployedDraw;
+      // The table's figure, kept so the card can say when the drawn peak
+      // runs above it rather than leaving two numbers to be compared.
+      curves.capPeakStrict = deployed.length ? Math.max(...deployed) : 0;
+      curves.capPeakDrawn = deployedDraw.length ? Math.max(...deployedDraw) : 0;
       // P6 reads these: the portfolio's daily P/L (by close date, the old
       // app's series) and each strategy's own concurrency, which the overlap
       // chart draws beside the portfolio total.
@@ -1530,9 +1544,9 @@ document.addEventListener('alpine:init', () => {
       }
 
       this.draw('cap', 'bp-cap-chart', capData,
-                shaded(base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
-                            cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {})),
-                [bpLiveShade]);
+                unf(shaded(base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
+                            cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}))),
+                [bpLiveShade, bpUnfilteredShade]);
     },
 
     drawBar(key, id, data, options) {
@@ -1576,6 +1590,25 @@ document.addEventListener('alpine:init', () => {
       return { to: c.unfilteredTo, from: c.coverageFrom, label,
                n: c.unfilteredN || 0, noBar: c.noBarN || 0,
                bg: `rgba(${BP_SHADE},${BP_SHADE_METRIC})` };
+    },
+
+    /* THE OVERLAP. Two shades are drawn but THREE tones appear, because
+     * where both conditions hold the fills compound. The key named two of
+     * them, so the darkest region on screen matched nothing in it. The
+     * combined alpha is what compositing actually produces --
+     * 1 - (1-a)(1-b) -- not a third constant to keep in step. */
+    bothKey() {
+      void this.tick;
+      const c = BP_DATA.curves || {};
+      const lk = this.liveKey();
+      if (!lk || !c.unfilteredTo) return null;
+      // Only when they really overlap: the metric shade runs from the left
+      // edge, so it overlaps if any partial band starts before it ends.
+      const to = obDay(c.unfilteredTo);
+      const hit = this.liveShade().bands.some(b => b.partial && b.from < to);
+      if (!hit) return null;
+      const a = 1 - (1 - BP_SHADE_STRATEGY) * (1 - BP_SHADE_METRIC);
+      return { bg: `rgba(${BP_SHADE},${a.toFixed(3)})` };
     },
 
     /* ONE ENTRY, not one per count: the shade is a state, not a scale. */

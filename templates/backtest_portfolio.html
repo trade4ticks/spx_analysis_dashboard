@@ -565,6 +565,14 @@
             </template>
           </table>
           <div class="ob-note" style="margin-top:8px">
+            <b>Dates:</b> most of these columns have no date basis at all —
+            they are sums and averages over the filtered trades. <b>Max DD</b>
+            and <b>sharpe</b> are ordered and dated by CLOSE. <b>avg ann P/L</b>,
+            <b>calmar</b> and <b>ann ret %</b> divide by a span of years also
+            measured close-to-close, and <b>peak deployed</b> counts positions
+            per SPX session over <b>[entry, exit)</b>, the one figure here that
+            reads entry dates.
+            <br>
             * Sharpe is the old app's: P/L summed by close date, mean/stdev
             times the square root of 252, with days that had no close not
             zero-filled. It ranks these rows against each other and is not
@@ -640,6 +648,14 @@
               </span>
             </div>
           </template>
+          <template x-if="bothKey()">
+            <div class="bp-liveleg">
+              <span class="bp-livesw" :style="'background:' + bothKey().bg"></span>
+              <span>both at once — the two shades compound, so this darker
+                tone is a stretch that is <b>neither fully staffed nor
+                filtered</b></span>
+            </div>
+          </template>
           <div class="ob-note" style="margin-top:6px">
             One point per close date; the drawdown keeps each day's WORST
             reading, so the trough here is the Max DD in the table rather
@@ -693,9 +709,37 @@
               </span>
             </div>
           </template>
+          <template x-if="unfilteredKey()">
+            <div class="bp-liveleg">
+              <span class="bp-livesw" :style="'background:' + unfilteredKey().bg"></span>
+              <span>
+                <b>not filtered</b> —
+                <span x-text="unfilteredKey().label"></span>
+                has no data before
+                <span x-text="unfilteredKey().from"></span>, so trades entered
+                before that are drawn unfiltered here too.
+              </span>
+            </div>
+          </template>
+          <template x-if="bothKey()">
+            <div class="bp-liveleg">
+              <span class="bp-livesw" :style="'background:' + bothKey().bg"></span>
+              <span>both at once — the two shades compound, so this darker
+                tone is a stretch that is <b>neither fully staffed nor
+                filtered</b></span>
+            </div>
+          </template>
           <div class="ob-note" style="margin-top:6px">
             Each strategy's concurrent positions times its own capital, summed
-            per SPX session. <b>Half-open</b>: a position is deployed on the
+            per SPX session.
+            <template x-if="unfilteredKey()">
+              <span><b>This chart draws the whole range; the table does
+                not.</b> Trades a filter could not judge are deployed here as
+                well, so while anything is shaded the visible peak can run
+                ABOVE the table's <b>peak deployed</b> — and <b>ann ret %</b>
+                divides by the table's figure, not this one.</span>
+            </template>
+            <b>Half-open</b>: a position is deployed on the
             sessions it is held through and not on the one it closes on, so
             this is capital still at risk at the close. The peak is what
             <b>ann ret %</b> divides by, and it is lower than the sum of the

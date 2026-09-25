@@ -241,10 +241,20 @@ function obExtraStats(cols, idx, stats, capital, peak) {
   const out = { years: null, avg_annual_pnl: null, calmar: null, profit_factor: null,
                 avg_annual_return_pct: null, avg_pnl_pct: null };
   if (!idx.length) return out;
+  // YEARS IS CLOSE-TO-CLOSE (changed 2026-09-25), matching Max DD, Sharpe
+  // and the axis the equity curve is drawn on -- and matching the old Render
+  // app, which measured it that way too; open-to-close was never a decision.
+  //
+  // Measuring from the first ENTRY to the last EXIT stretched the window by
+  // the first position's holding period, which on positions held days to
+  // months inflated `years`, understated avg annual P/L, and carried that
+  // error into Calmar and ann ret %. Mixing an open-dated bound with a
+  // close-dated one is the same fault that put the strategy bands months
+  // away from the lines they annotate.
   let lo = null, hi = null, gw = 0, gl = 0;
   for (const i of idx) {
-    const o = cols.date_opened[i], c = cols.date_closed[i], p = cols.pnl[i];
-    if (o && (lo === null || o < lo)) lo = o;
+    const c = cols.date_closed[i], p = cols.pnl[i];
+    if (c && (lo === null || c < lo)) lo = c;
     if (c && (hi === null || c > hi)) hi = c;
     if (p > 0) gw += p; else if (p < 0) gl += p;
   }
