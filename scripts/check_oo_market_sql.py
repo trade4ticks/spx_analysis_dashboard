@@ -801,12 +801,20 @@ async def check_end_to_end(pool) -> None:
     # The Deployment axis: the rollup's own SPX sessions inside the log's span,
     # read through the real SQL -- the VIX-only 07-11 and artifact holiday 07-07
     # must not be days.
-    daily, _ = await market.get_daily(pool)
-    spx_days = sorted(d.isoformat() for d in daily.loc[daily["spx_session"].astype(bool), "trade_date"])
-    span = [d for d in spx_days if min(c["date_opened"]) <= d <= max(c["date_closed"])]
-    check(rep["spx_sessions"] == span and "2023-07-11" not in rep["spx_sessions"]
-          and "2023-07-07" not in rep["spx_sessions"] and not rep["diagnostic_errors"],
-          f"the payload's spx_sessions are the rollup's SPX sessions in the log's span ({rep['spx_sessions']})")
+    # THE DEPLOYMENT AXIS IS A MARKET FACT, not a fact about our table. It
+    # comes from the calendar, so it covers the log's span whatever
+    # index_ohlc holds -- including 07-07 and 07-11, the two sessions this
+    # fixture deliberately under-fills, because a position was held over
+    # them either way.
+    from app.oo_backtest import market_calendar as mc
+    want_days = mc.sessions(min(c["date_opened"]), max(c["date_closed"]))
+    check(rep["spx_sessions"] == want_days and not rep["diagnostic_errors"],
+          f"the payload's spx_sessions are the EXCHANGE sessions in the log's span "
+          f"({len(rep['spx_sessions'])} days vs {len(want_days)})")
+    check("2023-07-11" in rep["spx_sessions"] and "2023-07-07" in rep["spx_sessions"],
+          "the two sessions with no SPX data are still days on the axis")
+    check("2023-07-04" not in rep["spx_sessions"],
+          "but the holiday is not, however many artifact bars it carries")
 
 
 # ── surface metrics ─────────────────────────────────────────────────────────

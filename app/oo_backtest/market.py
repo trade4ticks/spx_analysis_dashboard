@@ -546,20 +546,29 @@ def coverage(daily: pd.DataFrame) -> dict:
     return out
 
 
-def session_days(daily: pd.DataFrame, df: pd.DataFrame, series: str = "spx") -> list[str]:
-    """ISO dates `series` had a session on, from the log's first entry to its
-    last exit: the x axis of the Deployment chart. Every session in the span,
-    not only days with an entry or exit, so a stretch with nothing open shows
-    as a run of zeros. SPX sessions, per the page's spec -- a day like
-    2026-04-08 (VIX session, no SPX bars) is not in the list."""
-    if daily.empty or df.empty:
+def session_days(df: pd.DataFrame) -> list[str]:
+    """ISO EXCHANGE SESSIONS from the log's first entry to its last exit: the
+    x axis of the Deployment chart.
+
+    FROM THE CALENDAR, NOT FROM index_ohlc. A position is held over every day
+    the market was open, whether or not our table has bars for that day --
+    those are the two different questions this module now keeps apart. Taking
+    the axis from the rollup meant the chart could not start before
+    index_ohlc does (2017-01-03), so a strategy trading since 2013 showed
+    four years of nothing while its equity curve ran the whole span; and a
+    session with SPX missing, like 2026-04-08, silently was not a day.
+
+    Every session in the span, not only days with an entry or exit, so a
+    stretch with nothing open shows as a run of zeros.
+    """
+    if df.empty:
         return []
     lo = pd.to_datetime(df["date_opened"]).min()
-    hi = pd.to_datetime(df["date_closed"] if "date_closed" in df.columns else df["date_opened"]).max()
+    hi = pd.to_datetime(df["date_closed"] if "date_closed" in df.columns
+                        else df["date_opened"]).max()
     if pd.isna(lo) or pd.isna(hi):
         return []
-    days = pd.to_datetime(daily.loc[daily[f"{series}_session"].astype(bool), "trade_date"])
-    return [d.date().isoformat() for d in days[(days >= lo.normalize()) & (days <= hi.normalize())]]
+    return cal.sessions(lo.date(), hi.date())
 
 
 STALE_AFTER_DAYS = 5
@@ -785,7 +794,7 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         log.exception("oo-backtest null reasons failed")
         reasons, diag_errors["null_reasons"] = None, f"{type(exc).__name__}: {exc}"
     try:
-        spx_sessions = session_days(daily, out)
+        spx_sessions = session_days(out)
     except Exception as exc:  # noqa: BLE001
         log.exception("oo-backtest session days failed")
         spx_sessions, diag_errors["spx_sessions"] = [], f"{type(exc).__name__}: {exc}"

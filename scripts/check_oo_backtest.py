@@ -1624,13 +1624,22 @@ def check_deployment_and_extra_stats() -> None:
     check(pl["days"][-1] == "2026-12-31" and pl["counts"][pl["days"].index("2026-03-23")] == 2,
           "planted: had they been kept with an open-ended exit they WOULD run to the end — the check can tell")
 
-    # session_days: SPX sessions only, clipped to first entry .. last exit.
-    daily = pd.DataFrame({"trade_date": pd.to_datetime(["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10"]).date,
-                          "spx_session": [True, True, False, True, True]})
+    # session_days: EXCHANGE sessions, clipped to first entry .. last exit.
     tdf = pd.DataFrame({"date_opened": pd.to_datetime(["2026-04-07"]), "date_closed": pd.to_datetime(["2026-04-09"])})
-    sd = session_days(daily, tdf)
-    check(sd == ["2026-04-07", "2026-04-09"],
-          f"session_days: SPX sessions within the log's span; 2026-04-08 (no SPX bars) is not one ({sd})")
+    sd = session_days(tdf)
+    check(sd == ["2026-04-07", "2026-04-08", "2026-04-09"],
+          f"session_days: every exchange session in the log's span -- 2026-04-08 IS "
+          f"one, whatever our table holds for it ({sd})")
+    # AND IT REACHES BEFORE THE MARKET DATA. This is the fix: the axis is a
+    # market fact, so it does not stop where index_ohlc happens to start.
+    old_tdf = pd.DataFrame({"date_opened": pd.to_datetime(["2013-01-02"]),
+                            "date_closed": pd.to_datetime(["2013-03-01"])})
+    old_sd = session_days(old_tdf)
+    check(old_sd and old_sd[0] == "2013-01-02" and len(old_sd) > 35,
+          f"a 2013 position gets {len(old_sd)} sessions, where the rollup-derived "
+          f"axis gave none at all")
+    check(all(d < "2017-01-03" for d in old_sd),
+          "every one of them predates index_ohlc")
 
 
 COMPONENT_DRIVER = r"""
