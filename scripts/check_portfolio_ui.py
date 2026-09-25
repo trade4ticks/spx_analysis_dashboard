@@ -77,7 +77,7 @@ def build_page() -> str:
         lambda m: "<script>\n" + (ROOT / "static/js" / m.group(1)).read_text(encoding="utf-8") + "\n</script>",
         html)
 
-    sessions = [d.date().isoformat() for d in pd.bdate_range("2023-01-02", "2026-12-31")]
+    sessions = [d.date().isoformat() for d in pd.bdate_range("2017-01-03", "2026-12-31")]
 
     def payload(sid, name, color, cap, n, start, step, hold, pnls, vix_from):
         d0 = dt.date.fromisoformat(start)
@@ -104,9 +104,10 @@ def build_page() -> str:
         }
 
     a = payload(1, "monthly", "#3498db", 25000, 40, "2023-01-03", 30, 30, [100.0], 0)
+    old = payload(3, "since2013", "#4ec9a0", 20000, 84, "2013-01-02", 60, 20, [250.0, -90.0], 30)
     b = payload(2, "weekly", "#e84393", 10000, 40, "2023-01-06", 7, 7, [300.0, -100.0], 10)
     reg = [m for m in registry_with_coverage(None) if m.get("filter")]
-    return html.replace("</head>", (STUB % (json.dumps([a, b]), json.dumps(reg))) + "</head>", 1)
+    return html.replace("</head>", (STUB % (json.dumps([a, b, old]), json.dumps(reg))) + "</head>", 1)
 
 
 STUB = """
@@ -124,7 +125,8 @@ const LOADED = %s;
 window.fetch = async (u) => ({ok: true, json: async () => {
   if (String(u).includes('/strategies')) return {strategies: [
     {id:1,name:'monthly',trade_count:40,capital_per_position:25000},
-    {id:2,name:'weekly',trade_count:40,capital_per_position:10000}],
+    {id:2,name:'weekly',trade_count:40,capital_per_position:10000},
+    {id:3,name:'since2013',trade_count:84,capital_per_position:20000}],
     colors:['#3498db','#e84393'], max:12};
   if (String(u).includes('/registry')) return {metrics: %s};
   if (String(u).includes('/load')) return {strategies: LOADED,
@@ -216,12 +218,13 @@ window.addEventListener('load', () => setTimeout(async () => {
   };
   await choose(1);
   await choose(2);
-  ok('two strategies added', c.chosen.length, 2);
+  await choose(3);
+  ok('three strategies added', c.chosen.length, 3);
 
   // THE BUTTON WORKS BEFORE A LOAD. It was disabled here, which is the
   // regression this file exists for.
   const early = filterBtns();
-  ok('a filter button per strategy', early.length, 2);
+  ok('a filter button per strategy', early.length, 3);
   ok('not disabled before loading', early[0].disabled, false);
   early[0].click();
   await wait(120);
@@ -276,7 +279,8 @@ window.addEventListener('load', () => setTimeout(async () => {
   const dd = Chart.getChart('bp-dd-chart');
   const cap = Chart.getChart('bp-cap-chart');
   ok('the equity chart exists', !!eq, true);
-  ok('a line per strategy plus the portfolio', eq && eq.data.datasets.length, 3);
+  ok('a line per strategy plus the portfolio', eq && eq.data.datasets.length,
+     c.chosen.length + 1);
   ok('the last dataset is the portfolio',
      eq && eq.data.datasets[eq.data.datasets.length - 1].label, 'TOTAL');
   // The curve ENDS at the portfolio's total P/L -- the table's own figure.
@@ -293,17 +297,54 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the trough equals the table Max DD', bpFmtMoney(trough), tableDD);
   ok('the deepest point is marked', dd.data.datasets[1].data.length, 1);
 
+  // ── TRADES THAT PREDATE THE MARKET DATA ───────────────────────────
+  // index_ohlc starts 2017-01-03, so this strategy's first four years have
+  // no VIX, no gap and no SPX session. They are still trades: they must
+  // survive the load, be counted in the summary, and be drawn. Every other
+  // fixture in this file spans a narrow recent window, which is why nothing
+  // here could have caught a truncation at the market data's start.
+  const cOld = Alpine.$data(document.querySelector('[x-data]'));
+  const pOld = cOld.loaded.find(x => x.saved.id === 3);
+  ok('the pre-2017 strategy loaded', !!pOld, true);
+  ok('it really does predate the market data', pOld.date_min < '2017-01-03', true);
+  ok('its trades survived the load', pOld.n, 84);
+  ok('none of its trades were dropped server-side',
+     pOld.columns.date_opened.filter(d => d < '2017-01-03').length > 0, true);
+  const rowOld = cOld.rows.find(r => r.id === 3);
+  ok('it has a summary row', !!rowOld, true);
+  ok('the summary counts every one of its trades', rowOld.n, 84);
+  ok('the summary drops none of them', rowOld.dropped, 0);
+  // The portfolio total counts them too -- a strategy can be in the table
+  // and still be missing from the pooled figures underneath it.
+  const totOld = cOld.rows.find(r => r.total);
+  ok('the TOTAL row includes them',
+     totOld.nAll, cOld.rows.filter(r => !r.total).reduce((a, r) => a + r.nAll, 0));
+  // AND ON THE CHARTS. Its own curve, the portfolio curve, and the axis.
+  const itsCurve = BP_DATA.curves.eq.find(sv => sv.name === 'since2013');
+  ok('its equity curve reaches back past the market data',
+     itsCurve && itsCurve.points[0].date < '2017-01-03', true);
+  const totCurve = BP_DATA.curves.eq.find(sv => sv.total);
+  ok('so does the portfolio curve',
+     totCurve && totCurve.points[0].date < '2017-01-03', true);
+  const eqOld = Chart.getChart('bp-eq-chart');
+  ok('and the axis is not truncated to the market data',
+     obIsoDay(eqOld.scales.x.min) < '2017-01-03', true);
+  // The drawdown chart shares that axis, so it must reach back as well.
+  const ddOld = Chart.getChart('bp-dd-chart');
+  ok('the drawdown axis reaches back too',
+     obIsoDay(ddOld.scales.x.min) < '2017-01-03', true);
+
   // ── THE LIVE-STRATEGY SHADING ─────────────────────────────────────
   // On union dates the curve steepens as each strategy starts and flattens
   // as each finishes. The bands say so. The fixture is two strategies with
   // DIFFERENT spans, so there is a real edge to find.
   const cS = Alpine.$data(document.querySelector('[x-data]'));
   const shade = cS.liveShade();
-  ok('there are two strategies to be fewer than', shade.total, 2);
+  ok('there are three strategies to be fewer than', shade.total, 3);
   ok('the bands cover a rise and a fall', shade.bands.length >= 3, true);
   const counts = shade.bands.map(b => b.count);
-  ok('the count peaks at every strategy', Math.max(...counts), 2);
-  ok('and is lower at the ends', counts[0] < 2 && counts[counts.length - 1] < 2, true);
+  ok('the count peaks at every strategy', Math.max(...counts), 3);
+  ok('and is lower at the ends', counts[0] < 3 && counts[counts.length - 1] < 3, true);
   // ONE BAND PER DISTINCT COUNT: adjacent stretches with the same count are
   // merged, so a shared start date is one edge and not several.
   let merged = true;
@@ -319,8 +360,8 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the last band ends after the latest close',
      shade.bands[shade.bands.length - 1].to, lastEnd);
   // A FULL PORTFOLIO IS NOT SHADED -- that stretch needs no caveat.
-  ok('full coverage draws nothing', bpShadeAlpha(2, 2), 0);
-  ok('a thinner stretch is shaded', bpShadeAlpha(1, 2) > 0, true);
+  ok('full coverage draws nothing', bpShadeAlpha(3, 3), 0);
+  ok('a thinner stretch is shaded', bpShadeAlpha(1, 3) > 0, true);
   ok('the thinner the stretch the heavier the veil',
      bpShadeAlpha(1, 3) > bpShadeAlpha(2, 3), true);
   // ONE STRATEGY HAS NOTHING TO BE FEWER THAN.
@@ -342,7 +383,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   const legend = cS.liveLegend();
   ok('the key has an entry per distinct count',
      legend.length, new Set(counts).size);
-  ok('the key names the total', legend[0].label.endsWith(' of 2'), true);
+  ok('the key names the total', legend[0].label.endsWith(' of 3'), true);
   const legendEl = document.querySelector('.bp-liveleg');
   ok('the key is on the page', !!legendEl, true);
   ok('it says what is being counted',
@@ -405,7 +446,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('its diagonal is 1', cc.corr.matrix[0][0], 1);
   ok('it is symmetric',
      Math.abs(cc.corr.matrix[0][1] - cc.corr.matrix[1][0]) < 1e-12, true);
-  ok('one pair for two strategies', cc.corr.pairs.length, 1);
+  ok('one pair per combination', cc.corr.pairs.length, 3);
   ok('the correlation is a real number',
      cc.corr.pairs[0].r !== null && Math.abs(cc.corr.pairs[0].r) <= 1, true);
   ok('it is weekly, not daily', cc.corr.weeks > 0 && cc.corr.weeks < 250, true);
@@ -415,8 +456,11 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the matrix equals obPearson on the same series',
      Math.abs(cc.corr.matrix[0][1] - obPearson(wk.cols[0], wk.cols[1])) < 1e-12, true);
   // Weeks where nothing closed anywhere are dropped.
+  // ACROSS EVERY STRATEGY, not just the first two: a week is dropped only
+  // when nothing closed ANYWHERE, so testing a pair would pass on a week
+  // that a third strategy kept alive.
   ok('no all-zero weeks survive',
-     wk.cols[0].some((v, i) => v === 0 && wk.cols[1][i] === 0), false);
+     wk.cols[0].some((v, i) => wk.cols.every(col => col[i] === 0)), false);
 
   ok('the scatter drew', !!Chart.getChart('bp-sc-chart'), true);
   ok('a point per week',
@@ -438,7 +482,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   // ── P6: DISTRIBUTION, OVERLAP, ROLLING RISK ───────────────────────
   const dist = Chart.getChart('bp-dist-chart');
   ok('the distribution drew', !!dist, true);
-  ok('a series per strategy', dist && dist.data.datasets.length, 2);
+  ok('a series per strategy', dist && dist.data.datasets.length, cc.chosen.length);
   ok('the bars overlay rather than interleave',
      dist && dist.data.datasets[0].grouped, false);
   // Every trade lands in exactly one bin, so the counts sum to the trades.
@@ -448,9 +492,12 @@ window.addEventListener('load', () => setTimeout(async () => {
 
   const ov = Chart.getChart('bp-overlap-chart');
   ok('the overlap chart drew', !!ov, true);
-  ok('a line per strategy plus the total', ov && ov.data.datasets.length, 3);
+  ok('a line per strategy plus the total', ov && ov.data.datasets.length,
+     cc.chosen.length + 1);
+  // FOUND BY ITS DASH, not by its index: the total is last however many
+  // strategies there are, and an index here silently tested a strategy.
   ok('the total is dotted',
-     !!(ov && ov.data.datasets[2].borderDash), true);
+     !!(ov && ov.data.datasets[ov.data.datasets.length - 1].borderDash), true);
   // It counts the same way Capital deployed does: the portfolio total's
   // peak times capital is that chart's peak, so the two cannot disagree
   // about what a position is.
@@ -641,7 +688,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('choosing a profile sets the model', cc.profilePick, window.__profiles[0].id);
   side().find(b => b.textContent.trim() === 'Load').click();
   await wait(300);
-  ok('the profile loaded its strategies', cc.chosen.length, 2);
+  ok('the profile loaded its strategies', cc.chosen.length, 3);
   ok('with the quantity it was saved with', cc.chosen[0].qty, 4);
   ok('with its names, not ids', cc.chosen[0].name, 'monthly');
   ok('and the table came back', document.querySelectorAll('.bp-table tr.total').length, 1);
