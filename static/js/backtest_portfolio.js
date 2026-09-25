@@ -247,6 +247,92 @@ function bpSpecs(filters, registry, dateSpan) {
   return specs;
 }
 
+/* FILTERS THAT CANNOT SEE THE WHOLE HISTORY.
+ *
+ * A filter either judges a trade or is blind to it, and the two are not the
+ * same thing. Day of Week judges every trade ever: a Tuesday excluded by a
+ * Mon/Wed/Fri filter is genuinely gone. VIX can only judge from the day
+ * index_ohlc starts, and a surface z-score from the day that metric starts;
+ * before then there is nothing to judge by, and dropping those trades
+ * silently shortened the equity curve to wherever the metric began while the
+ * date-range card went on advertising the full span.
+ *
+ * `minDate` is the registry's own coverage date, filled at request time from
+ * the data — never a constant here. A metric without one is always
+ * evaluable.
+ */
+function bpLenientColumns(filters, registry) {
+  const out = new Set();
+  for (const m of registry) {
+    const f = filters && filters[m.key];
+    if (f && f.on && m.minDate) out.add(m.column);
+  }
+  return out;
+}
+
+/* The date from which every active blind-able filter can finally be
+ * evaluated: the LATEST coverage among them, not the earliest. With VIX from
+ * 2017 and a z-score from 2021 both on, nothing before 2021 has passed both,
+ * so nothing before 2021 is fully filtered. */
+function bpUnfilteredTo(chosen, registry) {
+  let to = null;
+  for (const c of chosen || []) {
+    for (const m of registry) {
+      const f = c.filters && c.filters[m.key];
+      if (!f || !f.on || !m.minDate) continue;
+      if (!to || m.minDate > to) to = m.minDate;
+    }
+  }
+  return to;
+}
+
+/* Drawn as a HATCH, not a wash: the live-strategy bands are already a grey
+ * wash and two washes on one chart would be read as one scale. Diagonal
+ * lines also carry "nothing is being asserted here", which is exactly what
+ * an unfiltered stretch means. */
+function bpHatch(ctx) {
+  const tile = document.createElement('canvas');
+  tile.width = 8; tile.height = 8;
+  const t = tile.getContext('2d');
+  t.strokeStyle = 'rgba(224,168,74,0.55)';
+  t.lineWidth = 1.5;
+  t.beginPath();
+  t.moveTo(0, 8); t.lineTo(8, 0);
+  t.moveTo(-2, 2); t.lineTo(2, -2);
+  t.moveTo(6, 10); t.lineTo(10, 6);
+  t.stroke();
+  return ctx.createPattern(tile, 'repeat');
+}
+
+const bpUnfilteredShade = {
+  id: 'bpUnfilteredShade',
+  beforeDatasetsDraw(chart, args, opts) {
+    const to = opts && opts.to;
+    if (to == null) return;
+    const area = chart.chartArea, x = chart.scales && chart.scales.x;
+    if (!area || !x) return;
+    const ctx = chart.ctx;
+    const lo = Math.max(area.left, Math.min(area.right, x.getPixelForValue(x.min)));
+    const hi = Math.max(area.left, Math.min(area.right, x.getPixelForValue(to)));
+    if (hi - lo < 0.5) return;
+    ctx.save();
+    if (!chart.$bpHatch) chart.$bpHatch = bpHatch(ctx);
+    ctx.fillStyle = 'rgba(224,168,74,0.07)';
+    ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
+    ctx.fillStyle = chart.$bpHatch;
+    ctx.fillRect(lo, area.top, hi - lo, area.bottom - area.top);
+    // The edge, so the boundary is a date and not an impression.
+    ctx.strokeStyle = 'rgba(224,168,74,0.75)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(hi, area.top);
+    ctx.lineTo(hi, area.bottom);
+    ctx.stroke();
+    ctx.restore();
+  },
+};
+
 /* What an active filter costs in trades that have no value for it.
  * Metrics have staggered coverage — a filter on one that starts late drops
  * every earlier trade silently — so the page states it, as the single-
@@ -899,6 +985,11 @@ document.addEventListener('alpine:init', () => {
       for (const m of this.registry) pooled.cols[m.column] = [];
       const pctParts = [];          // per-trade P/L %, each against its own capital
       let deployed = new Array(sessions.length).fill(0);
+      // THE CHARTS' OWN POOL. Same trades as `pooled` unless a filter is
+      // blind to part of the history, in which case the equity and drawdown
+      // charts keep drawing it and shade it instead of stopping short.
+      const pooledDraw = { pnl: [], date_closed: [] };
+      let unfilteredTo = null;      // the hatch's right edge, by close date
 
       for (const c of this.chosen) {
         const p = BP_DATA.payloads[c.id];
@@ -906,6 +997,27 @@ document.addEventListener('alpine:init', () => {
         const cols = this.scaledCols(c);
         const specs = bpSpecs(c.filters, this.registry, span);
         const idx = obApplyFilters(cols, p.n, specs);
+        // The charts' set: identical to the table's unless some active
+        // filter is blind before its coverage, in which case those trades
+        // are kept and the stretch is hatched rather than cut off.
+        const lenient = bpLenientColumns(c.filters, this.registry);
+        const idxDraw = lenient.size
+          ? obApplyFilters(cols, p.n, specs, lenient) : idx;
+        const kept = lenient.size ? new Set(idx) : null;
+        for (const i of idxDraw) {
+          pooledDraw.pnl.push(cols.pnl[i]);
+          pooledDraw.date_closed.push(p.columns.date_closed[i]);
+          // THE HATCH ENDS AT THE LAST TRADE IT IS EXPLAINING, by CLOSE
+          // date, because that is the axis these curves are drawn on.
+          // Ending it at the metric's coverage date instead would leave a
+          // trade entered before coverage but closed after it drawn
+          // unfiltered OUTSIDE the hatch -- mixing with nothing marking it,
+          // which is the one thing this is here to prevent.
+          if (kept && !kept.has(i)) {
+            const d = p.columns.date_closed[i];
+            if (d && (!unfilteredTo || d > unfilteredTo)) unfilteredTo = d;
+          }
+        }
         const stats = obStats(cols, idx);
         const conc = obConcurrency(p.columns, idx, sessions);
         const capital = (Number(c.capital) || 0) * (Number(c.qty) || 1);
@@ -928,7 +1040,7 @@ document.addEventListener('alpine:init', () => {
 
         rows.push({
           key: 'k' + c.id, id: c.id, name: c.name, color: p.color,
-          total: false, idx,
+          total: false, idx, idxDraw,
           n: idx.length, nAll: p.n,
           dropped: p.n - idx.length,
           cost: bpCoverageCost(p.columns, p.n, c.filters, this.registry),
@@ -983,15 +1095,23 @@ document.addEventListener('alpine:init', () => {
         const cols = c && this.scaledCols(c);
         if (!cols) continue;
         curves.eq.push({ name: r.name, color: r.color,
-                         points: obDailyCurve(obEquity(cols, r.idx)) });
+                         points: obDailyCurve(obEquity(cols, r.idxDraw)) });
       }
-      if (pooled.pnl.length) {
-        const peq = obEquity(pooled, [...pooled.pnl.keys()]);
+      if (pooledDraw.pnl.length) {
+        const peq = obEquity(pooledDraw, [...pooledDraw.pnl.keys()]);
         const daily = obDailyCurve(peq);
         curves.eq.push({ name: 'TOTAL', color: BP_TOTAL, points: daily, total: true });
         curves.dd = daily;
         curves.maxDD = peq.maxDD;
       }
+      // Where the hatch stops: the latest coverage among every active
+      // blind-able filter on any strategy. Null when nothing active is
+      // blind, and then these charts are exactly what they always were.
+      curves.unfilteredTo = unfilteredTo;
+      curves.unfilteredN = pooledDraw.pnl.length - pooled.pnl.length;
+      // Why, as opposed to how far: the latest coverage among the active
+      // blind filters. Stated in the key; the edge itself is the data.
+      curves.coverageFrom = bpUnfilteredTo(this.chosen, this.registry);
       curves.cap = deployed;
       // P6 reads these: the portfolio's daily P/L (by close date, the old
       // app's series) and each strategy's own concurrency, which the overlap
@@ -1147,6 +1267,14 @@ document.addEventListener('alpine:init', () => {
         o.plugins.bpLiveShade = { bands: shade.bands, total: shade.total };
         return o;
       };
+      // The unfiltered hatch goes on the two charts that now draw the whole
+      // span -- equity and drawdown. Capital deployed keeps the table's
+      // trades, because it answers what would have been at risk UNDER the
+      // filter, which is a different question.
+      const unf = (o) => {
+        o.plugins.bpUnfilteredShade = { to: c.unfilteredTo ? obDay(c.unfilteredTo) : null };
+        return o;
+      };
 
       // EQUITY: a line per strategy plus the portfolio, sharing an axis.
       const total = c.eq.find(s => s.total);
@@ -1162,8 +1290,8 @@ document.addEventListener('alpine:init', () => {
         order: sv.total ? 0 : 1,
       })) };
       this.draw('eq', 'bp-eq-chart', eqData,
-                shaded(base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr)),
-                [bpLiveShade]);
+                unf(shaded(base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr))),
+                [bpLiveShade, bpUnfilteredShade]);
 
       // DRAWDOWN: the portfolio's only, with its deepest point marked.
       const dd = c.dd || [];
@@ -1178,9 +1306,9 @@ document.addEventListener('alpine:init', () => {
           pointBorderWidth: 2, showLine: false },
       ] };
       this.draw('dd', 'bp-dd-chart', ddData,
-                shaded(base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
-                            + bpFmtMoney(it.parsed.y), xr)),
-                [bpLiveShade]);
+                unf(shaded(base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
+                            + bpFmtMoney(it.parsed.y), xr))),
+                [bpLiveShade, bpUnfilteredShade]);
 
       // CAPITAL DEPLOYED: a step per session, since it changes at a close.
       const cap = [];
@@ -1419,6 +1547,23 @@ document.addEventListener('alpine:init', () => {
     liveShade() {
       void this.tick;
       return bpLiveBands(this.loaded);
+    },
+
+    /* The hatch's own key, separate from the live-strategy one so the two
+     * are never read as one scale. Empty when no active filter is blind. */
+    unfilteredKey() {
+      void this.tick;
+      const c = BP_DATA.curves || {};
+      if (!c.unfilteredTo) return null;
+      const names = [];
+      for (const ch of this.chosen) {
+        for (const m of this.registry) {
+          const f = ch.filters && ch.filters[m.key];
+          if (f && f.on && m.minDate && !names.includes(m.label)) names.push(m.label);
+        }
+      }
+      return { to: c.unfilteredTo, from: c.coverageFrom,
+               n: c.unfilteredN || 0, metrics: names.join(', ') };
     },
 
     liveLegend() {

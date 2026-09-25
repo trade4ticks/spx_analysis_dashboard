@@ -215,6 +215,16 @@
     .bp-livekey { display:flex; align-items:center; gap:4px; }
     .bp-livesw { width:18px; height:10px; border-radius:2px;
                  border:1px solid rgba(255,255,255,0.16); }
+    /* The hatch key, matching the canvas pattern: diagonal amber lines, so
+       it cannot be confused with the grey wash above it. */
+    .bp-unfkey { color:var(--muted); align-items:flex-start; }
+    .bp-unfkey b { color:#e0a84a; font-weight:600; }
+    .bp-hatchsw { width:18px; height:12px; border-radius:2px; flex:none;
+                  margin-top:1px;
+                  border:1px solid rgba(224,168,74,0.55);
+                  background:repeating-linear-gradient(45deg,
+                    rgba(224,168,74,0.55) 0 1.5px,
+                    rgba(224,168,74,0.07) 1.5px 5.5px); }
     .bp-sel { background:var(--raised); border:1px solid var(--border);
               color:var(--text); font-size:11px; padding:3px 6px;
               border-radius:4px; color-scheme:dark; }
@@ -600,6 +610,26 @@
               </span>
             </template>
           </div>
+          {# THE HATCH. Its own key, kept apart from the live-strategy one:
+             two shadings on one chart must not read as one scale. #}
+          <template x-if="unfilteredKey()">
+            <div class="bp-liveleg bp-unfkey">
+              <span class="bp-hatchsw"></span>
+              <span>
+                <b>hatched — not filtered</b>:
+                <span x-text="unfilteredKey().metrics"></span>
+                <span x-text="unfilteredKey().metrics.includes(',') ? ' have ' : ' has '"></span>
+                no data before
+                <span x-text="unfilteredKey().from"></span>, so the
+                <span x-text="unfilteredKey().n.toLocaleString()"></span>
+                trades in that stretch could not be judged by
+                <span x-text="unfilteredKey().metrics.includes(',') ? 'them' : 'it'"></span>
+                and are drawn <b>unfiltered</b>. The hatch ends at
+                <span x-text="unfilteredKey().to"></span>, the last of them
+                to close.
+              </span>
+            </div>
+          </template>
           {# WHAT THE SHADING MEANS. Both charts above carry it, so the key
              sits under the pair rather than being repeated twice. #}
           <template x-if="liveLegend().length">
@@ -619,6 +649,18 @@
             than a shallower day-end version of it. Only the portfolio's
             drawdown is drawn — one curve per strategy on the same axes is a
             picture of nothing in particular.
+            <template x-if="unfilteredKey()">
+              <span>
+                <b>These two charts draw the whole range; the table does
+                not.</b> A filter that cannot see a stretch of history no
+                longer shortens the curve — the trades are drawn and the
+                stretch is hatched. The summary above still counts only
+                trades a filter could judge and keep, so while anything is
+                hatched the end of this curve is above the table's Total P/L
+                and the trough may be deeper than its Max DD. That is the
+                same difference read two ways, not a disagreement.
+              </span>
+            </template>
             <template x-if="liveLegend().length">
               <span>
                 The background is shaded where fewer strategies were live —

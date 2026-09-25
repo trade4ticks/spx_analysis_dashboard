@@ -57,19 +57,28 @@ const obNull = v => v === null || v === undefined || (typeof v === 'number' && N
  *   {kind:'date',  column, from, to}   ISO strings, inclusive
  *   {kind:'range', column, lo, hi}     inclusive, as filter_dataframe had it
  *   {kind:'set',   column, allowed}    a Set of permitted values */
-function obApplyFilters(cols, n, specs) {
+function obApplyFilters(cols, n, specs, lenient) {
   const idx = [];
   outer:
   for (let i = 0; i < n; i++) {
     for (const f of specs) {
       const col = cols[f.column];
       const v = col ? col[i] : null;
+      const isNull = obNull(v);
+      // A FILTER THAT CANNOT BE EVALUATED MAY BE TOLD TO PASS. `lenient` is a
+      // set of columns whose nulls mean "no data to judge this trade by",
+      // not "judged and rejected" -- a metric before its coverage starts.
+      // Dropping is still the default and the summary table always uses it;
+      // this exists so a chart can draw the whole history and SHADE the
+      // stretch a filter was blind to, rather than silently shortening
+      // itself to wherever the metric happens to begin.
+      if (isNull && lenient && lenient.has(f.column)) continue;
       if (f.kind === 'range') {
-        if (obNull(v) || v < f.lo || v > f.hi) continue outer;
+        if (isNull || v < f.lo || v > f.hi) continue outer;
       } else if (f.kind === 'set') {
         if (!f.allowed.has(v)) continue outer;
       } else if (f.kind === 'date') {
-        if (obNull(v) || (f.from && v < f.from) || (f.to && v > f.to)) continue outer;
+        if (isNull || (f.from && v < f.from) || (f.to && v > f.to)) continue outer;
       }
     }
     idx.push(i);

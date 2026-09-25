@@ -362,6 +362,48 @@ assertion is **overlap between neighbours, measured at three widths**
 (`check_portfolio_ui`), and it is the one that fails when the min-width comes
 back.
 
+**A filter that cannot see the whole history no longer shortens the charts**
+(2026-09-25). A filter either JUDGES a trade or is BLIND to it, and the two
+are not the same thing. Day of Week judges every trade ever, so a Tuesday
+excluded by a Monday filter is genuinely gone. VIX can only judge from
+`index_ohlc`'s start and a surface z-score from its own; before that there is
+nothing to judge by. `obApplyFilters` drops nulls, so a VIX filter silently
+cut the equity curve back to 2017 while the date-range card went on
+advertising 2013 — which is what made a filtered portfolio look like a
+truncated one. Now **equity and drawdown draw the whole span** and HATCH the
+stretch the filter was blind to.
+
+- `obApplyFilters(cols, n, specs, lenient)` takes an optional set of columns
+  whose nulls mean "no data to judge by" and therefore PASS. Omit it and the
+  behaviour is exactly what it always was; the summary table always omits it.
+- Which columns: active filters with a registry `minDate`. A metric with
+  gaps but no coverage start (a missing `premium`) is NOT blind — those
+  trades are dropped from the charts too, and a gate plants that.
+- The hatch ends at the **last unfiltered trade to CLOSE**, not at the
+  coverage date, because the curves are drawn on a close-date axis: a trade
+  entered before coverage can close after it, and ending at the coverage date
+  would leave it drawn unfiltered OUTSIDE the hatch. Gated as an invariant —
+  every trade the chart adds back closes inside the hatch.
+- With several blind filters active the reason date is the **latest**
+  coverage among them, not the earliest: nothing before it has passed all of
+  them.
+- **The charts and the summary now disagree on purpose.** While anything is
+  hatched the curve ends above the table's Total P/L and the trough may be
+  deeper than its Max DD. This is the documented exception to "built in the
+  same pass from the same filtered indices" below; the card says so, and the
+  gate asserts they match only when nothing is hatched. The summary keeps the
+  strict trades, per the brief — there is no toggle.
+- Capital deployed is NOT hatched and keeps the table's trades: it answers
+  what would have been at risk UNDER the filter, a different question.
+- Two shadings can be visible at once, so they are different languages: the
+  live-strategy bands are a grey WASH, this is an amber HATCH, and each has
+  its own key.
+
+**The date-range dropdown still knows nothing about metric coverage** — it is
+`bpSpan()` over each strategy's `date_min`/`date_max` and nothing else. After
+this change the tagline matches what is drawn: union draws the union, and
+intersection genuinely clips because a date is a thing every trade has.
+
 **P6's decisions.** The **distribution** is the old app's overlaid
 histograms — one series per strategy at 0.6 opacity, **$100 bins** as it had
 them, on the filtered qty-scaled trades; one bin set is computed across every

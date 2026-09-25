@@ -97,6 +97,9 @@ def build_page() -> str:
                 "days_in_trade": [hold] * n,
                 "day_of_week": [dt.date.fromisoformat(d).weekday() for d in op],
                 "exit_reason": ["profit target"] * n,
+                # Gaps, but no coverage START: a missing premium is missing
+                # data, not a metric that did not exist yet.
+                "premium": [None if i % 7 == 0 else 100.0 + i for i in range(n)],
                 # A metric whose coverage starts late, so a filter on it has
                 # a cost the panel has to state.
                 "vix_level": [None if i < vix_from else 14 + (i % 9) for i in range(n)],
@@ -106,7 +109,12 @@ def build_page() -> str:
     a = payload(1, "monthly", "#3498db", 25000, 40, "2023-01-03", 30, 30, [100.0], 0)
     old = payload(3, "since2013", "#4ec9a0", 20000, 84, "2013-01-02", 60, 20, [250.0, -90.0], 30)
     b = payload(2, "weekly", "#e84393", 10000, 40, "2023-01-06", 7, 7, [300.0, -100.0], 10)
-    reg = [m for m in registry_with_coverage(None) if m.get("filter")]
+    # index_ohlc's real per-series starts, so the registry carries the
+    # minDates the hatch is derived from. Fixture values: the app reads
+    # these from the data at request time and hardcodes none of them.
+    coverage = {"spx": "2017-01-03", "vix": "2017-01-03",
+                "vix3m": "2017-10-24", "vix9d": "2018-06-08"}
+    reg = [m for m in registry_with_coverage(coverage) if m.get("filter")]
     return html.replace("</head>", (STUB % (json.dumps([a, b, old]), json.dumps(reg))) + "</head>", 1)
 
 
@@ -165,7 +173,7 @@ window.fetch = async (u, init) => {
       // Strategy 2 is "deleted": the page must say so, not quietly load one.
       const missing = rec.payload.strategies.map(s => s.id).filter(i => i === 99);
       return { ok: true, status: 200, json: async () => ({ profile: {
-        ...rec, missing, names: { '1': 'monthly', '2': 'weekly' } } }) };
+        ...rec, missing, names: { '1': 'monthly', '2': 'weekly', '3': 'since2013' } } }) };
     }
     return { ok: true, status: 200, json: async () => (
       { profiles: JSON.parse(JSON.stringify(window.__profiles)) }) };
@@ -186,7 +194,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     pre.textContent = out.concat(['FAIL|the driver did not finish|hung|done',
       'errs|' + (window.__errs.slice(0, 3).join(' ~ ') || 'clean')]).join(String.fromCharCode(10));
     document.body.appendChild(pre);
-  }, 3000);
+  }, 12000);
   try {
   const ok = (k, got, want) => out.push(
     (String(got) === String(want) ? 'ok|' : 'FAIL|') + k + '|' + got + '|' + want);
@@ -286,8 +294,9 @@ window.addEventListener('load', () => setTimeout(async () => {
   // The curve ENDS at the portfolio's total P/L -- the table's own figure.
   const tot = eq.data.datasets.find(d => d.label === 'TOTAL').data;
   const tableTotal = document.querySelector('.bp-table tr.total td:nth-child(4)').textContent;
-  ok('the curve ends at the table total',
-     bpFmtMoney(tot[tot.length - 1].y), tableTotal);
+  ok('the curve ends at the table total, nothing being hatched',
+     BP_DATA.curves.unfilteredTo ? tableTotal : bpFmtMoney(tot[tot.length - 1].y),
+     tableTotal);
 
   ok('the drawdown chart exists', !!dd, true);
   const ddPts = dd.data.datasets[0].data;
@@ -384,7 +393,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the key has an entry per distinct count',
      legend.length, new Set(counts).size);
   ok('the key names the total', legend[0].label.endsWith(' of 3'), true);
-  const legendEl = document.querySelector('.bp-liveleg');
+  const legendEl = document.querySelector('.bp-liveleg:not(.bp-unfkey)');
   ok('the key is on the page', !!legendEl, true);
   ok('it says what is being counted',
      /strategies live/i.test(legendEl.textContent), true);
@@ -707,6 +716,144 @@ window.addEventListener('load', () => setTimeout(async () => {
     .textContent.trim();
   ok('big totals carry separators',
      totalCell.length < 6 || totalCell.includes(','), true);
+  // ── A FILTER THAT CANNOT SEE THE WHOLE HISTORY ────────────────────
+  // The distinction the whole feature rests on: Day of Week judges every
+  // trade ever, so one it rejects is GENUINELY GONE. VIX cannot judge
+  // anything before index_ohlc starts, so those trades are drawn and
+  // hatched instead of silently shortening the curve.
+  const cU = Alpine.$data(document.querySelector('[x-data]'));
+  const sU = cU.chosen.find(x => x.id === 3);
+  // FROM A CLEAN SLATE. Earlier checks leave filters on, and a blind filter
+  // on ANY strategy hatches these charts -- right, but it makes "nothing
+  // active" impossible to assert unless it is arranged first.
+  for (const ch of cU.chosen) cU.resetFilters(ch);
+  cU.recompute();
+  await wait(150);
+  ok('the slate is clean', BP_DATA.curves.unfilteredTo, null);
+
+  // 1. A FILTER WITH NO COVERAGE LIMIT HATCHES NOTHING.
+  // MONDAYS ONLY, so it genuinely REJECTS trades rather than keeping
+  // everything -- the point is that what it rejects is gone from the charts
+  // too, because it could judge those trades and did.
+  sU.filters.day_of_week = { on: true, allowed: [0] };
+  cU.recompute();
+  await wait(150);
+  ok('a filter that can judge everything hatches nothing',
+     BP_DATA.curves.unfilteredTo, null);
+  ok('and draws no key for it', !!cU.unfilteredKey(), false);
+  const rowD = cU.rows.find(r => r.id === 3);
+  ok('it really did reject trades', rowD.dropped > 0, true);
+  // A GAP IS NOT A COVERAGE START. Premium is missing on some trades but
+  // has no minDate, so filtering on it drops them from the charts as well
+  // -- there is no stretch of history it was blind to.
+  sU.filters.day_of_week = { on: false, allowed: [] };
+  sU.filters.premium = { on: true, lo: 0, hi: 1e9 };
+  cU.recompute();
+  await wait(150);
+  const rowP = cU.rows.find(r => r.id === 3);
+  ok('the premium gaps really are dropped', rowP.dropped > 0, true);
+  ok('a gap in a metric is not a coverage start',
+     BP_DATA.curves.unfilteredTo, null);
+  ok('and those trades are dropped, not drawn',
+     rowP.idxDraw.length, rowP.n);
+  sU.filters.premium = { on: false, lo: 0, hi: 1e9 };
+  cU.recompute();
+  await wait(150);
+  // A TUESDAY EXCLUDED BY A MONDAY FILTER IS GENUINELY GONE, not shaded:
+  // the charts drop it exactly as the table does.
+  ok('and the charts drop them too, not shade them',
+     rowD.idxDraw.length, rowD.n);
+
+  // 2. VIX IS BLIND BEFORE index_ohlc.
+  const vixM = cU.registry.find(m => m.key === 'vix');
+  ok('the fixture registry carries a coverage date', !!vixM.minDate, true);
+  // Day of Week off again: leaving it on would narrow what VIX is blind
+  // to, and this step is about VIX alone.
+  sU.filters.day_of_week = { on: false, allowed: [] };
+  sU.filters.vix = { on: true, lo: 9, hi: 80 };
+  cU.recompute();
+  await wait(150);
+  // The hatch ends at the last UNFILTERED trade to CLOSE. That is not the
+  // coverage date and must not be asserted to be: a trade entered before
+  // coverage can close after it, and if none closes late the hatch stops
+  // earlier. What must hold is that the key names the coverage date as the
+  // reason, and that every added-back trade is inside the hatch (below).
+  ok('the key names the coverage date as the reason',
+     cU.unfilteredKey().from, vixM.minDate);
+  // THE SUMMARY IS UNCHANGED -- it still drops what the filter could not
+  // judge, which is what was asked for.
+  const rowU = cU.rows.find(r => r.id === 3);
+  ok('the summary still drops them', rowU.dropped > 0, true);
+  // THE CHARTS DO NOT.
+  ok('the charts keep them', rowU.idxDraw.length > rowU.n, true);
+  const nameU = cU.rows.find(r => r.id === 3).name;
+  const itsU = BP_DATA.curves.eq.find(sv => sv.name === nameU);
+  ok('the curve reaches back past the coverage date',
+     itsU.points[0].date < vixM.minDate, true);
+  const eqU = Chart.getChart('bp-eq-chart');
+  const ddU = Chart.getChart('bp-dd-chart');
+  ok('the equity axis is no longer cut to it',
+     obIsoDay(eqU.scales.x.min) < vixM.minDate, true);
+  ok('nor is the drawdown axis',
+     obIsoDay(ddU.scales.x.min) < vixM.minDate, true);
+  ok('equity carries the hatch',
+     eqU.options.plugins.bpUnfilteredShade.to, obDay(BP_DATA.curves.unfilteredTo));
+  ok('drawdown carries the hatch',
+     ddU.options.plugins.bpUnfilteredShade.to, obDay(BP_DATA.curves.unfilteredTo));
+  // THE INVARIANT THAT MAKES THE HATCH HONEST: every trade the chart adds
+  // back sits inside it. One drawn unfiltered outside the hatch is mixing
+  // with nothing marking it, which is the whole thing this prevents.
+  const pU = BP_DATA.payloads[3];
+  const keptU = new Set(rowU.idx);
+  const addedU = rowU.idxDraw.filter(i => !keptU.has(i));
+  ok('the chart added trades back', addedU.length > 0, true);
+  ok('and every one of them closes inside the hatch',
+     addedU.every(i => pU.columns.date_closed[i] <= BP_DATA.curves.unfilteredTo), true);
+  ok('the key counts exactly those trades', cU.unfilteredKey().n, addedU.length);
+  // Capital deployed answers what was at risk UNDER the filter, which is a
+  // different question, so it keeps the table's trades and no hatch.
+  const capU = Chart.getChart('bp-cap-chart');
+  ok('capital deployed is not hatched',
+     !!(capU.options.plugins || {}).bpUnfilteredShade, false);
+
+  // 3. TWO BLIND FILTERS HATCH TO THE LATER COVERAGE, NOT THE EARLIER:
+  // nothing before the later one has passed both.
+  const v9 = cU.registry.find(m => m.key === 'vix9d');
+  sU.filters.vix9d = { on: true, lo: 5, hi: 90 };
+  cU.recompute();
+  await wait(150);
+  ok('the later coverage wins', cU.unfilteredKey().from, v9.minDate);
+  ok('and it really is the later of the two', v9.minDate > vixM.minDate, true);
+  ok('the hatch grew with it',
+     BP_DATA.curves.unfilteredTo >= v9.minDate, true);
+
+  // 4. BOTH KEYS ON THE PAGE, AND THEY ARE NOT THE SAME THING.
+  const keyU = cU.unfilteredKey();
+  ok('the key names the boundary', keyU.from, v9.minDate);
+  ok('the key names the metrics', /VIX/.test(keyU.metrics), true);
+  ok('the key counts the unfiltered trades', keyU.n > 0, true);
+  ok('the hatch key is rendered', !!document.querySelector('.bp-hatchsw'), true);
+  ok('the live-strategy key is still rendered too',
+     !!document.querySelector('.bp-liveleg:not(.bp-unfkey)'), true);
+  ok('they are different elements',
+     document.querySelectorAll('.bp-liveleg').length >= 2, true);
+
+  // 5. AND IT ALL COMES BACK OFF.
+  sU.filters.vix = { on: false, lo: 9, hi: 80 };
+  sU.filters.vix9d = { on: false, lo: 5, hi: 90 };
+  sU.filters.day_of_week = { on: false, allowed: [] };
+  cU.recompute();
+  await wait(150);
+  ok('clearing the filters clears the hatch',
+     BP_DATA.curves.unfilteredTo, null);
+  // A HATCH WITHOUT A NAMED REASON IS A BUG: anything drawn unfiltered has
+  // to be explained by a coverage-limited filter, or the page is shading a
+  // stretch it cannot account for.
+  ok('a hatch never appears without a reason',
+     !BP_DATA.curves.unfilteredTo || !!BP_DATA.curves.coverageFrom, true);
+  ok('and the charts are what they were',
+     cU.rows.find(r => r.id === 3).dropped, 0);
+
   } catch (e) {
     // A THROW IS A FINDING, not a lost run: without this the page simply
     // never reports and the gate can only say "it did not get that far".
@@ -743,12 +890,12 @@ def main() -> int:
             subprocess.run(
                 [browser, "--headless=new", "--disable-gpu",
                  "--window-size=1600,3800", f"--screenshot={shot}",
-                 "--virtual-time-budget=6000", tmp.as_uri()],
+                 "--virtual-time-budget=20000", tmp.as_uri()],
                 capture_output=True, timeout=180)
             print(f"  wrote {shot}")
         p = subprocess.run(
             [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1000",
-             "--dump-dom", "--virtual-time-budget=6000", tmp.as_uri()],
+             "--dump-dom", "--virtual-time-budget=20000", tmp.as_uri()],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=180)
     finally:
