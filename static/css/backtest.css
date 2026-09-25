@@ -49,6 +49,11 @@
 .ob-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; }
 .ob-note { font-size:11px; color:var(--muted); }
 .ob-dim { font-size:11px; color:var(--dim); }
+/* The quiet action link both pages use for reset / remove. Lives here
+   rather than in one page's <style> so the two cannot drift: an
+   unstyled <a> renders as browser royal blue, which is how this was
+   noticed on the portfolio page. */
+.ob-reset { color:var(--accent); text-decoration:none; cursor:pointer; }
 .ob-err { font-size:11px; color:var(--danger); white-space:pre-wrap; }
 
 .ob-sel {

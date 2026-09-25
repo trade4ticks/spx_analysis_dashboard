@@ -981,6 +981,26 @@ window.addEventListener('load', () => setTimeout(async () => {
   cS2.toggleEdit(sfSid);
   await wait(200);
   ok('the surface catalog loaded', (cS2.surf.catalog || []).length, 3);
+  // ── THE PICKER IS SEARCHABLE ──────────────────────────────────────
+  // 452 metrics with unguessable names, so the query has to reach the
+  // DESCRIPTION too -- matching column names only would be a list you can
+  // already scroll.
+  ok('unfiltered, every metric is offered',
+     cS2.surfaceOptions().reduce((n, g) => n + g.options.length, 0), 3);
+  cS2.surfQuery = 'skew';
+  ok('a name query narrows it',
+     cS2.surfaceOptions().reduce((n, g) => n + g.options.length, 0), 1);
+  cS2.surfQuery = 'z-scored';
+  ok('a DESCRIPTION query finds what the name does not say',
+     cS2.surfaceOptions().flatMap(g => g.options.map(o => o.value)), ['z_iv_30d_atm']);
+  ok('and empty groups disappear rather than sitting there empty',
+     cS2.surfaceOptions().length, 1);
+  cS2.surfQuery = 'zzzz';
+  ok('no matches says so rather than showing an empty list',
+     /nothing matches/.test(cS2.surfaceCount()), true);
+  cS2.surfQuery = '';
+  ok('clearing the query restores the list', cS2.surfaceCount(), '3 metrics');
+
   ok('grouped by family, in the legend order',
      cS2.surfaceOptions().map(g => g.label).join(' | '), 'IV · iv | Skew · skew');
 
@@ -1037,8 +1057,13 @@ window.addEventListener('load', () => setTimeout(async () => {
      sfBefore - sfAfter, sfCost.dropped);
   ok('the sfOther strategy is untouched',
      cS2.rows.find(r => r.id === sfOther).n, sfOtherBefore);
-  ok('the badge names it',
-     cS2.badges(sc).some(b => b.key === sfM.key), true);
+  const sfBadge = cS2.badges(sc).find(b => b.key === sfM.key);
+  ok('the badge names it', !!sfBadge, true);
+  // AT THE METRIC'S OWN PRECISION. The built-ins print one decimal; this one
+  // is in vol points to two, and its unit is on the badge -- one decimal
+  // would have read as a range of zeros for a small-scale metric.
+  ok("the badge carries the metric's own decimals and unit",
+     /10\.00–13\.2[0-9] vol pts/.test(sfBadge.text), true);
   ok('and the text now says it IS dropping',
      cS2.surfaceCostText(sc, sfM).includes('is dropping'), true);
 

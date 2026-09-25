@@ -421,20 +421,19 @@
              the values are fetched for that strategy alone. #}
           <div class="ob-row" style="margin-top:0;margin-bottom:8px">
             <span class="ob-lbl">add a surface metric</span>
-            <input class="bp-sel" style="flex:1;min-width:0" list="bp-surf-list"
-                   x-model="surfPick" placeholder="type to search 452 metrics…"
-                   :disabled="!surf.catalog"
-                   @change="addSurfaceMetric(editing, surfPick); surfPick = ''">
-            <datalist id="bp-surf-list">
-              <template x-for="g in surfaceOptions()" :key="g.label">
-                <template x-for="o in g.options" :key="o.value">
-                  <option :value="o.value" x-text="g.label"></option>
-                </template>
-              </template>
-            </datalist>
-            <select class="bp-sel" :disabled="!surf.catalog"
+            {# The query NARROWS THE LIST BELOW rather than being a second
+               control: 452 metrics with unguessable names, matched on the
+               description as well as the column, and the list stays a plain
+               <select> so the browser's own keyboard handling applies. #}
+            <input class="bp-sel" style="width:220px" type="search"
+                   x-model="surfQuery" :disabled="!surf.catalog"
+                   placeholder="search name or description…"
+                   aria-label="Filter the surface metric list">
+            <select class="bp-sel" style="flex:1;min-width:0"
+                    :disabled="!surf.catalog"
+                    aria-label="Add a surface metric to this strategy"
                     @change="addSurfaceMetric(editing, $event.target.value); $event.target.value = ''">
-              <option value="">by family…</option>
+              <option value="">choose a metric…</option>
               <template x-for="g in surfaceOptions()" :key="g.label">
                 <optgroup :label="g.label">
                   <template x-for="o in g.options" :key="o.value">
@@ -443,6 +442,7 @@
                 </optgroup>
               </template>
             </select>
+            <span class="ob-note" x-text="surfaceCount()"></span>
             <span class="ob-note" x-show="surf.loading" x-cloak>loading the catalog…</span>
             <span class="ob-note warn" x-show="surf.error" x-cloak x-text="surf.error"></span>
           </div>
@@ -458,8 +458,9 @@
                 <template x-if="m.removable">
                   <div class="ob-dim" style="margin-bottom:3px">
                     <span x-text="m.description ? m.description.slice(0, 90) : ''"></span>
-                    <a href="#" @click.prevent="removeSurfaceMetric(editing, m.key)"
-                       style="float:right">remove</a>
+                    <a href="#" class="ob-reset" style="float:right"
+                       title="Remove this metric from this strategy"
+                       @click.prevent="removeSurfaceMetric(editing, m.key)">remove</a>
                   </div>
                 </template>
                 <template x-if="m.loading">

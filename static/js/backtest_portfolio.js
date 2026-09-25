@@ -389,7 +389,7 @@ document.addEventListener('alpine:init', () => {
     // ── state ───────────────────────────────────────────────────────────
     saved: [],
     registry: [],
-    surfPick: '',
+    surfQuery: '',
     /* The surface catalog, fetched once and lazily: 452 metrics and a ~4s
      * index walk on the VPS, so a portfolio nobody filters never pays it. */
     surf: { catalog: null, groups: [], other: null, unitFormats: {},
@@ -695,10 +695,22 @@ document.addEventListener('alpine:init', () => {
     /* One optgroup per family, in the legend's order, exactly as the OO page
      * groups them -- the display names come from the server so neither page
      * names a family itself. */
+    /* The catalog, grouped by family and NARROWED BY THE TYPED QUERY.
+     *
+     * 452 metrics is too many to scroll and the names are not guessable, so
+     * the query matches the column name AND the description -- "term" should
+     * find term-structure metrics whatever they are called. A plain <select>
+     * whose contents shrink, rather than a custom combobox: the browser's
+     * own keyboard handling is better than one I would write, and the list
+     * stays a list for a screen reader.
+     */
     surfaceOptions() {
       void this.tick;
       const cat = this.surf.catalog || [];
       if (!cat.length) return [];
+      const q = (this.surfQuery || '').trim().toLowerCase();
+      const hit = m => !q || m.column_name.toLowerCase().includes(q)
+                    || String(m.description || '').toLowerCase().includes(q);
       const fams = new Set(cat.map(m => m.family));
       const groups = (this.surf.groups || [])
         .map(g => ({ ...g, families: (g.families || []).filter(f => fams.has(f)) }))
@@ -709,8 +721,9 @@ document.addEventListener('alpine:init', () => {
       const out = [];
       for (const g of groups) {
         for (const f of g.families) {
-          const ms = cat.filter(m => m.family === f)
+          const ms = cat.filter(m => m.family === f && hit(m))
             .sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
+          if (!ms.length) continue;
           out.push({ label: `${g.label} · ${f}`, options: ms.map(m => ({
             value: m.column_name,
             label: m.column_name + (m.description ? ' — ' + String(m.description).slice(0, 60) : ''),
@@ -718,6 +731,15 @@ document.addEventListener('alpine:init', () => {
         }
       }
       return out;
+    },
+
+    surfaceCount() {
+      void this.tick;
+      const total = (this.surf.catalog || []).length;
+      if (!total) return '';
+      const shown = this.surfaceOptions().reduce((n, g) => n + g.options.length, 0);
+      if (!this.surfQuery) return `${total} metrics`;
+      return shown ? `${shown} of ${total}` : `nothing matches "${this.surfQuery}"`;
     },
 
     async addSurfaceMetric(id, column) {
@@ -1195,7 +1217,14 @@ document.addEventListener('alpine:init', () => {
       }
       const lo = Number(f.lo), hi = Number(f.hi);
       if (!isFinite(lo) || !isFinite(hi)) return m.label;
-      return `${m.label}: ${lo.toFixed(1)}–${hi.toFixed(1)}`;
+      // ONE DECIMAL IS THE BUILT-INS' RULE, kept. A surface metric carries
+      // its own precision, and a slope printed as "0.0-0.1" is not a badge,
+      // it is two zeros.
+      const dp = (m.format && typeof m.format === 'object')
+        ? (m.format.decimals ?? 2) : 1;
+      const unit = (m.format && typeof m.format === 'object' && m.format.suffix)
+        ? ' ' + m.format.suffix : '';
+      return `${m.label}: ${lo.toFixed(dp)}–${hi.toFixed(dp)}${unit}`;
     },
 
     filterBadge(c) {
