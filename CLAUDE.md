@@ -960,8 +960,14 @@ it would disagree with the table on days like 2026-04-08. The rule is derived fr
   does not copy OO's `Gap` into `gap`.
 - **No market-data cron.** `index_ohlc` is maintained by something else on the VPS; a
   fetch path would be a second writer. "Update Market Data" is a read-only freshness
-  indicator: stale when the latest valid SPX bar is more than `STALE_AFTER_DAYS = 5`
-  calendar days old.
+  indicator: stale when more than `STALE_AFTER_SESSIONS = 1` COMPLETED
+  exchange sessions have passed with no new SPX bar (changed 2026-09-25).
+  It was five CALENDAR days, with a note saying a trading calendar was
+  deliberately avoided — that is reversed; see the market-calendar section.
+  Five days was the price of not knowing which days were sessions, and it let
+  a stalled writer go unnoticed across a long weekend. A session that has not
+  finished is not counted, so the warning cannot fire every afternoon, and
+  the missed sessions are named rather than only counted.
 - **No materialized view for the daily rollup.** It is a CTE run once per process and
   cached, rebuilt when `index_ohlc`'s latest row moves. A view wouldn't have prevented the
   session-rule bug and would add a shared-DB object needing a refresh owner.

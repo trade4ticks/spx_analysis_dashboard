@@ -177,6 +177,39 @@ def main() -> int:
     check(rep["sessions"] == len(tbl) and "2026-04-08" in tbl,
           "and the day is counted as a session, not skipped")
 
+    # ── STALENESS IS COUNTED IN SESSIONS ──────────────────────────────────
+    # It used to be five CALENDAR days, which is what you pick when you do
+    # not know which days were sessions: long enough to survive a holiday
+    # weekend, and therefore long enough to miss a stalled writer for most
+    # of a week.
+    from app.oo_backtest.market import staleness, STALE_AFTER_SESSIONS
+
+    fri = "2023-06-30"
+    check(STALE_AFTER_SESSIONS == 1,
+          "one completed session of slack, for a writer that has not run yet")
+    check(staleness(fri, date(2023, 7, 1))["age_sessions"] == 0,
+          "Friday's data on a Saturday is 0 sessions old -- a weekend is not "
+          "the data being late")
+    check(not staleness(fri, date(2023, 7, 1))["stale"], "and so is not stale")
+    check(staleness(fri, date(2023, 7, 3))["age_sessions"] == 0,
+          "nor on the Monday: Monday has not finished, so it cannot be missing")
+    check(staleness(fri, date(2023, 7, 5))["age_sessions"] == 1,
+          "by Wednesday the 5th, Monday is a completed session with no bar")
+    check(not staleness(fri, date(2023, 7, 5))["stale"],
+          "which is inside the one-session allowance")
+    check(staleness(fri, date(2023, 7, 6))["age_sessions"] == 2,
+          "by Thursday, Monday AND Wednesday are missing -- the 4th of July "
+          "is not counted, because it was not a session")
+    check(staleness(fri, date(2023, 7, 6))["stale"],
+          "two completed sessions with no bar IS stale")
+    check(staleness(fri, date(2023, 7, 6))["age_days"] == 6,
+          "the calendar-day age is still reported, as context")
+    check(staleness(fri, date(2023, 7, 6))["missed_sessions"] == ["2023-07-03", "2023-07-05"],
+          "and the missing sessions are named, not just counted")
+    st = staleness(None, date(2023, 7, 4))
+    check(st["stale"] and st["age_sessions"] is None,
+          "no SPX bar at all is stale, with no age to report")
+
     print(f"\ncalendar cases: {len(FAILURES)} failed"
           if FAILURES else "\nPASS: exchange calendar")
     return 1 if FAILURES else 0

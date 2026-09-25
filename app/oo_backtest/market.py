@@ -571,19 +571,41 @@ def session_days(df: pd.DataFrame) -> list[str]:
     return cal.sessions(lo.date(), hi.date())
 
 
-STALE_AFTER_DAYS = 5
+# HOW MANY COMPLETED EXCHANGE SESSIONS may pass with no new SPX bar before
+# the data is called stale. ONE, not zero: the writer may not have run yet
+# for the session that just closed, and a check that fires every evening is
+# one nobody reads.
+#
+# This was five CALENDAR days, with a comment saying a trading calendar was
+# deliberately avoided because it would disagree with the table on days like
+# 2026-04-08. It disagreed because the table was wrong, and five calendar
+# days was the price of not knowing which days were sessions: it let a
+# stalled writer go unnoticed across a long weekend. Counting sessions is
+# both tighter and simpler now the calendar is here.
+STALE_AFTER_SESSIONS = 1
 
 
 def staleness(latest_date: str | None, today: date) -> dict:
-    """Stale when the latest valid SPX bar is more than STALE_AFTER_DAYS
-    calendar days old. No trading calendar, deliberately: the table's own data
-    defines a session, and a calendar would disagree with it on days like
-    2026-04-08. Five days covers a weekend plus a holiday; the cost is that a
-    stalled writer is noticed up to five days late."""
+    """Stale when more than STALE_AFTER_SESSIONS COMPLETED sessions have
+    passed since the latest valid SPX bar.
+
+    Completed means strictly before today: a session that has not finished
+    cannot be missing data yet, and counting it would fire the warning every
+    afternoon. Weekends and holidays are not sessions and so cost nothing --
+    the point of measuring in sessions rather than days.
+    """
     if latest_date is None:
-        return {"stale": True, "age_days": None, "stale_after_days": STALE_AFTER_DAYS}
-    age = (today - date.fromisoformat(latest_date)).days
-    return {"stale": age > STALE_AFTER_DAYS, "age_days": age, "stale_after_days": STALE_AFTER_DAYS}
+        return {"stale": True, "age_sessions": None, "age_days": None,
+                "stale_after_sessions": STALE_AFTER_SESSIONS}
+    latest = date.fromisoformat(latest_date)
+    # Sessions strictly after the latest bar and strictly before today.
+    missed = [d for d in cal.sessions(latest, today)
+              if latest_date < d < today.isoformat()]
+    return {"stale": len(missed) > STALE_AFTER_SESSIONS,
+            "age_sessions": len(missed),
+            "age_days": (today - latest).days,
+            "missed_sessions": missed[:5],
+            "stale_after_sessions": STALE_AFTER_SESSIONS}
 
 
 _TIME_FORMATS = ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M:%S%p", "%I:%M%p")

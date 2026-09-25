@@ -1934,9 +1934,15 @@ document.addEventListener('alpine:init', () => {
     marketStale() { return !!(this.market && this.market.ok && this.market.stale); },
     staleText() {
       const m = this.market || {};
-      return m.age_days === null || m.age_days === undefined
-        ? 'Stale — no valid SPX bar in index_ohlc'
-        : `Stale — latest valid SPX bar is ${m.age_days} days old (limit ${m.stale_after_days})`;
+      // SESSIONS, not days: a weekend is not the data being late.
+      if (m.age_sessions === null || m.age_sessions === undefined) {
+        return 'Stale — no valid SPX bar found at all';
+      }
+      const miss = (m.missed_sessions || []).slice(0, 3).join(', ');
+      return `Stale — ${m.age_sessions} completed session`
+           + `${m.age_sessions === 1 ? '' : 's'} with no SPX bar `
+           + `(limit ${m.stale_after_sessions})`
+           + (miss ? `: ${miss}${(m.missed_sessions || []).length > 3 ? ', …' : ''}` : '');
     },
 
     fallbackLines() {
