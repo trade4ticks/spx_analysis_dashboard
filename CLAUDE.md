@@ -238,8 +238,7 @@ read as a specification, not a template.
 **Phases:** P1 scaffold + load — done; P2 filters, allocation, summary
 table with TOTAL row — done; P3 equity/drawdown/capital deployed/monthly
 P&L — done; P4 correlation — done; P5 saved
-profiles — done; P6 distribution, overlap, rolling risk (Sharpe/Sortino); P7
-docs.
+profiles — done; P6 distribution, overlap, rolling risk — done; P7 docs.
 
 **One core, two pages.** `static/js/backtest_core.js` holds every shared
 calculation — `obApplyFilters`, `obStats`, `obEquity`, `obExtraStats`,
@@ -337,6 +336,26 @@ divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
 nothing to lay out and the numbers want to be readable; shade is the month's
 size against the biggest month, the same opacity rule the bar charts use, and
 year totals carry a bar beside them. Everything is dated by CLOSE.
+
+**P6's decisions.** The **distribution** is the old app's overlaid
+histograms — one series per strategy at 0.6 opacity, **$100 bins** as it had
+them, on the filtered qty-scaled trades; one bin set is computed across every
+strategy so the bars line up (Chart.js `grouped: false` overlays rather than
+interleaves). **Strategies active per day** draws a line per strategy plus a
+dotted portfolio total, as the old app did — but on OUR concurrency
+(half-open, per SPX session, no dedupe by open day) rather than the old
+inclusive, deduplicated calendar count: two charts on one page disagreeing
+about what a position is would be the same fault as the old app's weekly
+matrix beside its daily rolling correlation. **Rolling risk** keeps the old
+definitions exactly (mean ÷ stdev × √252, ÷ downside stdev for Sortino, win
+rate as the share of those days that made money) with the 30/90/180 selector
+and win rate on a second axis, because the old app had two axes and a ratio
+does not share a scale with a percentage. **The window counts days that had a
+close**, not calendar days — at a couple of closes a week, 90 of them is
+closer to nine months than three, and the card says so. A window longer than
+the portfolio's close-days draws nothing and says which it is: without that
+the empty chart's linear x axis falls back to zero and renders as "1970",
+which reads as broken rather than as a window that does not fit.
 
 **The sidebar card carries its ACTIVE FILTER BADGES** — "VIX Level: 12.0–30.0",
 "Day of Week: Fri" — ported from the old app's `METRIC_BADGE_COLORS` (pale

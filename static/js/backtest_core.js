@@ -460,3 +460,101 @@ function obRollingCorr(xs, ys, window) {
   }
   return out;
 }
+
+
+/* ── rolling risk ────────────────────────────────────────────────────────
+ *
+ * The old app's definitions, kept (the user asked for them): the series is
+ * P/L SUMMED BY CLOSE DATE over the days that had a close, and the window
+ * counts OBSERVATIONS of that series rather than calendar days. At a couple
+ * of closes a week, a "90" window is closer to nine months than to three --
+ * which is worth knowing and is why the card says so.
+ */
+function obDailyPnl(cols, idx) {
+  const out = new Map();
+  for (const i of idx) {
+    const d = cols.date_closed[i];
+    if (!d) continue;
+    out.set(d, (out.get(d) || 0) + cols.pnl[i]);
+  }
+  return out;
+}
+
+
+function obMean(v) {
+  let s = 0;
+  for (const x of v) s += x;
+  return v.length ? s / v.length : null;
+}
+
+
+/* Sample standard deviation (n-1), as pandas' .std() has it. */
+function obStdev(v) {
+  if (v.length < 2) return null;
+  const m = obMean(v);
+  let ss = 0;
+  for (const x of v) ss += (x - m) * (x - m);
+  return Math.sqrt(ss / (v.length - 1));
+}
+
+
+const OB_ANNUALISE = Math.sqrt(252);
+
+
+/* mean / stdev * sqrt(252) over a rolling window. Nulls until the window
+ * fills, so the series stays aligned with its dates. */
+function obRollingSharpe(values, window) {
+  const out = new Array(values.length).fill(null);
+  for (let e = window - 1; e < values.length; e++) {
+    const w = values.slice(e - window + 1, e + 1);
+    const sd = obStdev(w);
+    out[e] = (sd && sd > 0) ? obMean(w) / sd * OB_ANNUALISE : null;
+  }
+  return out;
+}
+
+
+/* Sortino: the same, against DOWNSIDE deviation only -- the stdev of the
+ * losing days in the window. Fewer than two of them is not a deviation, so
+ * the point is null rather than a large number from one loss. */
+function obRollingSortino(values, window) {
+  const out = new Array(values.length).fill(null);
+  for (let e = window - 1; e < values.length; e++) {
+    const w = values.slice(e - window + 1, e + 1);
+    const neg = w.filter(v => v < 0);
+    const sd = neg.length > 1 ? obStdev(neg) : null;
+    out[e] = (sd && sd > 0) ? obMean(w) / sd * OB_ANNUALISE : null;
+  }
+  return out;
+}
+
+
+/* The share of days in the window that made money, as a percentage. Days,
+ * not trades: this series is one value per close date. */
+function obRollingWinRate(values, window) {
+  const out = new Array(values.length).fill(null);
+  for (let e = window - 1; e < values.length; e++) {
+    const w = values.slice(e - window + 1, e + 1);
+    out[e] = w.filter(v => v > 0).length / w.length * 100;
+  }
+  return out;
+}
+
+
+/* Counts per fixed-width bin, for a histogram. `size` is the bin width in
+ * the values' own units ($100 in the old app). Returns the left edge of
+ * each bin and its count, over the whole range so gaps read as gaps. */
+function obHistogram(values, size) {
+  const v = values.filter(x => !obNull(x));
+  if (!v.length || !(size > 0)) return { edges: [], counts: [] };
+  let lo = Infinity, hi = -Infinity;
+  for (const x of v) { if (x < lo) lo = x; if (x > hi) hi = x; }
+  const first = Math.floor(lo / size) * size;
+  const last = Math.floor(hi / size) * size;
+  const n = Math.round((last - first) / size) + 1;
+  const counts = new Array(n).fill(0);
+  for (const x of v) counts[Math.round((Math.floor(x / size) * size - first) / size)]++;
+  const edges = [];
+  for (let i = 0; i < n; i++) edges.push(first + i * size);
+  return { edges, counts };
+}

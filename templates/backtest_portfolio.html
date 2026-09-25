@@ -661,6 +661,72 @@
         </div>
       </div>
 
+      <div class="ob-card" x-show="rows.length" x-cloak>
+        <div class="ob-card-body">
+          <div class="bp-pair">
+            <div>
+              <div class="ob-lbl">P/L distribution</div>
+              <div class="bp-chart" style="height:280px">
+                <canvas id="bp-dist-chart" role="img"
+                        aria-label="Distribution of trade P/L per strategy"></canvas>
+              </div>
+              <div class="ob-note" style="margin-top:4px">
+                One bar per $100 of P/L, overlaid per strategy, on the
+                filtered trades with qty applied.
+              </div>
+            </div>
+            <div>
+              <div class="ob-lbl">Strategies active per day</div>
+              <div class="bp-chart" style="height:280px">
+                <canvas id="bp-overlap-chart" role="img"
+                        aria-label="Open positions per session, per strategy and in total"></canvas>
+              </div>
+              <div class="ob-note" style="margin-top:4px">
+                Open positions per SPX session, with the portfolio total
+                dotted. Same <b>half-open</b> count as Capital deployed — the
+                old app counted this one inclusively and deduplicated
+                same-day entries, which would make two charts on one page
+                disagree about what a position is.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ob-card" x-show="rows.length" x-cloak>
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Rolling risk metrics</span>
+          <span class="ob-note" x-text="riskSub()"></span>
+          <span class="ob-card-sub">
+            <select class="bp-sel" x-model.number="riskWindow" @change="onRisk()">
+              <option value="30">30</option>
+              <option value="90">90</option>
+              <option value="180">180</option>
+            </select>
+          </span>
+        </div>
+        <div class="ob-card-body">
+          <div class="bp-chart" style="height:300px">
+            <canvas id="bp-risk-chart" role="img"
+                    aria-label="Rolling Sharpe, Sortino and win rate for the portfolio"></canvas>
+          </div>
+          <div class="bp-legend">
+            <span class="bp-leg"><span class="bp-swatch" style="background:#3498db"></span>Sharpe</span>
+            <span class="bp-leg"><span class="bp-swatch" style="background:#9b59b6"></span>Sortino</span>
+            <span class="bp-leg"><span class="bp-swatch" style="background:#f39c12"></span>Win rate % (right)</span>
+          </div>
+          <div class="ob-note" style="margin-top:6px">
+            The old app's definitions, kept: P/L summed by close date,
+            mean ÷ stdev × √252 for Sharpe and ÷ downside stdev for Sortino,
+            win rate as the share of those DAYS that made money. <b>The window
+            counts days that had a close</b>, not calendar days — at a couple
+            of closes a week, 90 of them is closer to nine months than to
+            three. Sortino is blank where a window holds fewer than two
+            losing days: one loss is not a deviation.
+          </div>
+        </div>
+      </div>
+
       <!-- METRIC AND STRATEGY CORRELATION SIDE BY SIDE, with the pairwise
            scatter full width beneath them: the old app's card, rebuilt. -->
       <div class="ob-card" x-show="corr.metrics.length" x-cloak>
@@ -788,7 +854,7 @@
            a main column with nothing in it reads as a page that broke. -->
       <div class="ob-card">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Phase 5 of 7 — saved profiles</span>
+          <span class="ob-card-title">Phase 6 of 7 — distribution, overlap, rolling risk</span>
         </div>
         <div class="ob-card-body">
           <div class="bp-phase">
@@ -801,8 +867,7 @@
             they cannot disagree with the numbers above them.<br><br>
             A combination — the strategies, their qty, capital and filters,
             and the date-range mode — saves and loads by name.<br><br>
-            Next: <b>P6</b> distribution, trade overlap and the rolling risk
-            metrics (Sharpe/Sortino/win rate); <b>P7</b> docs.<br><br>
+            Next: <b>P7</b> — docs, and whatever this turns up in use.<br><br>
             P/L is dated by <b>close</b>. Deployment is <b>half-open</b> —
             a position is capital at risk on the sessions it is held through
             and not on the one it closes on, so a weekly roll reads one

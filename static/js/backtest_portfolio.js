@@ -34,7 +34,15 @@ const BP_DATA = {
  * chart is not state a template reads, and a reactive proxy around one is a
  * proxy around every point in it. */
 const BP_CHARTS = { eq: null, dd: null, cap: null, sc: null, roll: null,
-                    year: null };
+                    year: null, dist: null, overlap: null, risk: null };
+
+/* The rolling-risk palette, the old app's: blue Sharpe, purple Sortino,
+ * amber win rate on its own axis. */
+const BP_SHARPE = '#3498db';
+const BP_SORTINO = '#9b59b6';
+const BP_WINRATE = '#f39c12';
+/* The old app's histogram bin, in dollars of P/L. */
+const BP_DIST_BIN = 100;
 
 /* A hex colour at an opacity, for the rolling lines. */
 function obRgbaFrom(hex, a) {
@@ -217,6 +225,8 @@ document.addEventListener('alpine:init', () => {
     corr: { names: [], matrix: [], pairs: [], weeks: 0, metrics: [] },
     pairA: 0, pairB: 0,
     rollWeeks: 26,
+    riskWindow: 90,
+    risk: { days: 0, window: 90, fits: true },
     profiles: [],
     profilePick: 0,
     profileName: '',
@@ -908,6 +918,27 @@ document.addEventListener('alpine:init', () => {
         curves.maxDD = peq.maxDD;
       }
       curves.cap = deployed;
+      // P6 reads these: the portfolio's daily P/L (by close date, the old
+      // app's series) and each strategy's own concurrency, which the overlap
+      // chart draws beside the portfolio total.
+      const dailyMap = obDailyPnl(pooled, pooled.idx);
+      const dailyDates = [...dailyMap.keys()].sort();
+      curves.daily = { dates: dailyDates,
+                       values: dailyDates.map(d => dailyMap.get(d)) };
+      curves.overlap = [];
+      for (const r of rows) {
+        if (r.total || !r.conc || !r.conc.days.length) continue;
+        curves.overlap.push({ name: r.name, color: r.color, conc: r.conc });
+      }
+      curves.dist = [];
+      for (const r of rows) {
+        if (r.total) continue;
+        const c = this.chosen.find(x => x.id === r.id);
+        const cols = c && this.scaledCols(c);
+        if (!cols) continue;
+        curves.dist.push({ name: r.name, color: r.color,
+                           pnl: r.idx.map(i => cols.pnl[i]) });
+      }
       BP_DATA.curves = curves;
 
       const peakAt = deployed.indexOf(Math.max(...(deployed.length ? deployed : [0])));
@@ -1159,6 +1190,144 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
+      // ── P/L DISTRIBUTION: overlaid histograms, one per strategy ──────
+      if (c.dist && c.dist.length) {
+        // One bin set for everyone, or the bars do not line up and
+        // "overlaid" becomes "interleaved".
+        const all = c.dist.flatMap(d => d.pnl);
+        const base = obHistogram(all, BP_DIST_BIN);
+        const at = new Map(base.edges.map((e, i) => [e, i]));
+        const sets = c.dist.map(d => {
+          const h = obHistogram(d.pnl, BP_DIST_BIN);
+          const counts = new Array(base.edges.length).fill(0);
+          h.edges.forEach((e, i) => {
+            const k = at.get(e);
+            if (k !== undefined) counts[k] = h.counts[i];
+          });
+          return { label: d.name, data: counts,
+                   backgroundColor: obRgbaFrom(d.color, 0.6),
+                   borderWidth: 0, grouped: false };
+        });
+        this.drawBar('dist', 'bp-dist-chart',
+          { labels: base.edges.map(e => bpFmtMoney(e)), datasets: sets },
+          { responsive: true, maintainAspectRatio: false, animation: false,
+            scales: {
+              x: { grid: { display: false }, border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            maxTicksLimit: 9, autoSkip: true } },
+              y: { grid: { color: 'rgba(255,255,255,0.05)' },
+                   border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            maxTicksLimit: 5, precision: 0 } },
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+              title: it => `${it[0].label} to `
+                + bpFmtMoney(base.edges[it[0].dataIndex] + BP_DIST_BIN),
+              label: it => `${it.dataset.label}: ${it.parsed.y} trades` } } } });
+      }
+
+      // ── STRATEGIES ACTIVE PER DAY ────────────────────────────────────
+      if (c.overlap && c.overlap.length) {
+        const sets = c.overlap.map(o => ({
+          label: o.name,
+          data: o.conc.days.map((d, i) => ({ x: obDay(d), y: o.conc.counts[i] })),
+          borderColor: o.color, borderWidth: 1, pointRadius: 0,
+          pointHitRadius: 5, tension: 0, stepped: 'before', fill: false,
+        }));
+        // The portfolio total, dotted, as the old app drew it.
+        const totals = new Map();
+        for (const o of c.overlap) {
+          o.conc.days.forEach((d, i) => {
+            totals.set(d, (totals.get(d) || 0) + o.conc.counts[i]);
+          });
+        }
+        const days = [...totals.keys()].sort();
+        sets.push({
+          label: 'Portfolio total',
+          data: days.map(d => ({ x: obDay(d), y: totals.get(d) })),
+          borderColor: BP_TOTAL, borderWidth: 1.8, borderDash: [4, 3],
+          pointRadius: 0, pointHitRadius: 5, tension: 0, stepped: 'before',
+          fill: false,
+        });
+        this.draw('overlap', 'bp-overlap-chart', { datasets: sets },
+          { responsive: true, maintainAspectRatio: false, animation: false,
+            parsing: false,
+            interaction: { mode: 'nearest', axis: 'x', intersect: false },
+            scales: {
+              x: { type: 'linear', grid: { color: 'rgba(255,255,255,0.05)' },
+                   border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            maxTicksLimit: 7,
+                            callback: v => obIsoDay(v).slice(0, 7) } },
+              y: { beginAtZero: true,
+                   grid: { color: 'rgba(255,255,255,0.05)' },
+                   border: { display: false },
+                   ticks: { color: '#9a9a9a', font: { size: 10 },
+                            precision: 0 } },
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: {
+              title: it => obIsoDay(it[0].parsed.x),
+              label: it => `${it.dataset.label}: ${it.parsed.y} open` } } } });
+      }
+
+      // ── ROLLING RISK: Sharpe and Sortino left, win rate right ────────
+      const dy = c.daily;
+      if (dy && dy.values.length) {
+        const w = this.riskWindow;
+        this.risk = { days: dy.values.length, window: w,
+                      fits: dy.values.length >= w };
+        const xs = dy.dates.map(d => obDay(d));
+        const pair = (arr) => arr.map((v, i) => (v === null ? null
+          : { x: xs[i], y: v })).filter(Boolean);
+        // THE AXIS SPANS THE SERIES, not the points. A window longer than
+        // the portfolio has close-days produces no points at all, and
+        // Chart.js then scales a linear x axis from zero -- which reads as
+        // "1970" and looks like a broken chart rather than a window that
+        // does not fit. The card says which it is.
+        const xr = xs.length ? { min: xs[0], max: xs[xs.length - 1] } : {};
+        const sharpe = pair(obRollingSharpe(dy.values, w));
+        const sortino = pair(obRollingSortino(dy.values, w));
+        const wins = pair(obRollingWinRate(dy.values, w));
+        this.draw('risk', 'bp-risk-chart', { datasets: [
+          { label: `Sharpe (${w})`, data: sharpe, borderColor: BP_SHARPE,
+            borderWidth: 1.6, pointRadius: 0, pointHitRadius: 5, tension: 0,
+            yAxisID: 'y' },
+          { label: `Sortino (${w})`, data: sortino, borderColor: BP_SORTINO,
+            borderWidth: 1.6, pointRadius: 0, pointHitRadius: 5, tension: 0,
+            yAxisID: 'y' },
+          { label: `Win rate % (${w})`, data: wins, borderColor: BP_WINRATE,
+            borderWidth: 1.2, borderDash: [3, 3], pointRadius: 0,
+            pointHitRadius: 5, tension: 0, yAxisID: 'y1' },
+        ] }, {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          parsing: false,
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
+          scales: {
+            x: { type: 'linear', ...xr,
+                 grid: { color: 'rgba(255,255,255,0.05)' },
+                 border: { display: false },
+                 ticks: { color: '#9a9a9a', font: { size: 10 },
+                          maxTicksLimit: 7,
+                          callback: v => obIsoDay(v).slice(0, 7) } },
+            // TWO AXES because the old app had two: a ratio and a
+            // percentage do not share a scale, and the card names which
+            // line belongs to which side.
+            y: { type: 'linear', position: 'left',
+                 grid: { color: 'rgba(255,255,255,0.05)' },
+                 border: { display: false },
+                 ticks: { color: '#9a9a9a', font: { size: 10 },
+                          callback: v => v.toFixed(1) } },
+            y1: { type: 'linear', position: 'right', min: 0, max: 100,
+                  grid: { display: false }, border: { display: false },
+                  ticks: { color: BP_WINRATE, font: { size: 10 },
+                           callback: v => v + '%' } },
+          },
+          plugins: { legend: { display: false }, tooltip: { callbacks: {
+            title: it => obIsoDay(it[0].parsed.x),
+            label: it => `${it.dataset.label}: ${it.parsed.y.toFixed(2)}` } } },
+        });
+      }
+
       this.draw('cap', 'bp-cap-chart', capData,
                 base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
                      cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}));
@@ -1264,6 +1433,17 @@ document.addEventListener('alpine:init', () => {
     onPair() { this.renderCharts(); },
 
     onRoll() { this.renderCharts(); },
+
+    onRisk() { this.renderCharts(); },
+
+    riskSub() {
+      void this.tick;
+      if (!this.risk.days) return '';
+      const d = `${bpFmtInt(this.risk.days)} days with a close`;
+      return this.risk.fits ? d
+        : `${d} — fewer than the ${this.risk.window} this window needs, so `
+          + `nothing is drawn`;
+    },
 
     metricRow(m) {
       void this.tick;

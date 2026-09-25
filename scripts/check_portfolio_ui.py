@@ -380,6 +380,60 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('sorted by strength',
      rhos.every((v, i) => i === 0 || rhos[i - 1] >= v - 1e-12), true);
 
+  // ── P6: DISTRIBUTION, OVERLAP, ROLLING RISK ───────────────────────
+  const dist = Chart.getChart('bp-dist-chart');
+  ok('the distribution drew', !!dist, true);
+  ok('a series per strategy', dist && dist.data.datasets.length, 2);
+  ok('the bars overlay rather than interleave',
+     dist && dist.data.datasets[0].grouped, false);
+  // Every trade lands in exactly one bin, so the counts sum to the trades.
+  const binned = dist.data.datasets.reduce(
+    (a, d) => a + d.data.reduce((x, y) => x + y, 0), 0);
+  ok('every trade is in a bin', binned, cc.rows.find(r => r.total).n);
+
+  const ov = Chart.getChart('bp-overlap-chart');
+  ok('the overlap chart drew', !!ov, true);
+  ok('a line per strategy plus the total', ov && ov.data.datasets.length, 3);
+  ok('the total is dotted',
+     !!(ov && ov.data.datasets[2].borderDash), true);
+  // It counts the same way Capital deployed does: the portfolio total's
+  // peak times capital is that chart's peak, so the two cannot disagree
+  // about what a position is.
+  const ovPeak = Math.max(...ov.data.datasets[2].data.map(p => p.y));
+  ok('the overlap peak is a real count', ovPeak > 0, true);
+
+  const risk = Chart.getChart('bp-risk-chart');
+  ok('the risk chart drew', !!risk, true);
+  ok('three series', risk && risk.data.datasets.length, 3);
+  ok('win rate is on its own axis',
+     risk && risk.data.datasets[2].yAxisID, 'y1');
+  ok('that axis is a percentage', risk && risk.options.scales.y1.max, 100);
+  ok('the window is in the labels',
+     /\(90\)/.test(risk.data.datasets[0].label), true);
+
+  // CHANGING THE WINDOW redraws with the new one.
+  const riskSel = [...document.querySelectorAll('.ob-main select')]
+    .find(el => [...el.options].some(o => o.value === '180'));
+  riskSel.selectedIndex = 2;
+  riskSel.dispatchEvent(new Event('input', { bubbles: true }));
+  riskSel.dispatchEvent(new Event('change', { bubbles: true }));
+  await wait(200);
+  ok('the window control works', cc.riskWindow, 180);
+  ok('and the chart says so',
+     /\(180\)/.test(Chart.getChart('bp-risk-chart').data.datasets[0].label), true);
+  // A WINDOW LONGER THAN THE DATA draws nothing -- and says so, instead of
+  // leaving an empty chart whose axis falls back to 1970 and reads as broken.
+  const fits = cc.risk.days >= 180;
+  ok('the card states the window against the data',
+     /days with a close/.test(document.body.textContent), true);
+  if (!fits) {
+    ok('it says the window does not fit',
+       /fewer than the 180/.test(document.body.textContent), true);
+    const rc = Chart.getChart('bp-risk-chart');
+    ok('and the axis still spans the series, not 1970',
+       rc.options.scales.x.min > obDay('2000-01-01'), true);
+  }
+
   // ── THE CARDS SHOW THEIR FILTERS ──────────────────────────────────
   // Without these you cannot tell which of several strategies is filtered
   // without opening each panel in turn, which is the point of having them
