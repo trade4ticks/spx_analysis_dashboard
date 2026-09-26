@@ -461,6 +461,11 @@ document.addEventListener('alpine:init', () => {
       return {
         strategies: this.chosen.map(c => ({
           id: c.id, qty: c.qty, capital: c.capital, filters: c.filters,
+          // THE LIST, NOT THE VALUES. Values are fetched per strategy on
+          // load, so a profile cannot pin a metric to whatever the surface
+          // table held on the day it was saved -- the same reason a saved
+          // strategy stores its original file and re-parses it.
+          surface: (c.surface || []).map(m => m.surfColumn),
         })),
         range_mode: this.rangeMode,
         roll_weeks: this.rollWeeks,
@@ -514,7 +519,26 @@ document.addEventListener('alpine:init', () => {
             id: s.id, name: (pf.names || {})[String(s.id)] || `#${s.id}`,
             qty: s.qty, capital: s.capital,
             savedCapital: null, filters: s.filters || {},
+            surface: [],
           }));
+        // THE ADDED METRICS COME BACK TOO. Without this the saved filter
+        // survives as a VALUE with nothing describing it: bpSpecs walks the
+        // registry, not the filter map, so an orphan key is silently inert
+        // -- a filter you can see in the payload and not on the page.
+        const want = new Map(pf.payload.strategies.map(x => [x.id, x.surface || []]));
+        if ([...want.values()].some(v => v.length)) await this.loadSurfaceCatalog();
+        for (const c of this.chosen) {
+          for (const col of (want.get(c.id) || [])) {
+            await this.addSurfaceMetric(c.id, col, s0 => {
+              // Restore the SAVED bounds, not the data's: a profile that
+              // reopens with every slider at full range has not restored
+              // anything.
+              const saved = (pf.payload.strategies.find(x => x.id === c.id) || {})
+                .filters || {};
+              if (saved[s0.key]) c.filters[s0.key] = { ...saved[s0.key] };
+            });
+          }
+        }
         for (const c of this.chosen) this.ensureFilters(c.id);
         this.rangeMode = pf.payload.range_mode || 'union';
         this.rollWeeks = pf.payload.roll_weeks || 26;
@@ -742,7 +766,7 @@ document.addEventListener('alpine:init', () => {
       return shown ? `${shown} of ${total}` : `nothing matches "${this.surfQuery}"`;
     },
 
-    async addSurfaceMetric(id, column) {
+    async addSurfaceMetric(id, column, after) {
       if (!column) return;
       const c = this.chosen.find(x => x.id === id);
       const meta = (this.surf.catalog || []).find(m => m.column_name === column);
@@ -765,6 +789,7 @@ document.addEventListener('alpine:init', () => {
       c.surface = [...c.surface, entry];
       this.tick++;
       await this.fetchSurface(c, entry);
+      if (after) { after(entry); this.recompute(); }
     },
 
     removeSurfaceMetric(id, key) {

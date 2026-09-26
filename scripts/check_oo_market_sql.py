@@ -764,6 +764,49 @@ async def check_portfolio_profiles(pool) -> None:
           "an unknown metric key was dropped; the registry decides what "
           "exists, not this table")
 
+    # ── THE ADDED SURFACE METRICS TRAVEL WITH THE PROFILE ────────────
+    # The filter VALUE already survived; without the list beside it the
+    # value comes back describing nothing, because bpSpecs walks the
+    # registry and not the filter map.
+    surf = await ps.save_profile(
+        pool, name="with surface", notes="",
+        payload={"strategies": [
+            {"id": 1, "qty": 1, "capital": 1000,
+             "surface": ["iv_30d_atm", "z_iv_30d_atm", "iv_30d_atm"],
+             "filters": {"surface__iv_30d_atm": {"on": True, "lo": 10.5, "hi": 13.0}}},
+            {"id": 2, "qty": 1, "capital": 1000}]})
+    back = await ps.load_profile(pool, surf["id"])
+    a, b = back["payload"]["strategies"]
+    check(a["surface"] == ["iv_30d_atm", "z_iv_30d_atm"],
+          f"the metric list survives, duplicates collapsed ({a['surface']})")
+    check(b["surface"] == [],
+          "a strategy with none gets an empty list, not a missing key")
+    check(a["filters"]["surface__iv_30d_atm"] == {"on": True, "lo": 10.5, "hi": 13.0},
+          "and its filter keeps the bounds it was saved with")
+    # SHAPE ONLY -- the catalog owns which columns exist, and a second list
+    # here would drift from it. What is rejected is what cannot be a column.
+    for bad, what in [(["../etc/passwd"], "a path"),
+                      (["a" * 201], "an absurd name"),
+                      ([f"m{i}" for i in range(25)], "more than the cap"),
+                      ("iv_30d_atm", "a bare string instead of a list"),
+                      ([123], "a number")]:
+        try:
+            await ps.save_profile(pool, name=f"bad surf {what}", notes="",
+                                  payload={"strategies": [{"id": 1, "surface": bad}]})
+            check(False, f"{what} was accepted as a surface metric")
+        except ValueError:
+            pass
+    # A column the catalog does not have is NOT rejected here: this table has
+    # no business holding a second copy of the catalog, and /surface/values
+    # refuses it at load time where the catalog actually is.
+    okd = await ps.save_profile(pool, name="future metric col", notes="",
+                                payload={"strategies": [{"id": 1, "surface": ["not_a_column_yet"]}]})
+    check((await ps.load_profile(pool, okd["id"]))["payload"]["strategies"][0]["surface"]
+          == ["not_a_column_yet"],
+          "an unknown column is stored as given, for the catalog to refuse later")
+    await ps.delete_profile(pool, surf["id"])
+    await ps.delete_profile(pool, okd["id"])
+
     lst = await ps.list_profiles(pool)
     check([x["name"] for x in lst][:1] == ["future metric"],
           f"profiles are not newest-updated first: {[x['name'] for x in lst]}")

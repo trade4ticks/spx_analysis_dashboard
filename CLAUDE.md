@@ -485,6 +485,35 @@ definitions won); the rolling pairwise window is in WEEKS. **Still to build:
 P6** — P&L distribution, trade overlap, and rolling risk metrics (the old
 app's 30/90/180 selector, to be decided in weeks or days).
 
+**Surface metrics as per-strategy filters** (2026-09-25/26). Any of the 452
+`surface_metrics_core` columns can be added to ONE strategy's filter panel;
+it appears on no other strategy's. Values come from the OO page's own
+`/surface/values` for every trade of that strategy (so later filter changes
+cost nothing) and are cached per `(strategy, metric)`; the catalog comes from
+`/surface/catalog`, lazily on first panel open, since it is a ~4s index walk
+on the VPS. `registryFor(c)` is the shared registry plus that strategy's
+added metrics and replaces `this.registry` at every site that is about ONE
+strategy. The pooled metric/PL correlation keeps built-ins only: pooling a
+metric one strategy has would report what the portfolio moved with from a
+third of its trades. **The coverage cost is stated before the slider moves**,
+split into "entered before its data starts" and "no bar at the entry time",
+because a surface filter silently dropping a third of a strategy is the
+hazard the whole feature carries. A profile stores the metric LIST, not the
+values (`clean_surface`, shape-checked only — the catalog owns what exists),
+and re-fetches on load; without the list the saved filter came back as a
+value describing nothing, since `bpSpecs` walks the registry and not the
+filter map.
+
+Three bugs the browser gate caught here, all of which would have shipped:
+`scaledCols` caches a COPY of the columns so a column added after it was
+built was invisible to every filter — and a range spec drops nulls, so the
+filter did not narrow the strategy, it emptied it; `obClampStep` rounds
+through `toPrecision(12)` so a ceil can land a float's breadth BELOW the true
+maximum, and a slider at its own maximum dropped the trades that set it
+(extents now snap outward and never inside, which fixes the built-in sliders
+too); and Alpine re-evaluates an `x-if`'s children as it tears down, so every
+`key().field` read needs the `(key() || {})` guard `rangeOf` already had.
+
 **P5: profiles are POINTERS, not snapshots.** A profile
 (`backtest_portfolio_profiles`, JSONB) holds the strategy ids with their qty,
 capital and filters, plus the range mode and rolling window — no trades and

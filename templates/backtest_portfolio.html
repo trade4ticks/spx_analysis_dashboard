@@ -665,24 +665,24 @@
              as what it is: neither condition holds there. #}
           <template x-if="liveKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + liveKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (liveKey() || {}).bg"></span>
               <span>
-                fewer than all <span x-text="liveKey().total"></span>
+                fewer than all <span x-text="(liveKey() || {}).total"></span>
                 strategies live
               </span>
             </div>
           </template>
           <template x-if="unfilteredKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + unfilteredKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (unfilteredKey() || {}).bg"></span>
               <span>
                 <b>not filtered</b> —
-                <span x-text="unfilteredKey().label"></span>
+                <span x-text="(unfilteredKey() || {}).label"></span>
                 has no data before
-                <span x-text="unfilteredKey().from"></span>, so the
-                <span x-text="unfilteredKey().n.toLocaleString()"></span>
+                <span x-text="(unfilteredKey() || {}).from"></span>, so the
+                <span x-text="(unfilteredKey() || {}).n.toLocaleString()"></span>
                 trades entered before that are drawn unfiltered. Ends at
-                <span x-text="unfilteredKey().to"></span>, the last of them to
+                <span x-text="(unfilteredKey() || {}).to"></span>, the last of them to
                 close.
                 <template x-if="(unfilteredKey() || {}).noBar">
                   <span>
@@ -698,7 +698,7 @@
           </template>
           <template x-if="bothKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + bothKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (bothKey() || {}).bg"></span>
               <span>both at once — the two shades compound, so this darker
                 tone is a stretch that is <b>neither fully staffed nor
                 filtered</b></span>
@@ -750,28 +750,28 @@
           </div>
           <template x-if="liveKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + liveKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (liveKey() || {}).bg"></span>
               <span>
-                fewer than all <span x-text="liveKey().total"></span>
+                fewer than all <span x-text="(liveKey() || {}).total"></span>
                 strategies live
               </span>
             </div>
           </template>
           <template x-if="unfilteredKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + unfilteredKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (unfilteredKey() || {}).bg"></span>
               <span>
                 <b>not filtered</b> —
-                <span x-text="unfilteredKey().label"></span>
+                <span x-text="(unfilteredKey() || {}).label"></span>
                 has no data before
-                <span x-text="unfilteredKey().from"></span>, so trades entered
+                <span x-text="(unfilteredKey() || {}).from"></span>, so trades entered
                 before that are drawn unfiltered here too.
               </span>
             </div>
           </template>
           <template x-if="bothKey()">
             <div class="bp-liveleg">
-              <span class="bp-livesw" :style="'background:' + bothKey().bg"></span>
+              <span class="bp-livesw" :style="'background:' + (bothKey() || {}).bg"></span>
               <span>both at once — the two shades compound, so this darker
                 tone is a stretch that is <b>neither fully staffed nor
                 filtered</b></span>

@@ -135,6 +135,11 @@ def build_page() -> str:
     return html.replace("</head>", (STUB % (json.dumps([a, b, old]), json.dumps(reg))) + "</head>", 1)
 
 
+# NOT a raw string, and it cannot casually become one: several sequences in
+# here are written for Python to process. The cost is that a JS apostrophe
+# escaped as a backslash-quote is EATEN at parse time, leaving an unterminated
+# JS string and a page that reports nothing at all. Use double quotes for any
+# JS string containing an apostrophe.
 STUB = """
 <script>
 window.__errs = [];
@@ -1090,6 +1095,55 @@ window.addEventListener('load', () => setTimeout(async () => {
   await cS2.addSurfaceMetric(sfSid, 'z_iv_30d_atm');
   await wait(200);
   ok('re-adding is served from the cache', window.__surfCalls.length, sfCalls);
+
+  // ── A PROFILE CARRIES THE ADDED METRICS ───────────────────────────
+  // The filter VALUE always survived. Without the list beside it the value
+  // came back describing nothing: bpSpecs walks the registry, not the
+  // filter map, so the slider was gone and the trades were not filtered --
+  // a filter you could see in the payload and not on the page.
+  const sfNarrow = { on: true, lo: sfM.min, hi: sfM.min + (sfM.max - sfM.min) / 2 };
+  sc.filters[sfM.key] = { ...sfNarrow };
+  cS2.recompute();
+  await wait(150);
+  const sfNarrowed = cS2.rows.find(r => r.id === sfSid).n;
+  ok('a narrowed surface filter drops more than the nulls',
+     sfNarrowed < sfBefore - sfCost.dropped, true);
+
+  cS2.profileName = 'surface book';
+  await cS2.saveProfile(false);
+  await wait(200);
+  const saved = window.__profiles.find(x => x.name === 'surface book');
+  ok('the profile saved', !!saved, true);
+  const savedStrat = saved.payload.strategies.find(x => x.id === sfSid);
+  ok('it carries the metric list',
+     savedStrat.surface.includes('iv_30d_atm')
+     && savedStrat.surface.includes('z_iv_30d_atm'), true);
+  ok('and the strategy with none carries an empty list',
+     (saved.payload.strategies.find(x => x.id === sfOther).surface || []).length, 0);
+
+  // Wipe the page, then bring it back from the profile alone.
+  cS2.clearAll();
+  await wait(120);
+  ok('cleared', cS2.chosen.length, 0);
+  cS2.profilePick = saved.id;
+  await cS2.loadProfile();
+  await wait(400);
+  const sc2 = cS2.chosen.find(c => c.id === sfSid);
+  ok('the strategies came back', cS2.chosen.length, 3);
+  ok('with their added metrics', (sc2.surface || []).length, 2);
+  ok('as real registry entries, not orphan filter keys',
+     cS2.registryFor(sc2).some(x => x.key === sfM.key), true);
+  ok('their values were refetched for this strategy',
+     (BP_DATA.payloads[sfSid].columns[sfM.column] || []).length,
+     BP_DATA.payloads[sfSid].n);
+  ok('the filter is still ON', (sc2.filters[sfM.key] || {}).on, true);
+  ok('with the bounds it was saved with, not the full range',
+     [sc2.filters[sfM.key].lo, sc2.filters[sfM.key].hi],
+     [sfNarrow.lo, sfNarrow.hi]);
+  ok('so the strategy is filtered exactly as it was',
+     cS2.rows.find(r => r.id === sfSid).n, sfNarrowed);
+  ok('and the badge is back on its card',
+     cS2.badges(sc2).some(b => b.key === sfM.key), true);
 
   } catch (e) {
     // A THROW IS A FINDING, not a lost run: without this the page simply

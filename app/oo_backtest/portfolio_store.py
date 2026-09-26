@@ -119,6 +119,40 @@ def clean_filters(raw) -> dict:
     return out
 
 
+MAX_SURFACE_PER_STRATEGY = 20
+
+
+def clean_surface(raw) -> list:
+    """The surface metrics ADDED to one strategy, as column names.
+
+    NO METRIC NAMES HERE EITHER, for the same reason clean_filters holds
+    none: the catalog owns which columns exist, and a second list in this
+    table would drift from it. Only the SHAPE is enforced -- a string of a
+    sane length that looks like a column -- and an unknown one is rejected
+    by /surface/values at load time, where the catalog actually is.
+
+    A profile stores the LIST, not the values: values are fetched per
+    strategy on load, so a saved profile cannot pin a metric to whatever the
+    surface table held on the day it was saved.
+    """
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("surface must be a list of column names.")
+    if len(raw) > MAX_SURFACE_PER_STRATEGY:
+        raise ValueError(f"{len(raw)} surface metrics on one strategy; "
+                         f"{MAX_SURFACE_PER_STRATEGY} is the most a profile holds.")
+    out = []
+    for col in raw:
+        if not isinstance(col, str) or not col or len(col) > 200:
+            raise ValueError(f"{col!r} is not a surface column name.")
+        if not col.replace("_", "").isalnum():
+            raise ValueError(f"{col!r} is not a surface column name.")
+        if col not in out:
+            out.append(col)
+    return out
+
+
 def clean_payload(raw) -> dict:
     """A page's state, checked into the shape the page reads back."""
     if not isinstance(raw, dict):
@@ -145,6 +179,7 @@ def clean_payload(raw) -> dict:
             "capital": _num(s.get("capital", 0), name="capital", lo=0,
                             hi=CAPITAL_MAX),
             "filters": clean_filters(s.get("filters")),
+            "surface": clean_surface(s.get("surface")),
         })
     mode = raw.get("range_mode", "union")
     if mode not in ("union", "intersection"):
