@@ -169,7 +169,7 @@ ORDER BY trade_date, quote_time"""
 SURFACE_BARS_SQL = """
 SELECT trade_date, quote_time, {col} AS v
 FROM {table}
-WHERE trade_date >= $1 AND {col} IS NOT NULL
+WHERE trade_date BETWEEN $1 AND $2 AND {col} IS NOT NULL
 ORDER BY trade_date, quote_time"""
 
 
@@ -188,7 +188,7 @@ async def fetch_bars(pool, src: str, sessions: list[str]) -> pd.Series:
             shift = BAR
         elif kind == "surface":
             rows = await conn.fetch(SURFACE_BARS_SQL.format(col=surface.quote_ident(name), table=surface.CORE),
-                                    days[0])
+                                    days[0], days[-1])
             shift = timedelta(0)
         else:
             raise ValueError(f"unknown source {src!r}")
@@ -271,7 +271,10 @@ class Board:
     are pure pandas over what was fetched."""
 
     def __init__(self, today: date):
+        # `today` is the day being evaluated: the real today, or a past
+        # session chosen on the page. Nothing after it is fetched or used.
         self.today = today
+        self.end = pd.Timestamp(today) + pd.Timedelta(days=1)
         self.depth: dict[str, int] = {}
         self.bars: dict[str, pd.Series] = {}
         self.errors: dict[str, str] = {}
@@ -305,9 +308,9 @@ class Board:
                 raise RuntimeError(f"{source_label(src)}: {self.errors[src]}")
         a = self.bars[m["a"]] if len(self.bars[m["a"]]) else _empty()
         b = (self.bars[m["b"]] if len(self.bars[m["b"]]) else _empty()) if m.get("op") else None
-        a = a[a.index >= since]
+        a = a[(a.index >= since) & (a.index < self.end)]
         if b is not None:
-            b = b[b.index >= since]
+            b = b[(b.index >= since) & (b.index < self.end)]
         return combine(a, m.get("op"), b)
 
     def series(self, m: dict, resolution: str, sessions: int) -> pd.Series:

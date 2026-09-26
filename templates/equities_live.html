@@ -626,8 +626,7 @@
                     @click="pane.toggleArm()"
                     :disabled="!tradingEnabled()"
                     :title="tradingEnabled()
-                      ? 'Only an armed pane can send an order. The server
-                         checks this too — it does not trust the button.'
+                      ? 'Only an armed pane can send an order. The server checks this too — it does not trust the button.'
                       : 'Live trading is disabled on the server.'"
                     x-text="pane.armed ? 'ARMED' : 'arm'"></button>
 
@@ -730,10 +729,7 @@
                           + '$' + Math.abs(pane.openPl()).toFixed(0)"></span>
 
             <span class="lv-sub"
-                  :title="'Total as the browser sees it, and the Schwab leg
-                           inside it. Part of the point of trading from here
-                           is knowing whether this beats the click it
-                           replaces.'"
+                  title="Total as the browser sees it, and the Schwab leg inside it. Part of the point of trading from here is knowing whether this beats the click it replaces."
                   x-text="'rt ' + pane.rtText()"></span>
           </div>
 

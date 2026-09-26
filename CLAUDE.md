@@ -682,6 +682,26 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
 - **`/board` is the one call**: each source fetched once for the deepest
   lookback any strategy asks of it; a failing metric is reported on that
   metric, never the page. Intraday charts are capped at 3 months.
+- **Every section shows WHY** (2026-09-26): a checklist row for the entry
+  day and for each condition — its value, what it needs, pass / fail /
+  no value, a multi-level condition listing every level — and a summary
+  naming the market verdict and whether the day blocked it.
+  `decide` returns `market_state`, what the conditions alone say, even on a
+  blocked day, so a Saturday reads "conditions → TRADE, blocked by the day".
+  A card carries one phrase only when the state did not come from the market
+  ("not an entry day", "a signal value is missing"); still no values.
+- **Charts shade the decision zones** of that one condition (the state each
+  value range leads to, at alpha 0.13), not the combined decision; with
+  several conditions the chart says so. `=` shades nothing.
+- **`/board?as_of=DATE` re-runs everything at that day's close**: its
+  weekday, its last observations, charts ending there; the surface query is
+  bounded above and every series clipped at the day's end. The page's date
+  picker pauses the 5-minute refresh and shows a "not live" banner.
+- **The topbar is the page's own markup around `_nav.html`** — the partial is
+  the menus only. This page first shipped with the bare include (no brand,
+  no grey bar); `check_nav` now fails any page without the Equities Live
+  block, with Backtest Portfolio, Equities Scan and Equities Wall listed as
+  known offenders (the list may only shrink).
 - **The panel opens on `editing`, never by nulling `draft`** — the Alpine
   teardown trap again (found by the browser gate: 13 TypeErrors on close).
   Selects whose options arrive by `x-for` after the model need `:selected`.
@@ -1140,6 +1160,13 @@ sudo useradd --system --create-home --shell /bin/bash gates
 sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
 sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
 ```
+
+**`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
+rendered with `request=None`; once `_nav.html` read `request.url.hostname`
+every page raised, was listed "SKIPPED", 0 expressions were checked, and the
+gate said PASS. It now uses the stub request, fails on a render error or an
+empty page, and checks ~6,900 expressions. It found two real errors at once —
+multi-line string literals in Equities Live `:title`s, dead tooltips.
 
 **`check_vendored` is green** (2026-09-26). It had failed for weeks on
 `scalp_config.py` / `scalp_metric_docs.py`, dismissed as pre-existing. It was

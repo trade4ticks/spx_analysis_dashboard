@@ -73,6 +73,27 @@
                 font-size:11px; color:var(--dim); white-space:pre-wrap; line-height:1.5; }
     .ss-notes b { color:var(--muted); font-weight:600; }
 
+    /* The checklist: one row per input to the decision. Pass/fail carries a
+       WORD as well as its colour, so it is never colour alone. */
+    .ss-why { border:1px solid var(--border); border-radius:6px; background:#262626;
+              padding:6px 10px; margin-bottom:12px; display:grid; gap:3px; }
+    .ss-why-row { display:grid; grid-template-columns:58px minmax(150px, max-content) 110px 1fr;
+                  gap:10px; align-items:baseline; font-size:12px; }
+    .ss-mark { font-size:10px; font-weight:800; letter-spacing:.5px; text-transform:uppercase; }
+    .ss-mark.pass, .ss-need.pass .ss-need-mark { color:#3498db; }
+    .ss-mark.fail, .ss-need.fail .ss-need-mark { color:#e84393; }
+    .ss-mark.none, .ss-need.none .ss-need-mark { color:var(--dim); }
+    .ss-why-name { font-weight:600; color:var(--text); }
+    .ss-why-val { font-variant-numeric:tabular-nums; font-weight:700; color:var(--text); }
+    .ss-why-need { display:flex; flex-wrap:wrap; gap:10px; color:var(--muted); }
+    .ss-need { white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .ss-need-mark { font-size:9.5px; font-weight:800; letter-spacing:.4px; text-transform:uppercase; }
+    .ss-why-sum { font-size:11px; color:var(--muted); border-top:1px solid var(--border);
+                  margin-top:4px; padding-top:5px; }
+    .ss-past { border:1px solid var(--border); border-left:3px solid var(--muted); border-radius:4px;
+               background:var(--surface); color:var(--text); font-size:12px; padding:7px 10px; margin-bottom:12px; }
+    input[type=date].ss-in { color-scheme:dark; }
+
     /* ── configuration panel ── */
     .ss-cfg { background:var(--surface); border:1px solid var(--accent); border-radius:8px;
               margin-bottom:18px; padding:12px 14px; }
@@ -104,19 +125,33 @@
   </style>
 </head>
 <body class="page" x-data="strategySignal">
-  {% set nav_active = "/strategy-signal" %}{% include "_nav.html" %}
+  {#- The topbar is each page's own markup around the shared _nav.html;
+      this is Equities Live's, verbatim. check_nav fails a page without it. -#}
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    {% set nav_active = "/strategy-signal" %}{% include "_nav.html" %}
+    <div class="topbar-right">
+      <span x-text="boardSub()"></span>
+    </div>
+  </div>
 
   <div class="ss-main">
 
     <div class="ss-bar">
       <span class="ss-title">Strategy Signal</span>
-      <span class="ss-sub" x-text="boardSub()"></span>
       <span class="ss-grow"></span>
+      <span class="ss-lbl">Evaluate at</span>
+      <input class="ss-in" type="date" :max="todayIso()" :value="evalDate || todayIso()"
+             @change="pickDate($event.target.value)" title="Re-run every strategy at the close of a past session">
+      <button class="ss-btn" @click="pickDate('')" :disabled="!evalDate">Live</button>
       <button class="ss-btn" @click="loadBoard()" :disabled="loading">Refresh</button>
       <button class="ss-btn pri" @click="newStrategy()" :disabled="editing">+ Add Strategy</button>
     </div>
 
     <template x-if="error"><div class="ss-err" x-text="error"></div></template>
+    <template x-if="board && !board.live">
+      <div class="ss-past" x-text="pastBanner()"></div>
+    </template>
 
     <!-- ── configuration panel: Add or Edit, collapses on save ─────────────
          Opened by `editing`, never by nulling `draft`: Alpine re-evaluates an
@@ -306,6 +341,7 @@
               <template x-for="(r, ri) in e.strategy.manual" :key="ri"><span x-text="r"></span></template>
             </div>
           </template>
+          <template x-if="cardNote(e)"><div class="ss-stale" x-text="cardNote(e)"></div></template>
           <template x-if="e.stale"><div class="ss-stale">⚠ data not current</div></template>
         </div>
       </template>
@@ -326,6 +362,25 @@
           <button class="ss-btn sm" @click="editStrategy(e)" :disabled="editing">Edit</button>
         </div>
         <div class="ss-sec-body">
+          <!-- WHY: every input to the decision, its value, what it needs,
+               and whether it passed. The verdict alone cannot be checked. -->
+          <div class="ss-why">
+            <template x-for="(row, ri) in whyRows(e)" :key="ri">
+              <div class="ss-why-row">
+                <span class="ss-mark" :class="row.mark" x-text="markText(row.mark)"></span>
+                <span class="ss-why-name" x-text="row.name"></span>
+                <span class="ss-why-val" x-text="row.value"></span>
+                <span class="ss-why-need">
+                  <template x-for="(p, pi) in row.needs" :key="pi">
+                    <span class="ss-need" :class="p.mark">
+                      <span x-text="p.text"></span> <span class="ss-need-mark" x-text="markText(p.mark)"></span>
+                    </span>
+                  </template>
+                </span>
+              </div>
+            </template>
+            <div class="ss-why-sum" x-text="summaryLine(e)"></div>
+          </div>
           <template x-if="e.strategy.manual.length">
             <div class="ss-manual" :class="!showManual(e) && 'quiet'">
               <template x-for="(r, ri) in e.strategy.manual" :key="ri">
@@ -340,7 +395,7 @@
               <div class="ss-chart">
                 <div class="ss-chart-hdr">
                   <span class="ss-chart-t" x-text="metricInfo(e, m.id).label"></span>
-                  <span class="ss-chart-s" x-text="chartSub(m)"></span>
+                  <span class="ss-chart-s" x-text="chartSub(e, m)"></span>
                 </div>
                 <template x-if="metricInfo(e, m.id).error">
                   <div class="ss-err" x-text="metricInfo(e, m.id).error"></div>

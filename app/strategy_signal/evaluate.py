@@ -74,15 +74,22 @@ def decide(cfg: dict, values: dict, iso_weekday: int) -> dict:
              for m in signal]
     out = {"conditions": conds, "levels": [], "weekday": iso_weekday,
            "weekday_ok": iso_weekday in cfg["weekdays"]}
+    # What the conditions ALONE say, worked out even on a day the weekday
+    # blocks -- so a Saturday reads "the market says TRADE, the day says no"
+    # rather than a bare NO TRADE nobody can see the reason for.
+    market, market_reason = 0, "no_conditions"
+    if conds:
+        market, market_reason = last, "conditions"
+        for i in range(last):
+            r = combine([c["passes"][i] for c in conds], cfg["logic"])
+            out["levels"].append(r)
+            if r is None:
+                market, market_reason = None, "no_data"
+                break
+            if r:
+                market = i
+                break
+    out.update(market_state=market, market_reason=market_reason)
     if not out["weekday_ok"]:
         return {**out, "state": last, "reason": "weekday"}
-    if not conds:
-        return {**out, "state": 0, "reason": "no_conditions"}
-    for i in range(last):
-        r = combine([c["passes"][i] for c in conds], cfg["logic"])
-        out["levels"].append(r)
-        if r is None:
-            return {**out, "state": None, "reason": "no_data"}
-        if r:
-            return {**out, "state": i, "reason": "conditions"}
-    return {**out, "state": last, "reason": "conditions"}
+    return {**out, "state": market, "reason": market_reason}

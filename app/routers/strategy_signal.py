@@ -2,9 +2,11 @@
 
 GET  /sources               what a strategy can name (index series, surface
                             columns, operators, transforms, lookbacks)
-GET  /board                 every strategy, its decision and its charts --
+GET  /board[?as_of=DATE]    every strategy, its decision and its charts --
                             the one call the page makes, and remakes every
-                            five minutes
+                            five minutes. With as_of, the same logic run at
+                            the CLOSE of that day: its weekday, its last
+                            observations, charts ending there.
 POST /strategies            create; PUT /strategies/{id} replace;
 DELETE /strategies/{id};    POST /strategies/{id}/move {"direction": -1|1}
 
@@ -17,10 +19,14 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import date
+
+import pandas as pd
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from app.db import get_pool
+from app.oo_backtest import market_calendar as cal
 from app.strategy_signal import evaluate as ev, library as lib, store
 
 log = logging.getLogger(__name__)
@@ -44,10 +50,31 @@ def _num(v):
     return None if v is None or not math.isfinite(v) else round(float(v), 8)
 
 
+WEEKDAY_FULL = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday",
+                6: "Saturday", 7: "Sunday"}
+
+
+def _when(as_of: str | None):
+    """(the moment evaluated, live?). A past day is evaluated after its
+    close, so its last bar is the session close and its data is not stale."""
+    real = lib.now_et()
+    if not as_of:
+        return real, True
+    try:
+        d = date.fromisoformat(as_of)
+    except ValueError:
+        raise HTTPException(400, f"as_of must be a date (YYYY-MM-DD), not {as_of!r}.")
+    if d > real.date():
+        raise HTTPException(400, f"{as_of} is in the future.")
+    if d == real.date():
+        return real, True
+    return pd.Timestamp(f"{d.isoformat()} 16:05", tz=lib.TZ), False
+
+
 @router.get("/board")
-async def board(pool=Depends(get_pool)):
+async def board(as_of: str | None = None, pool=Depends(get_pool)):
+    now, live = _when(as_of)
     strategies = await store.list_strategies(pool)
-    now = lib.now_et()
     b = lib.Board(now.date())
     for s in strategies:
         for m in s["metrics"]:
@@ -81,7 +108,9 @@ async def board(pool=Depends(get_pool)):
         used = {m["id"] for m in s["metrics"] if m.get("signal")}
         out.append({"strategy": s, "decision": decision, "metrics": metrics, "charts": charts,
                     "stale": any(x["stale"] for x in metrics if x["id"] in used)})
-    return {"now": now.strftime("%Y-%m-%d %H:%M"), "weekday": ev.WEEKDAY_NAMES[now.isoweekday()],
+    return {"now": now.strftime("%Y-%m-%d %H:%M"), "date": now.date().isoformat(), "live": live,
+            "weekday": ev.WEEKDAY_NAMES[now.isoweekday()], "weekday_full": WEEKDAY_FULL[now.isoweekday()],
+            "weekday_names": WEEKDAY_FULL, "is_session": cal.is_session(now.date()),
             "expected_session": expected, "strategies": out}
 
 

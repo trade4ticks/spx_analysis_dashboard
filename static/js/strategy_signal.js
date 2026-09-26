@@ -35,11 +35,80 @@ function ssFmt(v) {
   return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
 
+/* One comparison, as the server makes it (evaluate.compare). Used only to
+ * decide which side of a threshold to shade; the decision is the server's. */
+function ssCompare(v, cmp, t) {
+  if (cmp === '<') return v < t;
+  if (cmp === '<=') return v <= t;
+  if (cmp === '>') return v > t;
+  if (cmp === '>=') return v >= t;
+  return Math.abs(v - t) <= 1e-9 * Math.max(1, Math.abs(t));
+}
+
+const SS_ZONE_ALPHA = 0.13;
+
+function ssRgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+/* The decision zones of ONE condition on its own axis: the value ranges
+ * between its thresholds, each labelled with the state that range leads to
+ * (the first level whose threshold it passes, else the last state), in that
+ * state's colour. Adjacent ranges with the same state merge. `=` has no
+ * range to shade -- only the line itself passes. */
+function ssZones(cmp, thresholds, n) {
+  if (cmp === '=' || !thresholds.length) return [];
+  const pts = [...new Set(thresholds)].sort((a, b) => a - b);
+  const edges = [null, ...pts, null];
+  const zones = [];
+  for (let k = 0; k < edges.length - 1; k++) {
+    const lo = edges[k], hi = edges[k + 1];
+    const probe = lo === null ? hi - 1 : hi === null ? lo + 1 : (lo + hi) / 2;
+    let st = thresholds.findIndex(t => ssCompare(probe, cmp, t));
+    if (st < 0) st = n - 1;
+    const last = zones[zones.length - 1];
+    if (last && last.state === st) last.hi = hi;
+    else zones.push({ lo, hi, state: st, color: ssRgba(ssStateColor(n, st), SS_ZONE_ALPHA) });
+  }
+  return zones;
+}
+
+/* Draws the zones behind the data, clipped to the plot area. */
+const ssZonePlugin = {
+  id: 'ssZones',
+  beforeDatasetsDraw(chart, args, opts) {
+    const zones = opts && opts.zones;
+    if (!zones || !zones.length) return;
+    const { ctx, chartArea: a, scales: { y } } = chart;
+    ctx.save();
+    for (const z of zones) {
+      const top = z.hi === null ? a.top : Math.max(a.top, Math.min(a.bottom, y.getPixelForValue(z.hi)));
+      const bot = z.lo === null ? a.bottom : Math.max(a.top, Math.min(a.bottom, y.getPixelForValue(z.lo)));
+      if (bot > top) { ctx.fillStyle = z.color; ctx.fillRect(a.left, top, a.right - a.left, bot - top); }
+    }
+    ctx.restore();
+  },
+};
+
+/* [1,2,3,4] -> "Mon–Thu"; [1,3,5] -> "Mon, Wed, Fri". */
+function ssDaysText(days) {
+  const d = [...days].sort((a, b) => a - b);
+  const runs = [];
+  for (const x of d) {
+    const r = runs[runs.length - 1];
+    if (r && x === r[1] + 1) r[1] = x; else runs.push([x, x]);
+  }
+  const nm = i => SS_WEEKDAYS[i - 1].label;
+  return runs.map(([a, b]) => (a === b ? nm(a) : b === a + 1 ? `${nm(a)}, ${nm(b)}` : `${nm(a)}–${nm(b)}`)).join(', ');
+}
+
 function ssUid() { return 'm' + Math.random().toString(36).slice(2, 8); }
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('strategySignal', () => ({
     board: null,
+    evalDate: '',         // '' = live; else a past date evaluated at its close
     loading: false,
     error: '',
     sources: null,
@@ -53,7 +122,7 @@ document.addEventListener('alpine:init', () => {
 
     init() {
       this.loadBoard();
-      setInterval(() => { if (!this.editing) this.loadBoard(); }, SS_REFRESH_MS);
+      setInterval(() => { if (!this.editing && !this.evalDate) this.loadBoard(); }, SS_REFRESH_MS);
     },
 
     // ── the board ────────────────────────────────────────────────────────
@@ -61,7 +130,8 @@ document.addEventListener('alpine:init', () => {
       if (this.loading) return;
       this.loading = true;
       try {
-        const r = await fetch('/api/strategy-signal/board');
+        const q = this.evalDate ? `?as_of=${encodeURIComponent(this.evalDate)}` : '';
+        const r = await fetch('/api/strategy-signal/board' + q);
         if (!r.ok) throw new Error(`board: HTTP ${r.status} ${(await r.text()).slice(0, 300)}`);
         this.board = await r.json();
         this.error = '';
@@ -77,7 +147,73 @@ document.addEventListener('alpine:init', () => {
 
     boardSub() {
       if (!this.board) return this.loading ? 'loading…' : '';
+      if (!this.board.live) return `As of the close of ${this.board.weekday} ${this.board.date}`;
       return `${this.board.weekday} ${this.board.now} ET · refreshes every 5 min`;
+    },
+
+    todayIso() {
+      const d = new Date();
+      return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    },
+
+    pickDate(v) {
+      this.evalDate = v && v !== this.todayIso() ? v : '';
+      this.loadBoard();
+    },
+
+    pastBanner() {
+      const b = this.board;
+      const shut = b.is_session ? '' : " The exchange was closed that day, so the data is the previous session's.";
+      return `Evaluated at the close of ${b.weekday_full} ${b.date}, not live — the same rules run on ` +
+             `that day's last observations, with charts ending there.${shut}`;
+    },
+
+    markText(m) { return m === 'pass' ? 'pass' : m === 'fail' ? 'fail' : 'no value'; },
+
+    /* Every input to the decision as a row: the entry day first, then each
+     * signal condition with its current value and what it needs. A
+     * multi-level condition lists each level's threshold with its own
+     * pass/fail, because "which level did this reach" is the question. */
+    whyRows(e) {
+      const b = this.board, s = e.strategy, d = e.decision, n = s.states.length;
+      const shut = !b.is_session && d.weekday <= 5 ? ' (market closed)' : '';
+      const rows = [{
+        name: 'Entry day', value: b.weekday_full + shut, mark: d.weekday_ok ? 'pass' : 'fail',
+        needs: [{ text: 'needs ' + ssDaysText(s.weekdays), mark: d.weekday_ok ? 'pass' : 'fail' }],
+      }];
+      for (const c of d.conditions) {
+        const m = s.metrics.find(x => x.id === c.metric) || { thresholds: [] };
+        const needs = c.passes.map((p, i) => ({
+          text: `${n > 2 ? s.states[i] + ' ' : 'needs '}${c.cmp} ${ssFmt(m.thresholds[i])}`,
+          mark: p === null ? 'none' : p ? 'pass' : 'fail' }));
+        const best = c.passes.findIndex(p => p === true);
+        const mark = c.value === null ? 'none' : (n > 2 ? (best >= 0 ? 'pass' : 'fail') : needs[0].mark);
+        rows.push({ name: this.metricInfo(e, c.metric).label, value: ssFmt(c.value), mark, needs });
+      }
+      return rows;
+    },
+
+    /* The verdict in words, naming what decided it. */
+    summaryLine(e) {
+      const s = e.strategy, d = e.decision, logic = s.logic.toUpperCase();
+      const st = i => (i === null ? 'NO DATA' : s.states[i]);
+      const market = d.market_reason === 'no_conditions'
+        ? 'No signal conditions'
+        : d.market_state === null
+          ? `Conditions (${logic}) cannot be decided — a value is missing`
+          : `Conditions (${logic}) alone → ${st(d.market_state)}`;
+      if (d.reason === 'weekday') {
+        return `${market} · blocked: ${this.board.weekday_full} is not an entry day → ${st(d.state)}`;
+      }
+      return `${market} · entry day ok → ${st(d.state)}`;
+    },
+
+    /* The one phrase a card carries, and only when the state did not come
+     * from the market: a blocked day, or missing data. No values. */
+    cardNote(e) {
+      if (e.decision.reason === 'weekday') return `not an entry day (${this.board.weekday})`;
+      if (e.decision.reason === 'no_data') return 'a signal value is missing';
+      return '';
     },
 
     stateIndex(e) { return e.decision.state; },
@@ -139,10 +275,12 @@ document.addEventListener('alpine:init', () => {
 
     chartMetrics(e) { return e.strategy.metrics.filter(m => m.chart); },
 
-    chartSub(m) {
+    chartSub(e, m) {
+      const several = e.strategy.metrics.filter(x => x.signal).length > 1;
       const lb = { '5d': '5 days', '10d': '10 days', '1m': '1 month', '3m': '3 months',
                    '6m': '6 months', '1y': '1 year', '2y': '2 years' }[m.lookback] || m.lookback;
-      return `${m.resolution === 'intraday' ? '5-min' : 'daily'} · ${lb}`;
+      const shade = m.signal && m.cmp !== '=' && several ? ' · shading: this condition alone' : '';
+      return `${m.resolution === 'intraday' ? '5-min' : 'daily'} · ${lb}${shade}`;
     },
 
     canvasId(e, m) { return `ss-c-${e.strategy.id}-${m.id}`; },
@@ -192,7 +330,7 @@ document.addEventListener('alpine:init', () => {
         m.thresholds.forEach((th, i) => {
           datasets.push({ label: `${m.cmp} ${ssFmt(th)} → ${e.strategy.states[i]}`,
                           data: [{ x: 0, y: th }, { x: Math.max(t.length - 1, 1), y: th }],
-                          borderColor: ssStateColor(n, i), borderWidth: 1.4, borderDash: [5, 4],
+                          borderColor: ssStateColor(n, i), borderWidth: 1, borderDash: [5, 4],
                           pointRadius: 0, pointHoverRadius: 0, isThreshold: true });
         });
       }
@@ -207,6 +345,7 @@ document.addEventListener('alpine:init', () => {
         animation: false, responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'nearest', axis: 'x', intersect: false },
         plugins: {
+          ssZones: { zones: m.signal ? ssZones(m.cmp, m.thresholds, n) : [] },
           legend: { display: !!m.signal, position: 'top', align: 'end',
                     labels: { color: '#c8c8c8', boxWidth: 14, boxHeight: 1, font: { size: 10 },
                               filter: item => item.datasetIndex > 0 } },
@@ -248,7 +387,8 @@ document.addEventListener('alpine:init', () => {
         SS_CHARTS[id].options = opts;
         SS_CHARTS[id].update('none');
       } else {
-        SS_CHARTS[id] = new Chart(el.getContext('2d'), { type: 'line', data: { datasets }, options: opts });
+        SS_CHARTS[id] = new Chart(el.getContext('2d'), { type: 'line', data: { datasets }, options: opts,
+                                                          plugins: [ssZonePlugin] });
       }
     },
 

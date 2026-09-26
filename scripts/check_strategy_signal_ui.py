@@ -40,6 +40,7 @@ EDGE_CANDIDATES = [
     "/usr/bin/microsoft-edge", "/usr/bin/chromium", "/usr/bin/google-chrome",
 ]
 NOW = pd.Timestamp("2026-09-22 14:30", tz="America/New_York")   # a Tuesday
+PAST = "2026-09-18"                                              # the Friday before
 
 STRATEGIES = [
     {"id": 1, "position": 1, "name": "Skew allocation", "weekdays": [1, 2, 3, 4, 5],
@@ -126,21 +127,24 @@ def board_json() -> str:
         return json.loads(json.dumps(STRATEGIES))
 
     lib.fetch_bars, store.list_strategies, lib.now_et = fetch, listing, (lambda: NOW)
-    return json.dumps(asyncio.run(router.board(pool=None)))
+    # Live (a Tuesday) and a past Friday, both from the real router.
+    return json.dumps({"live": asyncio.run(router.board(as_of=None, pool=None)),
+                       "past": asyncio.run(router.board(as_of=PAST, pool=None))})
 
 
 DRIVER = r"""
 <script>
 (function () {
   const errs = [];
-  window.addEventListener('error', e => errs.push('onerror: ' + e.message));
+  window.addEventListener('error', e => errs.push('onerror: ' + e.message + ' @ ' + String((e.error && e.error.stack) || '').split('\n').slice(1, 4).join(' ')));
   const ce = console.error.bind(console);
   console.error = (...a) => { errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); };
   const sent = [];
   window.fetch = async (url, opts) => {
     const u = String(url), m = (opts && opts.method) || 'GET';
     const ok = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
-    if (u.endsWith('/board')) return ok(BOARD);
+    if (u.endsWith('/board')) return ok(BOARDS.live);
+    if (u.endsWith('/board?as_of=' + BOARDS.past.date)) return ok(BOARDS.past);
     if (u.endsWith('/sources')) return ok(SOURCES);
     if (u.includes('/strategies')) { sent.push({ u, m, body: opts && opts.body }); return ok({ strategy: {} }); }
     return { ok: false, status: 404, json: async () => ({}), text: async () => 'no stub for ' + u };
@@ -187,6 +191,51 @@ DRIVER = r"""
     eq('Friday reason', txt(secs[2].querySelector('.ss-reason')), 'Not an entry day — Fri only');
     eq('notes are a footnote, not a box', [txt(secs[0].querySelector('.ss-notes')), secs[0].querySelectorAll('textarea').length],
        ['Notes. Allocation scales down as 90d skew gets rich against its own year.', 0]);
+
+    // ── the topbar is the other pages' ───────────────────────────────────
+    eq('topbar with the brand', [!!$('.topbar > .brand'), txt($('.topbar > .brand')), !!$('.topbar > nav.topbar-nav')],
+       [true, 'PinkBlueLabs', true]);
+
+    // ── why: every input with its value and what it needs ───────────────
+    const why = i => [...secs[i].querySelectorAll('.ss-why-row')].map(r =>
+      [...r.children].map(c => txt(c)));
+    const vrNow = BOARD.strategies[1].metrics.find(m => m.id === 'r').value;
+    const w1 = why(1);
+    eq('checklist: entry day row', w1[0], ['pass', 'Entry day', 'Tuesday', 'needs Mon–Fri pass']);
+    eq('checklist: VIX/VIX9D shows its value and need', w1[1],
+       ['pass', 'VIX / VIX9D', ssFmt(vrNow), 'needs < 1.140 pass']);
+    eq('checklist: one row per condition + the day', w1.length, 3);
+    eq('checklist: Friday strategy says why', why(2)[0], ['fail', 'Entry day', 'Tuesday', 'needs Fri fail']);
+    eq('summary names the market verdict and the block', txt(secs[2].querySelector('.ss-why-sum')),
+       'Conditions (AND) alone → TRADE · blocked: Tuesday is not an entry day → NO TRADE');
+    eq('multi-level condition lists every level', why(0)[1].slice(0, 2).concat([why(0)[1][3].split(' ').length > 6]),
+       ['pass', '90d skew pctl', true]);
+    eq('missing value reads "no value"', why(3)[1].slice(0, 3), ['no value', 'iv_30d_atm', '—']);
+    eq('card says the day blocked it', txt(cards[2].querySelector('.ss-stale')), 'not an entry day (Tue)');
+    eq('a market verdict card carries no note', cards[1].querySelectorAll('.ss-stale').length, 0);
+
+    // ── zones: trade side blue, no-trade side pink, dimmed ──────────────
+    if (vr && pct) {
+      const z = vr.options.plugins.ssZones.zones;
+      eq('binary zones: below 1.14 blue, above pink', z.map(q => [q.lo, q.hi, q.color]),
+         [[null, 1.14, 'rgba(52, 152, 219, 0.13)'], [1.14, null, 'rgba(232, 67, 147, 0.13)']]);
+      eq('allocation zones: one per state', pct.options.plugins.ssZones.zones.map(q => q.state), [0, 1, 2, 3]);
+      eq('visualisation-only chart has no zones', raw.options.plugins.ssZones.zones.length, 0);
+    }
+
+    // ── a past date re-runs the rules at that close ─────────────────────
+    const dateIn = $('.ss-bar input[type=date]');
+    setVal(dateIn, BOARDS.past.date);
+    for (let i = 0; i < 40 && !$('.ss-past'); i++) await wait(50);
+    await wait(200);
+    eq('past date shows the banner', txt($('.ss-past')).startsWith('Evaluated at the close of Friday 2026-09-18'), true);
+    eq('Friday-only strategy trades on that Friday', txt($$('.ss-card')[2].querySelector('.ss-pill')), 'TRADE');
+    const vrPast = Chart.getChart(document.getElementById('ss-c-2-r'));
+    eq('charts end on the chosen day', vrPast && BOARDS.past.strategies[1].charts.r.t.slice(-1)[0], '2026-09-18 16:00');
+    eq('the drawn chart is the past one', vrPast && vrPast.data.datasets[0].data.length, BOARDS.past.strategies[1].charts.r.t.length);
+    $$('.ss-bar .ss-btn').find(b => txt(b) === 'Live').click();
+    for (let i = 0; i < 40 && $('.ss-past'); i++) await wait(50);
+    eq('Live returns to today', [!!$('.ss-past'), txt($$('.ss-card')[2].querySelector('.ss-pill'))], [false, 'NO TRADE']);
 
     // Add → fill → Save
     $$('.ss-bar .ss-btn').find(b => txt(b) === '+ Add Strategy').click();
@@ -243,7 +292,15 @@ DRIVER = r"""
                       '\npayload|' + JSON.stringify(window.__payload || {});
     document.body.appendChild(pre);
   }
-  document.addEventListener('alpine:initialized', () => setTimeout(run, 50));
+  // A throw inside the driver is reported, not swallowed into "never reported".
+  const guarded = () => run().catch(err => {
+    out.push(`FAIL|the driver threw|${String(err && err.stack || err).replace(/\n/g, ' ')}|nothing`);
+    const pre = document.createElement('pre');
+    pre.id = 'report';
+    pre.textContent = out.join('\n') + '\nerrs|' + (errs.length ? errs.join(' ;; ') : 'clean');
+    document.body.appendChild(pre);
+  });
+  document.addEventListener('alpine:initialized', () => setTimeout(guarded, 50));
 })();
 </script>
 """
@@ -272,7 +329,7 @@ def build_page(board: str) -> str:
     html = re.sub(r'<link rel="stylesheet" href=[^>]*css/([a-z_]+\.css)[^>]*>',
                   lambda m: "<style>\n" + (ROOT / "static/css" / m.group(1)).read_text(encoding="utf-8") + "\n</style>",
                   html)
-    stub = f"<script>const BOARD = {board}; const SOURCES = {json.dumps(SOURCES)};</script>" + DRIVER
+    stub = f"<script>const BOARDS = {board}; const BOARD = BOARDS.live; const SOURCES = {json.dumps(SOURCES)};</script>" + DRIVER
     html = re.sub(r"<script src=[^>]*?/static/js/([a-z_]+\.js)[^>]*></script>",
                   lambda m: (stub if m.group(1) == "strategy_signal.js" else "") + "<script>\n" +
                   (ROOT / "static/js" / m.group(1)).read_text(encoding="utf-8") + "\n</script>", html)
@@ -290,7 +347,7 @@ def main() -> int:
     try:
         if "--shot" in sys.argv:
             shot = sys.argv[sys.argv.index("--shot") + 1]
-            html = tmp.read_text(encoding="utf-8").replace("setTimeout(run, 50)", "0")
+            html = tmp.read_text(encoding="utf-8").replace("setTimeout(guarded, 50)", "0")
             shot_page = ROOT / "scripts" / "_strategy_signal_shot.html"
             shot_page.write_text(html, encoding="utf-8")
             subprocess.run([browser, "--headless=new", "--disable-gpu", "--window-size=1500,2600",

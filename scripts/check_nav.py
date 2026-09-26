@@ -152,6 +152,18 @@ def pages() -> list[tuple[str, str]]:
     return out
 
 
+# THE TOPBAR IS NOT IN THE PARTIAL. _nav.html is the menus only; each page
+# wraps it in its own `.topbar` with the PinkBlueLabs brand. A page that
+# includes the bare partial renders a nav with no brand and no grey bar --
+# which is how Strategy Signal shipped (2026-09-26) with every other nav
+# check green. These pages had already done the same; they are listed so the
+# rule can hold for everything else, and the list may only shrink.
+TOPBAR_MISSING_KNOWN = {"backtest_portfolio.html", "equities_scan.html", "equities_wall.html"}
+_TOPBAR = re.compile(
+    r'<div class="topbar">\s*<div class="brand">(?:(?!</div>).)*Pink(?:(?!</div>).)*Blue'
+    r'(?:(?!</div>).)*Labs(?:(?!</div>).)*</div>\s*<nav class="topbar-nav">', re.S)
+
+
 def main() -> int:
     e = env()
     found = pages()
@@ -166,6 +178,13 @@ def main() -> int:
         except Exception as exc:                          # noqa: BLE001
             FAILS.append(f"{name} failed to render: {type(exc).__name__}: {exc}")
             continue
+        has_bar = bool(_TOPBAR.search(html))
+        if name in TOPBAR_MISSING_KNOWN:
+            check(not has_bar, f"{name} now has its topbar -- remove it from TOPBAR_MISSING_KNOWN")
+        else:
+            check(has_bar, f"{name}: the nav is not inside a .topbar with the PinkBlueLabs brand "
+                           f"before it -- copy the block from equities_live.html")
+
         nav = Nav()
         nav.feed(html)
 
