@@ -169,6 +169,13 @@ GATES = [
        note="the buttons a person presses actually do their thing"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
+    # Strategy Signal: the decision rule, the percentile, the index/surface
+    # clock and the config store, offline; then the page clicked in Edge
+    # against the real router's output over fabricated bars.
+    _s("check_strategy_signal.py",
+       note="decision, percentile, one clock, one fetch per source, store"),
+    _s("check_strategy_signal_ui.py", can_skip=True,
+       note="cards, charts, Add/Save/Edit clicked; console clean"),
 
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",

@@ -42,7 +42,7 @@ LIVE_PORT = 8001
 # a gate that derives its expectation from the file it is checking agrees
 # with every edit, including the wrong ones.
 EXPECTED = [
-    ("SPX", ["Dashboard", "Heatmap", "Today"]),
+    ("SPX", ["Dashboard", "Heatmap", "Today", "Strategy Signal"]),
     ("Factor", ["Factor Analysis", "Factor Signals", "Factor Trades"]),
     ("Equity", ["Equity IV", "Ticker Analysis"]),
     ("Scalp", ["Equities Scalp", "Equities Live", "Equities Wall",
@@ -155,8 +155,8 @@ def pages() -> list[tuple[str, str]]:
 def main() -> int:
     e = env()
     found = pages()
-    check(len(found) >= 17,
-          f"only {len(found)} page templates include the nav; there were 17 "
+    check(len(found) >= 18,
+          f"only {len(found)} page templates include the nav; there were 18 "
           f"— has a page been dropped from it")
 
     keys_seen: dict[str, str] = {}

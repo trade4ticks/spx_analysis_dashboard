@@ -18,7 +18,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp, oo_backtest, backtest_portfolio
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp, oo_backtest, backtest_portfolio, strategy_signal
 from app.routers import replay as replay_router
 
 BASE_DIR = Path(__file__).parent.parent  # project root
@@ -127,6 +127,9 @@ app.include_router(oo_backtest.router,      prefix="/api/oo-backtest")
 # oo_backtest's parse/join/payload path and the two must not look like one
 # API split across two mount points.
 app.include_router(backtest_portfolio.router)
+# Strategy Signal: saved strategy configs and one board call that decides
+# them all. Carries its own /api/strategy-signal prefix, like the portfolio.
+app.include_router(strategy_signal.router)
 
 # REPLAY reads PARQUET, not Postgres, and carries its own /api/replay
 # prefix rather than sitting under equities-scalp. It shares the page and
@@ -138,6 +141,11 @@ app.include_router(replay_router.router)
 @app.get("/today")
 async def today_page(request: Request):
     return templates.TemplateResponse(request, "today.html")
+
+
+@app.get("/strategy-signal")
+async def strategy_signal_page(request: Request):
+    return templates.TemplateResponse(request, "strategy_signal.html")
 
 
 @app.get("/heatmap")

@@ -641,6 +641,56 @@ OO page before and after to an identical PNG.
 - `SPEARMAN_METRICS` is a hardcoded list including the dropped SharpTwo/skew
   metrics; we use the registry.
 
+## Strategy Signal (`/strategy-signal`, SPX menu — 2026-09-26)
+
+A glance page: is each configured strategy eligible to enter right now?
+Summary cards (name, the metrics that decide, one large state — **no values,
+no prose**), then one section per strategy (state, charts, CHECK list, notes
+as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
+`store.py`), `app/routers/strategy_signal.py`, `templates/strategy_signal.html`,
+`static/js/strategy_signal.js`.
+
+- **Config is one JSONB row per strategy** (`strategy_signal_strategies`,
+  lazy `CREATE TABLE IF NOT EXISTS`, the portfolio-profile pattern), validated
+  into shape by `store.clean_config`; sources are checked against the live
+  catalog, so only an existing metric can be saved.
+- **A metric is a source, or A op B (+ − × ÷, not nested), with an optional
+  transform.** Sources: `surface:<column>` = every ranked column of
+  `surface_metrics_core` via `surface.get_catalog` (levels, `chg_d`, `chg_1w`,
+  `z` — the existing derived metrics), and `index:<spx|vix|vix9d|vix3m>` =
+  index_ohlc closes. One transform: `pctile_252` (the previous 252 session
+  closes, ties half, no partial window). **Adding a metric = an entry in
+  `INDEX_SERIES` or `TRANSFORMS`**, or a new surface column (appears on its own).
+- **Values are RAW** (not the OO page's vol-point scaling): thresholds come
+  from research on the raw columns.
+- **One clock**: an index bar is stamped at its END (label + 5 min), matching
+  the surface's point-in-time quote_time, so VIX / iv_30d divides one instant.
+- **Daily = last observation per session**, including the session in
+  progress, so a daily chart's last point is the value the decision uses.
+  Past index sessions short of their own close are dropped
+  (`market_calendar.is_complete`). `market.get_daily` is NOT reused: it omits
+  the session in progress and rebuilds its whole-table rollup on every new
+  bar, which on a 5-minute refresh is every refresh.
+- **The decision** (`evaluate.decide`): weekday first (not an entry day → the
+  last state); each signal condition has **one threshold per state but the
+  last**; the first state whose conditions all (AND) / any (OR) pass wins, the
+  last state is the fallback. **Missing is unknown, not false** (three-valued),
+  and an unknown level reads **NO DATA** rather than falling through to a lower
+  allocation. Manual requirements are shown on every state but the last and
+  never change it. The decision uses the latest intraday value within 5
+  sessions; `stale` flags data older than the session that should be latest.
+- **`/board` is the one call**: each source fetched once for the deepest
+  lookback any strategy asks of it; a failing metric is reported on that
+  metric, never the page. Intraday charts are capped at 3 months.
+- **The panel opens on `editing`, never by nulling `draft`** — the Alpine
+  teardown trap again (found by the browser gate: 13 TypeErrors on close).
+  Selects whose options arrive by `x-for` after the model need `:selected`.
+
+Gates: `check_strategy_signal.py` (offline, VPS-safe) and
+`check_strategy_signal_ui.py` (Edge, clicks, the real router's board over
+fabricated bars; `can_skip`). **The SQL has not run against a real
+index_ohlc/surface table** — no Postgres here; the first VPS load is its test.
+
 ## The topbar nav: six categories (2026-09-24)
 
 One partial, `templates/_nav.html`, included by all 17 page templates — it is

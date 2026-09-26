@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Strategy Signal</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ── Strategy Signal ──────────────────────────────────────────────────
+       VISUAL FIRST: the summary cards answer "is this strategy eligible?"
+       with a name, what it reads, and one large coloured state -- no values,
+       no percentiles, no prose. Colour is the theme's blue (favourable) to
+       pink (unfavourable), interpolated for the levels between; the state's
+       NAME is always printed on it, so it is never colour alone. */
+    .ss-main { flex:1; min-height:0; overflow-y:auto; padding:14px 18px 40px; }
+    .ss-bar { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+    .ss-title { font-size:15px; font-weight:800; letter-spacing:.3px; }
+    .ss-sub { font-size:11px; color:var(--dim); }
+    .ss-grow { flex:1; }
+    .ss-btn {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 11px; border-radius:4px; cursor:pointer; white-space:nowrap;
+      font-family:inherit;
+    }
+    .ss-btn:hover { border-color:var(--accent); color:var(--accent); }
+    .ss-btn.pri { border-color:var(--accent); color:var(--accent); }
+    .ss-btn.sm { font-size:11px; padding:2px 8px; }
+    .ss-btn.danger:hover { border-color:#e84393; color:#e84393; }
+    .ss-btn:disabled { opacity:.4; cursor:default; border-color:var(--border); color:var(--dim); }
+    .ss-err { font-size:12px; color:#e84393; white-space:pre-wrap; margin:6px 0; }
+    .ss-empty { color:var(--muted); font-size:13px; padding:30px 0; text-align:center; }
+
+    /* ── summary cards ── */
+    .ss-cards { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));
+                margin-bottom:22px; }
+    .ss-card { background:var(--surface); border:1px solid var(--border); border-radius:8px;
+               padding:12px 12px 12px; cursor:pointer; display:flex; flex-direction:column; gap:8px; }
+    .ss-card:hover { border-color:var(--dim); }
+    .ss-cname { font-size:14px; font-weight:700; line-height:1.25; }
+    .ss-cid { font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .ss-pill { border-radius:6px; text-align:center; font-weight:800; letter-spacing:.8px;
+               color:#fff; padding:14px 8px; font-size:22px; line-height:1; }
+    .ss-pill.nodata { background:transparent !important; color:var(--dim); border:1px dashed var(--border); }
+    .ss-pill.small { font-size:12px; padding:4px 10px; letter-spacing:.5px; }
+    .ss-check { border:1px solid; border-radius:5px; padding:5px 8px; font-size:11.5px; font-weight:700;
+                color:var(--text); display:flex; flex-direction:column; gap:2px; }
+    .ss-check-lbl { font-size:9.5px; letter-spacing:.6px; color:var(--muted); }
+    .ss-stale { font-size:10px; color:var(--muted); }
+
+    /* ── detail sections ── */
+    .ss-sec { background:var(--surface); border:1px solid var(--border); border-radius:8px;
+              margin-bottom:16px; scroll-margin-top:10px; }
+    .ss-sec-hdr { display:flex; align-items:center; gap:10px; padding:9px 12px;
+                  border-bottom:1px solid var(--border); background:var(--raised);
+                  border-top-left-radius:8px; border-top-right-radius:8px; }
+    .ss-sec-name { font-size:14px; font-weight:700; }
+    .ss-sec-body { padding:12px; }
+    .ss-reason { font-size:11px; color:var(--muted); }
+    .ss-charts { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(420px, 1fr)); }
+    .ss-chart { border:1px solid var(--border); border-radius:6px; padding:8px 8px 4px; background:#262626; min-width:0; }
+    .ss-chart-hdr { display:flex; align-items:baseline; gap:8px; font-size:12px; margin-bottom:4px; }
+    .ss-chart-t { font-weight:700; }
+    .ss-chart-s { font-size:10px; color:var(--dim); margin-left:auto; white-space:nowrap; }
+    .ss-canvas { position:relative; height:210px; }
+    .ss-manual { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+    .ss-manual .ss-check { flex-direction:row; align-items:baseline; gap:6px; }
+    .ss-manual.quiet .ss-check { color:var(--dim); border-color:var(--border) !important; font-weight:600; }
+    .ss-notes { margin-top:12px; padding-top:8px; border-top:1px solid var(--border);
+                font-size:11px; color:var(--dim); white-space:pre-wrap; line-height:1.5; }
+    .ss-notes b { color:var(--muted); font-weight:600; }
+
+    /* ── configuration panel ── */
+    .ss-cfg { background:var(--surface); border:1px solid var(--accent); border-radius:8px;
+              margin-bottom:18px; padding:12px 14px; }
+    .ss-cfg h3 { font-size:13px; margin-bottom:10px; }
+    .ss-grid2 { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px 22px; }
+    .ss-f { display:flex; flex-direction:column; gap:4px; min-width:0; }
+    .ss-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; }
+    .ss-in, .ss-sel {
+      background:var(--raised); border:1px solid var(--border); color:var(--text); font-size:12px;
+      padding:4px 7px; border-radius:4px; font-family:inherit; color-scheme:dark; min-width:0;
+    }
+    .ss-sel option { background:var(--raised); color:var(--text); }
+    .ss-in.num { width:78px; text-align:right; font-variant-numeric:tabular-nums; }
+    .ss-in.src { width:250px; }
+    textarea.ss-in { resize:vertical; min-height:70px; line-height:1.45; }
+    .ss-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .ss-chk { display:inline-flex; align-items:center; gap:4px; font-size:12px; cursor:pointer; }
+    .ss-swatch { width:12px; height:12px; border-radius:3px; flex:none; }
+    .ss-x { color:var(--dim); cursor:pointer; padding:0 4px; font-size:14px; background:none; border:0; }
+    .ss-x:hover { color:#e84393; }
+    .ss-metric { border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-top:8px;
+                 background:#262626; display:flex; flex-direction:column; gap:6px; }
+    .ss-hint { font-size:10.5px; color:var(--dim); }
+    .ss-sep { width:1px; align-self:stretch; background:var(--border); margin:0 4px; }
+    .ss-seg { display:inline-flex; border:1px solid var(--border); border-radius:4px; overflow:hidden; }
+    .ss-seg button { background:var(--raised); color:var(--muted); border:0; padding:3px 10px; font-size:11px;
+                     cursor:pointer; font-family:inherit; font-weight:700; }
+    .ss-seg button.on { background:var(--accent); color:#fff; }
+  </style>
+</head>
+<body class="page" x-data="strategySignal">
+  {% set nav_active = "/strategy-signal" %}{% include "_nav.html" %}
+
+  <div class="ss-main">
+
+    <div class="ss-bar">
+      <span class="ss-title">Strategy Signal</span>
+      <span class="ss-sub" x-text="boardSub()"></span>
+      <span class="ss-grow"></span>
+      <button class="ss-btn" @click="loadBoard()" :disabled="loading">Refresh</button>
+      <button class="ss-btn pri" @click="newStrategy()" :disabled="editing">+ Add Strategy</button>
+    </div>
+
+    <template x-if="error"><div class="ss-err" x-text="error"></div></template>
+
+    <!-- ── configuration panel: Add or Edit, collapses on save ─────────────
+         Opened by `editing`, never by nulling `draft`: Alpine re-evaluates an
+         x-if's children once more as it tears them down, and every
+         `draft.x` in here would throw against a null draft. -->
+    <template x-if="editing">
+      <div class="ss-cfg" x-ref="cfg">
+        <h3 x-text="draft.id ? 'Edit strategy' : 'New strategy'"></h3>
+        <template x-if="!sources && !sourcesError">
+          <div class="ss-hint" style="margin-bottom:8px">Loading the metric catalog…</div>
+        </template>
+        <template x-if="sourcesError"><div class="ss-err" x-text="sourcesError"></div></template>
+
+        <div class="ss-grid2">
+          <div class="ss-f">
+            <span class="ss-lbl">Name</span>
+            <input class="ss-in" x-model="draft.name" maxlength="80" placeholder="e.g. Short-term put spread">
+          </div>
+          <div class="ss-f">
+            <span class="ss-lbl">Eligible entry days</span>
+            <div class="ss-row">
+              <template x-for="d in weekdays" :key="d.n">
+                <label class="ss-chk">
+                  <input type="checkbox" :checked="draft.weekdays.includes(d.n)" @change="toggleDay(d.n)">
+                  <span x-text="d.label"></span>
+                </label>
+              </template>
+            </div>
+          </div>
+
+          <div class="ss-f">
+            <span class="ss-lbl">Output states — most favourable first</span>
+            <template x-for="(st, i) in draft.states" :key="i">
+              <div class="ss-row">
+                <span class="ss-swatch" :style="'background:' + stateColor(draft.states.length, i)"></span>
+                <input class="ss-in" style="width:150px" maxlength="24"
+                       :value="st" @input="draft.states[i] = $event.target.value">
+                <button class="ss-x" title="Move up" @click="moveState(i, -1)" :disabled="i === 0">▲</button>
+                <button class="ss-x" title="Move down" @click="moveState(i, 1)"
+                        :disabled="i === draft.states.length - 1">▼</button>
+                <button class="ss-x" title="Remove" @click="removeState(i)"
+                        :disabled="draft.states.length <= 2">✕</button>
+              </div>
+            </template>
+            <div class="ss-row">
+              <button class="ss-btn sm" @click="addState()" :disabled="draft.states.length >= 6">+ State</button>
+              <span class="ss-hint">Presets:</span>
+              <button class="ss-btn sm" @click="presetStates(['TRADE', 'NO TRADE'])">Trade / No trade</button>
+              <button class="ss-btn sm" @click="presetStates(['FULL', 'REDUCED', 'MINIMAL', 'NONE'])">Full … None</button>
+            </div>
+          </div>
+
+          <div class="ss-f">
+            <span class="ss-lbl">Combine signal conditions with</span>
+            <div class="ss-row">
+              <div class="ss-seg">
+                <button :class="draft.logic === 'and' && 'on'" @click="draft.logic = 'and'">AND</button>
+                <button :class="draft.logic === 'or' && 'on'" @click="draft.logic = 'or'">OR</button>
+              </div>
+            </div>
+            <span class="ss-hint" x-text="logicHint()"></span>
+          </div>
+        </div>
+
+        <!-- metrics -->
+        <div class="ss-f" style="margin-top:14px">
+          <span class="ss-lbl">Metrics</span>
+          <template x-for="(m, mi) in draft.metrics" :key="m.id">
+            <div class="ss-metric">
+              <div class="ss-row">
+                <input class="ss-in src" list="ss-sources" x-model="m.a" placeholder="metric — type to search">
+                <select class="ss-sel" x-model="m.op" title="Optional: combine with a second metric">
+                  <option value="">—</option>
+                  <option value="+">+</option><option value="-">−</option>
+                  <option value="*">×</option><option value="/">÷</option>
+                </select>
+                <template x-if="m.op">
+                  <input class="ss-in src" list="ss-sources" x-model="m.b" placeholder="second metric">
+                </template>
+                <select class="ss-sel" x-model="m.transform">
+                  <option value="">as is</option>
+                  <template x-for="t in (sources ? sources.transforms : [])" :key="t.id">
+                    <option :value="t.id" x-text="t.label" :selected="t.id === m.transform"></option>
+                  </template>
+                </select>
+                <input class="ss-in" style="width:150px" x-model="m.label" maxlength="60"
+                       :placeholder="autoLabel(m) || 'short name (optional)'">
+                <span class="ss-grow"></span>
+                <button class="ss-x" title="Remove metric" @click="draft.metrics.splice(mi, 1)">✕</button>
+              </div>
+              <div class="ss-hint" x-text="metricHint(m)"></div>
+              <div class="ss-row">
+                <label class="ss-chk"><input type="checkbox" x-model="m.chart"> Show chart</label>
+                <select class="ss-sel" x-model="m.resolution" :disabled="!m.chart" @change="fixLookback(m)">
+                  <option value="intraday">Intraday · 5-min</option>
+                  <option value="daily">Daily</option>
+                </select>
+                <select class="ss-sel" x-model="m.lookback" :disabled="!m.chart">
+                  <template x-for="lb in lookbacksFor(m)" :key="lb.id">
+                    <option :value="lb.id" x-text="lb.label" :selected="lb.id === m.lookback"></option>
+                  </template>
+                </select>
+                <span class="ss-sep"></span>
+                <label class="ss-chk"><input type="checkbox" x-model="m.signal"> Use for signal</label>
+                <template x-if="m.signal">
+                  <div class="ss-row">
+                    <select class="ss-sel" x-model="m.cmp">
+                      <template x-for="c in cmps" :key="c"><option :value="c" x-text="c"></option></template>
+                    </select>
+                    <template x-for="(st, ti) in draft.states.slice(0, -1)" :key="ti">
+                      <span class="ss-row" style="gap:3px">
+                        <span class="ss-swatch" :style="'background:' + stateColor(draft.states.length, ti)"
+                              :title="'Threshold for ' + st"></span>
+                        <input class="ss-in num" inputmode="decimal" :title="'Threshold for ' + st"
+                               :value="m.thresholds[ti]" @input="m.thresholds[ti] = $event.target.value"
+                               :placeholder="st">
+                      </span>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+          <div class="ss-row" style="margin-top:6px">
+            <button class="ss-btn sm" @click="addMetric()" :disabled="draft.metrics.length >= 8">+ Metric</button>
+            <span class="ss-hint" x-show="draft.states.length > 2">
+              With more than two states each signal metric takes one threshold per state but the last:
+              the first state whose conditions all pass (or any, with OR) wins.</span>
+          </div>
+        </div>
+
+        <!-- manual requirements -->
+        <div class="ss-f" style="margin-top:14px">
+          <span class="ss-lbl">Manual entry requirements — shown when the signal says trade, never evaluated</span>
+          <template x-for="(r, ri) in draft.manual" :key="ri">
+            <div class="ss-row">
+              <input class="ss-in" style="width:360px" maxlength="160" placeholder="e.g. Premium must be >= $2.50"
+                     :value="r" @input="draft.manual[ri] = $event.target.value">
+              <button class="ss-x" title="Remove" @click="draft.manual.splice(ri, 1)">✕</button>
+            </div>
+          </template>
+          <div><button class="ss-btn sm" @click="draft.manual.push('')" :disabled="draft.manual.length >= 8">+ Requirement</button></div>
+        </div>
+
+        <div class="ss-f" style="margin-top:14px">
+          <span class="ss-lbl">Notes</span>
+          <textarea class="ss-in" x-model="draft.notes" maxlength="8000"
+                    placeholder="Why this signal, research findings, caveats, why these thresholds…"></textarea>
+        </div>
+
+        <template x-if="saveError"><div class="ss-err" x-text="saveError"></div></template>
+        <div class="ss-row" style="margin-top:12px">
+          <button class="ss-btn pri" @click="save()" :disabled="saving">Save</button>
+          <button class="ss-btn" @click="cancelEdit()" :disabled="saving">Cancel</button>
+          <span class="ss-grow"></span>
+          <template x-if="draft.id">
+            <button class="ss-btn danger" @click="remove()" :disabled="saving">Delete strategy</button>
+          </template>
+        </div>
+
+        <datalist id="ss-sources">
+          <template x-for="s in sourceOptions()" :key="s.id">
+            <option :value="s.id" x-text="s.text"></option>
+          </template>
+        </datalist>
+      </div>
+    </template>
+
+    <template x-if="board && !entries().length && !editing">
+      <div class="ss-empty">No strategies yet. <a class="ss-btn pri" @click="newStrategy()">+ Add Strategy</a></div>
+    </template>
+    <template x-if="!board && loading"><div class="ss-empty">Loading…</div></template>
+
+    <!-- ── A. summary: one glance per strategy ────────────────────────── -->
+    <div class="ss-cards">
+      <template x-for="e in entries()" :key="e.strategy.id">
+        <div class="ss-card" @click="scrollTo(e)" :title="'Go to ' + e.strategy.name">
+          <div>
+            <div class="ss-cname" x-text="e.strategy.name"></div>
+            <div class="ss-cid" x-text="idLine(e)"></div>
+          </div>
+          <div class="ss-pill" :class="stateIndex(e) === null && 'nodata'"
+               :style="'background:' + color(e)" x-text="stateLabel(e)"></div>
+          <template x-if="showManual(e)">
+            <div class="ss-check" :style="'border-color:' + color(e)">
+              <span class="ss-check-lbl">CHECK</span>
+              <template x-for="(r, ri) in e.strategy.manual" :key="ri"><span x-text="r"></span></template>
+            </div>
+          </template>
+          <template x-if="e.stale"><div class="ss-stale">⚠ data not current</div></template>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── B. one section per strategy ────────────────────────────────── -->
+    <template x-for="(e, ei) in entries()" :key="e.strategy.id">
+      <section class="ss-sec" :id="'ss-sec-' + e.strategy.id">
+        <div class="ss-sec-hdr">
+          <span class="ss-sec-name" x-text="e.strategy.name"></span>
+          <span class="ss-pill small" :class="stateIndex(e) === null && 'nodata'"
+                :style="'background:' + color(e)" x-text="stateLabel(e)"></span>
+          <span class="ss-reason" x-text="reason(e)"></span>
+          <span class="ss-grow"></span>
+          <span class="ss-sub" x-text="asOf(e)"></span>
+          <button class="ss-x" title="Move up" @click="move(e, -1)" :disabled="ei === 0">▲</button>
+          <button class="ss-x" title="Move down" @click="move(e, 1)" :disabled="ei === entries().length - 1">▼</button>
+          <button class="ss-btn sm" @click="editStrategy(e)" :disabled="editing">Edit</button>
+        </div>
+        <div class="ss-sec-body">
+          <template x-if="e.strategy.manual.length">
+            <div class="ss-manual" :class="!showManual(e) && 'quiet'">
+              <template x-for="(r, ri) in e.strategy.manual" :key="ri">
+                <div class="ss-check" :style="'border-color:' + color(e)">
+                  <span class="ss-check-lbl">CHECK</span><span x-text="r"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+          <div class="ss-charts">
+            <template x-for="m in chartMetrics(e)" :key="m.id">
+              <div class="ss-chart">
+                <div class="ss-chart-hdr">
+                  <span class="ss-chart-t" x-text="metricInfo(e, m.id).label"></span>
+                  <span class="ss-chart-s" x-text="chartSub(m)"></span>
+                </div>
+                <template x-if="metricInfo(e, m.id).error">
+                  <div class="ss-err" x-text="metricInfo(e, m.id).error"></div>
+                </template>
+                <div class="ss-canvas"><canvas :id="canvasId(e, m)"></canvas></div>
+              </div>
+            </template>
+          </div>
+          <template x-if="!chartMetrics(e).length">
+            <div class="ss-hint">No charts configured.</div>
+          </template>
+          <template x-if="e.strategy.notes">
+            <div class="ss-notes"><b>Notes.</b> <span x-text="e.strategy.notes"></span></div>
+          </template>
+        </div>
+      </section>
+    </template>
+  </div>
+
+  {#- NOT `defer` — Alpine is deferred in the head, so a deferred bundle here
+      would register the component after alpine:init has already fired. -#}
+  <script src={{ asset('js/strategy_signal.js') }}></script>
+</body>
+</html>
