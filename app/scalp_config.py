@@ -713,19 +713,91 @@ PG_PASSWORD = os.environ.get("SCALP_PG_PASSWORD", os.environ.get("POSTGRES_PASSW
 
 
 # --- universe filters --------------------------------------------------------
-# Entry thresholds. Yielded ~544 symbols on 2026-08-28 data.
-UNIVERSE_MIN_PRICE      = float(os.environ.get("SCALP_MIN_PRICE", "100"))
+# Entry thresholds. Measured counts, same snapshot lineage:
+#   $100-$2,000, $100M   ~544  (the original band)
+#   $50-$2,000,  $100M    777  (dry run after the price floor dropped to $50)
+#   $50-$2,000,  $200M    ???  run --dry-run; the tail below $200M is the cut
+#
+# THE PRICE FLOOR IS $50, NOT $100. The $100 floor came from round-lot
+# reasoning, and the traded results do not support it as a hard rule: DG at
+# $128 was the third-best name, and the ranking is in BASIS POINTS, where a
+# 10-cent spread on a $60 stock is 16 bps -- wider than FDX at 7.6. Names in
+# the $50-100 band with genuinely wide relative spreads were invisible,
+# because the filter removed them before anything was computed about them.
+UNIVERSE_MIN_PRICE      = float(os.environ.get("SCALP_MIN_PRICE", "50"))
 UNIVERSE_MAX_PRICE      = float(os.environ.get("SCALP_MAX_PRICE", "2000"))
-UNIVERSE_MIN_DOLLAR_VOL = float(os.environ.get("SCALP_MIN_DOLLAR_VOL", "100e6"))
+# THE DOLLAR VOLUME FLOOR IS $200M, NOT $100M. Dropping the price floor to $50
+# took the universe to 777 symbols, and compute is the slow stage (~8.3s a
+# symbol-day against fetch's ~0.36s). $200M cuts the tail without reaching the
+# traded names: FDX $317M, DDOG and DG all clear it comfortably. $300M was
+# considered and rejected -- it sits close enough to FDX to be excluding around
+# the third-best name on a threshold nothing has validated.
+UNIVERSE_MIN_DOLLAR_VOL = float(os.environ.get("SCALP_MIN_DOLLAR_VOL", "200e6"))
 
 # Hysteresis: a name already in the universe is only dropped below these, so
 # boundary names don't flicker in and out leaving ragged history.
-UNIVERSE_EXIT_PRICE      = float(os.environ.get("SCALP_EXIT_PRICE", "85"))
-UNIVERSE_EXIT_DOLLAR_VOL = float(os.environ.get("SCALP_EXIT_DOLLAR_VOL", "70e6"))
+#
+# The exit price is a RATIO of the entry price, not a constant. It was 85
+# against a 100 floor; left at 85 while the floor moved to 50 it would sit
+# ABOVE the entry threshold, and the entire $50-85 band -- the names this
+# change exists to admit -- would get no hysteresis cushion at all. They would
+# enter at 50 and be dropped on the first wobble under 85, which is precisely
+# the flicker the mechanism is meant to prevent, applied to precisely the
+# population it was just widened for.
+UNIVERSE_EXIT_PRICE_RATIO = float(os.environ.get("SCALP_EXIT_PRICE_RATIO", "0.85"))
+UNIVERSE_EXIT_PRICE      = float(os.environ.get(
+    "SCALP_EXIT_PRICE", UNIVERSE_MIN_PRICE * UNIVERSE_EXIT_PRICE_RATIO))
+# The exit dollar volume is a RATIO for the same reason as the exit price, and
+# here the constant was actively load-bearing rather than merely inconsistent.
+# Retention by hysteresis is INDEFINITE -- `incumbent` is (qualified OR
+# retained), so a retained name is an incumbent again the following night, with
+# no time limit and stickiness playing no part. Left at a constant 70M while
+# the entry floor moved to 200M, every existing member doing $70-200M would
+# have been retained forever: the floor would have blocked new entrants and cut
+# almost nothing from the 777 it was raised to reduce. Verified against
+# classify() before the change, five nights running, sticky window expired.
+UNIVERSE_EXIT_DOLLAR_VOL_RATIO = float(
+    os.environ.get("SCALP_EXIT_DOLLAR_VOL_RATIO", "0.70"))
+UNIVERSE_EXIT_DOLLAR_VOL = float(os.environ.get(
+    "SCALP_EXIT_DOLLAR_VOL",
+    UNIVERSE_MIN_DOLLAR_VOL * UNIVERSE_EXIT_DOLLAR_VOL_RATIO))
 
 # Stickiness: once a symbol enters, keep fetching it this many calendar days
 # even after it drops out. Costs little, preserves continuity.
 UNIVERSE_STICKY_DAYS = int(os.environ.get("SCALP_STICKY_DAYS", "30"))
+
+# --- the spread floor --------------------------------------------------------
+# Names too tight to trade are excluded before the expensive stage. Sorted by
+# spread ascending the top of the list is AMZN, TSLA, MSFT, MCD, V, META and a
+# long tail at 2-3 bps -- about five cents on a $250 stock. There is nothing to
+# capture there, and computing 232 metrics on them nightly is the single
+# largest avoidable cost in the pipeline: fetch is ~0.36s a symbol-day against
+# compute's ~8.3s.
+#
+# The source is yesterday's stored spread_bps_tw. That is a prediction, and it
+# is a good one -- a 2 bps name stays a 2 bps name -- but it is still a
+# prediction, which is why it is reversible.
+#
+# EXCLUSION MUST NOT BE A ONE-WAY DOOR. The naive version locks a symbol out
+# forever: excluded means not fetched, not fetched means not measured, not
+# measured means it can never produce the number that would let it back in.
+# SPY will not widen, but a $60 name that becomes interesting after a corporate
+# event would be silently unreachable, and nothing would ever surface that.
+#
+# So every excluded name is re-measured on a cycle regardless of its last
+# score. At ~200 excluded names on a 10-day cycle that is ~20 extra symbols a
+# night, which is noise against the ~544 in the universe. The re-test is what
+# makes the floor safe to set aggressively.
+#
+# A symbol with NO prior measurement is always included: a new entrant gets one
+# session before being judged.
+UNIVERSE_MIN_SPREAD_BPS     = float(os.environ.get("SCALP_MIN_SPREAD_BPS", "4"))
+UNIVERSE_SPREAD_RETEST_DAYS = int(os.environ.get("SCALP_SPREAD_RETEST_DAYS", "10"))
+
+# The metric the floor reads. Named here rather than inline because it is the
+# numerator of every ranking ratio and the one the dashboard sorts by, so a
+# rename has to move both together.
+UNIVERSE_SPREAD_METRIC = "spread_bps_tw"
 
 
 # --- metric windows ----------------------------------------------------------
@@ -751,12 +823,38 @@ NOISE_HORIZONS_SEC = (5, 10, 30)
 # therefore an average of a quantity that is one-sided almost every time it
 # changes. The asymmetry is the phenomenon, and the mid destroys it by
 # construction.
+# CUT FROM FIVE TO TWO on 2026-09-07, against a correlation matrix over 8,990
+# ticker-days -- note that n, because the P&L calibration that originally
+# picked `rms` had only 77 and has since dissolved (top |rho| +0.474 -> +0.321
+# as the sample doubled, 136 hits at |rho| >= 0.3 against 14 expected falling
+# to 1 against 2.1). The redundancy finding is the well-estimated one; the
+# selection finding was not.
+#
+# What the matrix said:
+#
+#   The four QUOTE variants are one thing. At rms their mean cross-variant
+#   |rho| is 0.909 / 0.914 / 0.943 by horizon. Keeping four of them was
+#   keeping one measurement four times.
+#
+#   trade_price stands alone -- it is its own cluster at |rho| > 0.90, never
+#   merging with a quote family at any horizon or statistic. So it is kept on
+#   the data as well as on the argument below.
+#
+#   `rms` has the HIGHEST cross-variant agreement of any statistic. It is the
+#   statistic that makes the variants look alike, which means calibration's
+#   "the five landed within 0.017 of each other" was a property of the
+#   statistic and not a finding about the variants.
+#
+# And the structural reason, which is why trade_price is kept rather than
+# tw_mid alone: a 29-share bid is pulled, the next level down becomes the best
+# bid, and the midpoint moves 19 cents while the stock does not move (EXPE, 30
+# seconds). That contaminates tw_mid, last_mid, bid_side and ask_side
+# identically. trade_price is the only variant made of prices somebody paid.
+# Deleting it would have made the contamination question permanently
+# unanswerable for any session older than RAW_RETENTION_DAYS.
 NOISE_VARIANTS = (
-    "tw_mid",       # time-weighted midpoint, weighted by quote duration
-    "last_mid",     # instantaneous last-quote midpoint, for comparison
-    "trade_price",  # trade prices, for comparison (contains the spread itself)
-    "bid_side",     # bid alone — first-class
-    "ask_side",     # ask alone — first-class
+    "tw_mid",       # time-weighted midpoint — the quote-derived incumbent
+    "trade_price",  # trades only — immune to the flicker above, own cluster
 )
 
 # --- the statistic, not just the variant -------------------------------------
@@ -776,13 +874,39 @@ NOISE_VARIANTS = (
 # Every variant is summarised five ways and calibration picks. Naming: the
 # bare `noise_bps_<variant>_<h>s` IS the median, kept under its existing name;
 # the rest carry an explicit suffix.
+# CUT FROM FIVE TO ONE, and to p75 rather than the previously pinned rms.
+#
+# For trade_price the choice does not matter: its five statistics correlate at
+# 0.963 / 0.966 / 0.970 mean with minimums above 0.90, because consecutive
+# trades alternate across the spread and every summary of that is the same
+# summary. For tw_mid it does matter -- 0.602 mean at 5s with a 0.030 minimum,
+# so its statistics genuinely differ.
+#
+# But that divergence is the KNOWN PATHOLOGY, not signal. The median collapses
+# to exactly zero on sparse names (DDS, IESC, NEU returned 0.0000 while
+# trading 20-35 times a minute), and the spread among tw_mid's statistics is
+# largely that collapse. Preserving several of them preserves the artefact.
+#
+# So: one statistic, p75. It is robust to a single jump -- which is exactly
+# what quote flicker produces -- and cannot be dragged to zero by a bare
+# majority of unchanged buckets, which is what kills the median. rms is the
+# opposite on both counts: it is the most sensitive statistic to large moves,
+# so on a quote series whose large moves are phantom it amplifies precisely
+# the contamination this cut exists to get away from.
+#
+# The SAME statistic is used for both variants deliberately. Comparing tw_mid
+# at one statistic against trade_price at another would confound variant with
+# statistic, and telling those apart is the whole reason both are kept.
 NOISE_STATISTICS = (
-    "",        # median — the established name, correct on dense names
-    "_mean",   # mean absolute change
-    "_p75",    # robust to one jump, cannot be dragged to zero by a majority
-    "_p90",
-    "_rms",    # conventional realized-volatility estimator
+    "_p75",
 )
+
+# The move_rate / move_bps decomposition is published for the QUOTE variant
+# only. For trade prices move_rate is ~1.0 by construction -- consecutive
+# trades alternate across the spread, so the bucketed value virtually always
+# changes -- and a column that is near-constant across every name and every
+# session is not a measurement.
+NOISE_DECOMPOSITION_VARIANTS = ("tw_mid",)
 
 # Noise decomposes as HOW OFTEN the mid moves x HOW FAR it moves when it does.
 # The median conflates the two and, on a sparse name, loses entirely to the
@@ -888,7 +1012,13 @@ QUOTE_LOOKBACK_DAYS = int(os.environ.get("SCALP_QUOTE_LOOKBACK_DAYS", "5"))
 # which is kept indefinitely.
 INTRADAY_NOISE_VARIANT   = os.environ.get("SCALP_INTRADAY_NOISE_VARIANT", "tw_mid")
 INTRADAY_NOISE_HORIZON   = int(os.environ.get("SCALP_INTRADAY_NOISE_HORIZON", "5"))
-INTRADAY_NOISE_STATISTIC = os.environ.get("SCALP_INTRADAY_NOISE_STATISTIC", "rms")
+# Moved rms -> p75 with the cut above. This renames the stored column, which
+# is the documented consequence of putting the pin in the column name: intraday
+# is 14 days and rebuildable so it is free there, and intraday_monthly keeps
+# its old rms column with the history it already has and stops extending it.
+# That discontinuity is cheapest now, while the rollup is weeks old.
+# Override with SCALP_INTRADAY_NOISE_STATISTIC=rms to keep the old pin.
+INTRADAY_NOISE_STATISTIC = os.environ.get("SCALP_INTRADAY_NOISE_STATISTIC", "p75")
 
 _V = INTRADAY_NOISE_VARIANT
 _H = INTRADAY_NOISE_HORIZON
@@ -899,6 +1029,27 @@ INTRADAY_RATIO_COLUMN    = f"ratio_{_V}_{_H}s_{_S}"
 INTRADAY_MOVE_RATE_COLUMN = f"move_rate_{_V}_{_H}s"
 INTRADAY_MOVE_BPS_COLUMN  = f"move_bps_{_V}_{_H}s"
 INTRADAY_COVERAGE_COLUMN  = f"quote_bucket_coverage_{_H}s"
+
+# --- quiet windows -----------------------------------------------------------
+# The grid, the step, the thresholds and the trade guard all live in
+# scalp/quiet.py, NOT here, because that module is vendored verbatim into the
+# live tape tool and a constant defined here would not travel with it. Config
+# re-exports the primary's column names so INTRADAY_COLUMNS can name them
+# without importing quiet at module scope in two places.
+from scalp.quiet import (                                    # noqa: E402
+    MIN_TRADES as QUIET_MIN_TRADES,
+    PRIMARY_THRESHOLD_KEY as QUIET_PRIMARY_THRESHOLD_KEY,
+    PRIMARY_WINDOW_SEC as QUIET_PRIMARY_WINDOW_SEC,
+    STEPS_SEC as QUIET_STEPS_SEC,
+    STEP_RATIO as QUIET_STEP_RATIO,
+    THRESHOLDS as QUIET_THRESHOLDS,
+    WINDOWS_SEC as QUIET_WINDOWS_SEC,
+)
+
+QUIET_PRIMARY_COLUMN = (
+    f"quiet_windows_{QUIET_PRIMARY_WINDOW_SEC}s_{QUIET_PRIMARY_THRESHOLD_KEY}")
+QUIET_PRIMARY_ELIGIBLE_COLUMN = (
+    f"quiet_eligible_windows_{QUIET_PRIMARY_WINDOW_SEC}s")
 
 # --- the stored columns ------------------------------------------------------
 # (column name, SQL type). The column name IS the metrics-dict key, so the
@@ -923,6 +1074,13 @@ INTRADAY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("off_mid_bps",           "DOUBLE PRECISION"),
     ("spread_cents_tw",       "DOUBLE PRECISION"),
     ("spread_bps_tw",         "DOUBLE PRECISION"),
+    # The quiet-window primary, and ONLY the primary. All nine combinations
+    # would be nine wide columns in the table whose entire design note is that
+    # it is a subset. The eligible count travels with it for the same reason
+    # it does in daily_metrics: a quiet count of 0 otherwise cannot be told
+    # apart from a bucket that never had enough trades to measure.
+    (QUIET_PRIMARY_COLUMN,          "INTEGER"),
+    (QUIET_PRIMARY_ELIGIBLE_COLUMN, "INTEGER"),
     (INTRADAY_NOISE_COLUMN,     "DOUBLE PRECISION"),
     (INTRADAY_RATIO_COLUMN,     "DOUBLE PRECISION"),
     (INTRADAY_MOVE_RATE_COLUMN, "DOUBLE PRECISION"),

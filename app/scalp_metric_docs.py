@@ -123,7 +123,81 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"^dropped_condition_(?P<code>\d+)$"),
      "windows",
      "Trades dropped for carrying condition code {code}."),
+
+    # --- quiet windows ------------------------------------------------------
+    # Trades only. Quotes are excluded by construction: a 29-share bid pulled
+    # on EXPE moved the midpoint 19 cents in 30 seconds while the stock did
+    # not move, and every quote-derived metric inherits that.
+    (re.compile(r"^quiet_windows_(?P<w>\d+)s_(?P<t>05|10|20)$"),
+     "noise",
+     "Count of {w}-second windows where the level shift was under {tlabel} of "
+     "the interquartile range of trade prices. Windows step every 10s and so "
+     "OVERLAP — one quiet patch produces about {w}/10 of them, which is why "
+     "quiet_episodes is the count of separate chances and this is not."),
+    (re.compile(r"^quiet_eligible_windows_(?P<w>\d+)s$"),
+     "noise",
+     "Count of {w}-second windows with enough trades to measure — this one "
+     "and its predecessor both at or above the guard, since the shift needs "
+     "both levels. The denominator for every quiet count at {w}s: without it "
+     "a count of zero cannot be told from never having had enough trades."),
+    (re.compile(r"^quiet_episodes_(?P<w>\d+)s_(?P<t>05|10|20)$"),
+     "noise",
+     "Count of SEPARATE quiet patches at {w}s and {tlabel} — maximal runs of "
+     "consecutive quiet windows, so overlapping windows collapse to one "
+     "episode. The operational metric: only one name can be traded at a time, "
+     "so what matters is how many distinct chances arrived, not how long they "
+     "totalled."),
+    (re.compile(r"^shift_over_range_median_(?P<w>\d+)s$"),
+     "noise",
+     "Median of shift over range across every eligible {w}-second window in "
+     "the session, quiet or not. The continuous form of the same quantity the "
+     "quiet counts threshold, and the pre-registered statistical test — it "
+     "uses the whole distribution, so it has more power on a small sample of "
+     "realised results."),
+    (re.compile(r"^quiet_range_iqr_cents_(?P<w>\d+)s$"),
+     "noise",
+     "Median interquartile range of trade prices, in CENTS, across {w}-second "
+     "windows that were quiet at the 1.0 threshold. Cents rather than bps "
+     "because size is set by what the book absorbs, not by capital: profit is "
+     "range-in-cents times shares available, and a bps figure penalises an "
+     "expensive name for an expense that is not the binding constraint."),
+    (re.compile(r"^quiet_range_iqr_bps_(?P<w>\d+)s$"),
+     "noise",
+     "The same interquartile range in bps of the level. Kept beside the cents "
+     "figure because the two rank names differently, and which one is right "
+     "depends on whether capital or liquidity is binding."),
+    (re.compile(r"^quiet_range_p10p90_cents_(?P<w>\d+)s$"),
+     "noise",
+     "Median 10th-to-90th percentile span of trade prices, in CENTS, across "
+     "quiet {w}-second windows. The middle 80% rather than the middle 50%, "
+     "stored beside the IQR to test whether the IQR understates the area "
+     "actually worked. Caution at {w}=15: near the 10-trade guard a single odd "
+     "lot is 10% of the sample and lands on the p90 boundary, so a wide value "
+     "there can be one stray print rather than a wide market."),
+    (re.compile(r"^quiet_range_p10p90_bps_(?P<w>\d+)s$"),
+     "noise",
+     "The 10th-to-90th percentile span in bps of the level."),
+    (re.compile(r"^shift_over_p10p90_median_(?P<w>\d+)s$"),
+     "noise",
+     "Median of shift over the 10-90 percentile span across every "
+     "eligible {w}-second window. The twin of shift_over_range_median "
+     "against the wider denominator, so if p10p90 wins the range "
+     "comparison, whether the RATIO should move to it is answerable from "
+     "the same recompute. Drives no counts and no thresholds."),
+    (re.compile(r"^quiet_dollar_vol_per_min_(?P<w>\d+)s$"),
+     "noise",
+     "Median dollar volume per minute inside quiet {w}-second windows. Per "
+     "minute rather than per window so the three window lengths compare."),
 ]
+
+# Ratio thresholds, spelled out. 1.0 is the pre-registered primary: the shift
+# equal to the range is the case where the old bid becomes the new ask — one
+# loss in a string of winners, and the boundary of what is tradeable.
+THRESHOLD_LABELS = {
+    "05": "half",
+    "10": "1.0x (the old bid becoming the new ask)",
+    "20": "2.0x",
+}
 
 STAT_LABELS = {
     "mean": "Mean",
@@ -154,6 +228,8 @@ def describe(metric: str) -> tuple[str, str] | None:
             parts["vlabel"] = VARIANT_LABELS.get(parts["v"], parts["v"])
         if parts.get("stat"):
             parts["statlabel"] = STAT_LABELS.get(parts["stat"], parts["stat"])
+        if parts.get("t"):
+            parts["tlabel"] = THRESHOLD_LABELS.get(parts["t"], parts["t"])
         return section, template.format(**parts)
     return None
 

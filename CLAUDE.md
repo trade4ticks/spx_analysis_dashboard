@@ -1091,5 +1091,30 @@ sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
 sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
 ```
 
-`check_vendored` fails on pre-existing drift in `scalp_config.py` and
-`scalp_metric_docs.py` (confirmed at `d7fc7dc`, before the OO work). Unrelated.
+**`check_vendored` is green** (2026-09-26). It had failed for weeks on
+`scalp_config.py` / `scalp_metric_docs.py`, dismissed as pre-existing. It was
+not cosmetic: the copies predated the pipeline's move of its noise statistic
+from **rms to p75**, so the page pinned the abandoned column, did not know
+about three intraday columns, and showed no definition at all for ten
+quiet-window metric families it reported as undocumented. `DEFAULT_FILTERS`
+was identical throughout, so the sliders were never wrong — which is probably
+why it went unnoticed.
+
+Re-vendoring needed one structural change: the pipeline's `config.py` now
+does `from scalp.quiet import ...`, and a VERBATIM copy cannot edit that line
+while the rule stands that `rm -rf scalp/` leaves this app running.
+`app/__init__.py` binds `scalp.quiet` to `app/scalp_quiet.py`, which
+check_vendored already holds byte-identical to the pipeline's copy, so the
+name resolves to the same source without reaching outside this repo. It
+defers to a real `scalp` package when one is importable rather than
+shadowing it.
+
+`_STAT_PREFERENCE` in `equities_scalp.py` now leads with `p75`, not `rms`.
+It is the fallback for a date missing the pinned column, and leaving rms
+first meant a date carrying the pin showed p75 while a date without it showed
+the statistic the pipeline had just abandoned. This matters most on
+`intraday_monthly`, which KEEPS its old rms column and stops extending it, so
+both statistics live in that table and the order here decides which is shown.
+
+`scalp_dryrun`'s fixture hand-wrote the pinned family as rms and went stale
+the same way; it builds those names from `scalp_config` now.

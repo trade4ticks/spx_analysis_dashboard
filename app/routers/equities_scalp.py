@@ -2235,11 +2235,25 @@ async def candidates(
 # This is still 40 ticker-days. It is the best available answer, not a
 # settled one, and the calibration panel is where it gets revisited.
 _NOISE_PREFERENCE = ("tw_mid", "last_mid", "trade_price")
+# P75 LEADS, NOT RMS (2026-09-26). This is the FALLBACK for a date whose
+# columns do not include the pinned one; the pin itself comes from the
+# vendored config, which moved rms -> p75. Leaving rms first here meant the
+# two disagreed: a date carrying the pin showed p75 and a date without it
+# showed the statistic the pipeline had just abandoned.
+#
+# The pipeline's reason, not a preference of this page's: rms "is the most
+# sensitive statistic to large moves, so on a quote series whose large moves
+# are phantom it amplifies precisely the contamination this cut exists to get
+# away from". It matters most on intraday_monthly, which KEEPS its old rms
+# column with the history it already has and stops extending it -- so both
+# statistics sit in that table, and whichever is listed first here is the one
+# the page shows.
+#
 # median is ranked BELOW an unrecognised statistic, on purpose. Everything else
 # here is taste; this one is a defect. Being unfamiliar is a reason to look at
 # a number, whereas median is known to read 0.0 on exactly the names the filter
 # is supposed to exclude.
-_STAT_PREFERENCE = ("rms", "p75", "p90", "mean")
+_STAT_PREFERENCE = ("p75", "rms", "p90", "mean")
 _STAT_LAST = ("median",)
 # 5s, from the calibration above. Nearest-wins rather than exact, so a
 # pipeline that stops emitting 5s degrades to the closest horizon it does

@@ -58,6 +58,10 @@ BAD: list[str] = []
 
 # A metric set shaped like the pipeline's: both generated families across
 # several variants, horizons and statistics, plus fixed flow/spread names.
+# The pipeline emits ONE noise statistic and the config names it; every
+# fixture name that carries a statistic is built from this.
+_STAT = scalp_config.NOISE_STATISTICS[0]
+
 FAKE_METRICS = [
     "spread_bps_tw", "spread_cents_tw", "trades_per_min", "trade_size_median",
     "two_sided_balance", "off_exchange_share", "unidentified_exchange_share",
@@ -67,15 +71,20 @@ FAKE_METRICS = [
     # whole principle.
     "off_mid_bps",
     # The trade-price basis, so the roles that hold it fixed resolve and the
-    # comparison column can be exercised rather than merely declared.
-    "noise_bps_trade_price_5s_rms", "ratio_trade_price_5s_rms",
+    # comparison column can be exercised rather than merely declared. Built
+    # from the pipeline's own statistic rather than spelled out: the suffix
+    # moved rms -> p75 upstream and a hand-written copy here went stale
+    # silently, which is what this fixture exists to prevent elsewhere.
+    f"noise_bps_trade_price_5s{_STAT}", f"ratio_trade_price_5s{_STAT}",
     "quote_bucket_coverage_10s",
-    # The pinned 5s family, complete. Adding only the noise column made the
-    # coverage filter go INERT — the coverage role resolves at the selected
-    # horizon, so a 5s variant needs 5s coverage — and the harness caught it.
-    # A partial family in a fixture silently disables whatever depends on the
-    # missing half.
-    "noise_bps_tw_mid_5s_rms", "ratio_tw_mid_5s_rms",
+    # The pinned 5s family, complete, AND TAKEN FROM THE CONFIG. Adding only
+    # the noise column made the coverage filter go INERT — the coverage role
+    # resolves at the selected horizon, so a 5s variant needs 5s coverage —
+    # and the harness caught it. A partial family in a fixture silently
+    # disables whatever depends on the missing half; a STALE family disables
+    # the check that the page follows the pin at all, which is what happened
+    # while the vendored config sat five weeks behind.
+    scalp_config.INTRADAY_NOISE_COLUMN, scalp_config.INTRADAY_RATIO_COLUMN,
     "quote_bucket_coverage_5s", "move_rate_tw_mid_5s", "move_bps_tw_mid_5s",
     # THE MEDIAN IS THE UNSUFFIXED FORM. The fixture carried
     # "noise_bps_tw_mid_10s_median" — a name the pipeline never emits — so
