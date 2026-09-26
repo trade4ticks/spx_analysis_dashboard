@@ -123,6 +123,15 @@ document.addEventListener('alpine:init', () => {
     ocOutcomes: [],
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
+    // ── Metric filters ───────────────────────────────────────────────────
+    // A POPULATION filter like max strike: rows the server removes from every
+    // query before anything is computed, on the metric's RAW daily_features
+    // value. They never re-bin -- a trade's cell is still its stored bin.
+    // Rail rows; activeFilters() is what is sent. A row with no metric or no
+    // number is shown as NOT APPLIED rather than silently skipped.
+    filters: [],
+    // metric|anchor -> /filter-stats payload (train-window percentiles).
+    filterStats: {},
     loading: false, error: '',
     // SAVED cards only. A run no longer lands here just because it ran:
     // every parameter tweak used to spawn one, and the strip filled up with
@@ -159,7 +168,10 @@ document.addEventListener('alpine:init', () => {
     secDetail: null, data: null,
     // Heatmap colour scale. hmCellBg/_hmCellTitle live in FactorCharts and
     // read these; _hmRange is recomputed from the grid whenever it changes.
-    heatmapData: null, _hmRange: null, hmMinSampleN: 0,
+    // Below this many trades a cell is hatched and left out of the colour
+    // scale -- the same rule and the same default as Factor Analysis. Filters
+    // thin every cell, so a 12-trade corner must not set the scale.
+    heatmapData: null, _hmRange: null, hmMinSampleN: 50,
     metric: '', secSelectedMetric: '',
     // Keyed by section, because FactorCharts reads
     // cmp.activityMode?.[sectionKey] — a bare string silently
@@ -209,6 +221,138 @@ document.addEventListener('alpine:init', () => {
         this.cutoffDate = tt?.cutoff_date || '';
         if (rules?.error) this.error = rules.error;
       } catch (e) { this.error = String(e); }
+      // The threshold decides both the hatching and the scale, so moving it
+      // re-scopes the range -- as on Factor Analysis.
+      this.$watch('hmMinSampleN', () => window.FactorCharts._hmRecomputeRange(this));
+    },
+
+    // ── Metric filters ───────────────────────────────────────────────────
+    addFilter() {
+      this.filters.push({ id: Math.random().toString(36).slice(2, 9), metric: '', op: '>', value: '' });
+    },
+    removeFilter(i) { this.filters.splice(i, 1); },
+    _filterValue(f) {
+      const v = (f.value === '' || f.value == null) ? NaN : Number(f.value);
+      return Number.isFinite(v) ? v : null;
+    },
+    // What is SENT: complete rows only. Incomplete ones are flagged on the
+    // rail (filterRowState) so an inert row cannot look like a filter.
+    activeFilters() {
+      return this.filters
+        .filter(f => f.metric && this._filterValue(f) !== null)
+        .map(f => ({ metric: f.metric, op: f.op, value: this._filterValue(f) }));
+    },
+    filterRowState(f) {
+      if (!f.metric) return 'not applied — pick a metric';
+      if (this._filterValue(f) === null) return 'not applied — enter a value';
+      return '';
+    },
+    // THE POPULATION HALF OF EVERY REQUEST BODY, the client twin of the
+    // server's Population. max_strike used to be spelled out at six call
+    // sites; a filter added at five of them is the bug this prevents. `src`
+    // is the run the request descends from, so a locked card refetches under
+    // ITS OWN population, not the rail's.
+    populationBody(src) {
+      const s = src || {};
+      return { max_strike: s.max_strike ?? this.maxStrike,
+               filters: s.filters ?? this.activeFilters() };
+    },
+    _statsKey(metric) { return metric + '|' + this.entryAnchor; },
+    async ensureFilterStats(metric) {
+      if (!metric) return;
+      const k = this._statsKey(metric);
+      if (this.filterStats[k]) return;
+      this.filterStats = { ...this.filterStats, [k]: { loading: true } };
+      try {
+        const r = await fetch('/api/factor-trades/filter-stats?metric='
+          + encodeURIComponent(metric) + '&entry_anchor=' + encodeURIComponent(this.entryAnchor));
+        const d = await r.json();
+        this.filterStats = { ...this.filterStats, [k]: r.ok ? d : { error: 'HTTP ' + r.status } };
+      } catch (e) {
+        this.filterStats = { ...this.filterStats, [k]: { error: String(e) } };
+      }
+    },
+    fmtFilterVal(v) {
+      if (v == null || !Number.isFinite(v)) return '—';
+      const a = Math.abs(v);
+      if (a === 0) return '0';
+      if (a >= 1000) return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+      return Number(v.toPrecision(4)).toString();
+    },
+    // The metric's units are its own; the percentiles are what say which
+    // numbers are sensible. Train window only -- see /filter-stats.
+    filterStatsText(f) {
+      if (!f.metric) return '';
+      const st = this.filterStats[this._statsKey(f.metric)];
+      if (!st) return '';
+      if (st.loading) return 'loading distribution…';
+      if (st.error) return 'distribution unavailable: ' + st.error;
+      const ps = (st.pcts || []).map(p => (p.p === 50 ? 'med ' : 'p' + p.p + ' ') + this.fmtFilterVal(p.v));
+      const nv = st.no_value_share == null ? '' : ' · ' + (st.no_value_share * 100).toFixed(1) + '% no value';
+      return 'train: ' + ps.join('  ') + nv;
+    },
+    filterMedian(f) {
+      const st = this.filterStats[this._statsKey(f.metric)];
+      const m = (st?.pcts || []).find(p => p.p === 50);
+      return m && m.v != null ? 'median ' + this.fmtFilterVal(m.v) : 'value';
+    },
+    filterLabel(f) { return f.metric + ' ' + f.op + ' ' + this.fmtFilterVal(f.value); },
+    // The card's own record of what its filters removed, in its own window.
+    // "No value" and "failed" are separate: a metric that had not started yet
+    // for a ticker is not the filter judging that trade.
+    filterReportLines(r) {
+      const rep = r?.filter_report;
+      if (!rep) return [];
+      const w = rep[r.window || 'train'] || rep.train;
+      if (!w) return [];
+      const out = [`kept ${w.after.toLocaleString()} of ${w.before.toLocaleString()}`];
+      for (const f of w.filters) {
+        out.push(`${f.metric}: ${f.failed.toLocaleString()} failed · ${f.no_value.toLocaleString()} no value`);
+      }
+      return out;
+    },
+    _popKey(r) {
+      return JSON.stringify({ s: r?.max_strike ?? null,
+                              f: (r?.filters || []).map(f => [f.metric, f.op, f.value]) });
+    },
+    _popText(r) {
+      const f = (r?.filters || []).map(x => this.filterLabel(x));
+      const bits = [];
+      if (r?.max_strike) bits.push('max strike $' + r.max_strike);
+      bits.push(f.length ? f.join(' AND ') : 'no filters');
+      return bits.join(' · ');
+    },
+    // Two runs over different populations: the Change row subtracts two
+    // different trade sets. Warned, not blocked -- same as a pair mismatch.
+    get lockedPopMismatch() {
+      const L = this.lockedRun, C = this.runData;
+      if (!L || !C) return '';
+      if (this._popKey(L) === this._popKey(C)) return '';
+      return 'locked: ' + this._popText(L) + ' — current: ' + this._popText(C);
+    },
+    // Cells under the min-n threshold, as a share of the cells that have any
+    // trades. Half the grid hatched is the sign a filter is too aggressive.
+    get hmBelowNote() {
+      const minN = this.hmMinSampleN || 0;
+      let have = 0, below = 0;
+      for (const row of (this.gridRows || [])) {
+        for (const c of (row || [])) {
+          if (!c || !c.n) continue;
+          have += 1;
+          if (c.n < minN) below += 1;
+        }
+      }
+      if (!have) return '';
+      return `${below} of ${have} cells (${Math.round(below / have * 100)}%) below n ${minN}`;
+    },
+    // CSV provenance for the population, shared by every export.
+    _csvPopulationRows(d) {
+      const out = [['# max_strike', d?.max_strike ?? '']];
+      const fs = d?.filters || [];
+      if (!fs.length) out.push(['# filters', 'none']);
+      for (const f of fs) out.push(['# filter', f.metric, f.op, f.value]);
+      if (fs.length) out.push(['# filters', 'raw daily_features values, ANDed; bins unchanged']);
+      return out;
     },
 
     // A family is on when it has a chosen rule_key. Toggling on defaults to
@@ -965,7 +1109,7 @@ document.addEventListener('alpine:init', () => {
           '/api/factor-trades/grid', {
             ...this.selectionBody(src),
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
-            max_strike: src.max_strike ?? this.maxStrike,
+            ...this.populationBody(src),
             window: this.window,
             sweep_families: this.gridSweep,
             sweep_values: this.gridSweep.reduce((o, f) => {
@@ -1612,7 +1756,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       out.push(['# units', d.units_note]);
       out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap']);
       out.push(['# cutoff', d.cutoff_date]);
-      out.push(['# entry_anchor', d.entry_anchor, 'max_strike', d.max_strike ?? '']);
+      out.push(['# entry_anchor', d.entry_anchor]);
+      for (const r of this._csvPopulationRows(d)) out.push(r);
       for (const r of this._csvSelectionRows(this.runData)) out.push(r);
       out.push(['# cells', JSON.stringify(d.cells)]);
       out.push(['# held rules', (d.held || []).join(' | ')]);
@@ -1674,7 +1819,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
           '/api/factor-trades/suite', {
             ...this.selectionBody(src),
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
-            max_strike: src.max_strike ?? this.maxStrike,
+            ...this.populationBody(src),
             window: this.window,
             seed: this.baselineSeed, n_draws: +this.suiteN || 10,
           });
@@ -1901,7 +2046,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       out.push(['# units', d.units_note]);
       out.push(['# cutoff', d.cutoff_date]);
       out.push(['# entry_anchor', d.entry_anchor]);
-      out.push(['# max_strike', d.max_strike ?? '']);
+      for (const r of this._csvPopulationRows(d)) out.push(r);
       for (const r of this._csvSelectionRows(this.runData)) out.push(r);
       out.push(['# cells', JSON.stringify(d.cells)]);
       out.push(['# rules', (d.rule_keys || []).join(' | ')]);
@@ -1964,7 +2109,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         const body = {
           ...this.selectionBody(src),
           entry_anchor: src.entry_anchor, rule_keys: src.rules,
-          max_strike: src.max_strike ?? this.maxStrike,
+          ...this.populationBody(src),
           window: this.window,
           randomize: true, seed: this.baselineSeed, baseline_kind: kind,
         };
@@ -2017,7 +2162,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
           entry_anchor: this.entryAnchor,
           rule_keys: this.ruleKeys(),
           n_bins: 20,
-          max_strike: this.maxStrike,
+          ...this.populationBody(null),
           window: this.window,
           label: random ? 'random entries' : null,
         };
@@ -2069,7 +2214,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
           signal_ids: this.selectedSignalIds.slice(),
           entry_anchor: this.entryAnchor,
           rule_keys: this.ruleKeys(),
-          max_strike: this.maxStrike,
+          ...this.populationBody(null),
           window: this.window,
         };
         const r = await fetch('/api/factor-trades/zone', {
@@ -2114,6 +2259,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         secondaryMetric:   this.secondaryMetric,
         entryAnchor:       this.entryAnchor,
         maxStrike:         this.maxStrike,
+        filters:           this.filters.map(f => ({ ...f })),
         window:            this.window,
         // The rail's family -> rule_key MAP, not the flat rule_keys list the
         // payload carries. The list says which rules ran; only the map puts
@@ -2135,6 +2281,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       this.secondaryMetric   = cfg.secondaryMetric ?? this.secondaryMetric;
       this.entryAnchor       = cfg.entryAnchor ?? this.entryAnchor;
       this.maxStrike         = cfg.maxStrike ?? this.maxStrike;
+      this.filters           = (cfg.filters || []).map(f => ({ ...f }));
+      for (const f of this.filters) this.ensureFilterStats(f.metric);
       this.window            = cfg.window ?? this.window;
       this.selected          = { ...(cfg.selected || {}) };
       this.selectedSignalIds = [...(cfg.selectedSignalIds || [])];
@@ -2366,7 +2514,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         entry_anchor: src.entry_anchor,
         rule_keys:    src.rules,
         // Must match the run's population or the zone is a different trade set.
-        max_strike:   src.max_strike ?? this.maxStrike,
+        ...this.populationBody(src),
         // The CARD's window, not the page's. A TRAIN card locked against a
         // TEST run must keep reporting train; the banner says they cross.
         window:       src.window || this.window,
@@ -2826,6 +2974,19 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         // spreadsheet pivot actually filters on.
         head.push('sig_mask', 'n_signals', ...legend.map(s => 'sig_' + s.id));
       }
+      // Provenance first, as the grid and suite exports have it: a trade list
+      // with no record of which population it came from is the file most
+      // likely to be misread later. The column header row follows it.
+      const esc = (x) => {
+        const v = String(x ?? '');
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      };
+      const prov = [['# Factor Trades — trades'],
+                    ['# window', this.zoneData?.window ?? ''],
+                    ['# entry_anchor', this.zoneData?.entry_anchor ?? ''],
+                    ...this._csvPopulationRows(this.zoneData),
+                    ...this._csvSelectionRows(this.runData),
+                    ['# rules', (this.zoneData?.rules || []).join(' | ')]].map(r => r.map(esc).join(','));
       const rows = t.map(x => {
         const base = [x.ticker, x.trade_date, x.entry_price ?? '',
                       (x.ret * 100).toFixed(6), x.exit_bar, x.exit_rule, x.window];
@@ -2835,7 +2996,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         }
         return base.join(',');
       });
-      const blob = new Blob([[head.join(','), ...rows].join(String.fromCharCode(10))],
+      const blob = new Blob([[...prov, head.join(','), ...rows].join(String.fromCharCode(10))],
                             { type: 'text/csv' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);

@@ -127,3 +127,35 @@ def build_feature_cols(
     # _pc variants, and any column absent from metric_classification are all
     # not in elig_set and are automatically excluded.
     return [c for c in all_num_cols if c in elig_set and c not in extra]
+
+
+# ── The feature list, as the pages see it ────────────────────────────────────
+#
+# ONE query and ONE rule for "which daily_features columns are metrics", used
+# by /api/factor-analysis/columns (every metric dropdown) AND by Factor
+# Trades' server-side filter guard. The guard accepting exactly what the
+# dropdown offers is the point: a second list would drift, and the column
+# name goes into SQL.
+
+DAILY_FEATURES_NUMERIC_SQL = """
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'daily_features' AND table_schema = 'public'
+AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+ORDER BY ordinal_position"""
+
+
+def is_outcome(col: str) -> bool:
+    """A forward return -- a prediction TARGET, never a metric."""
+    return "ret_" in col and "fwd" in col
+
+
+async def daily_feature_columns(conn) -> dict:
+    """{features, outcomes, elig}: the dropdown's metric list, the forward
+    returns, and the classification allowlist (None when absent)."""
+    rows = await conn.fetch(DAILY_FEATURES_NUMERIC_SQL)
+    elig = await get_excluded_metrics(conn)
+    all_cols = [r["column_name"] for r in rows]
+    outcomes = [c for c in all_cols if is_outcome(c)]
+    return {"features": build_feature_cols(all_cols, outcomes, elig),
+            "outcomes": outcomes, "elig": elig}

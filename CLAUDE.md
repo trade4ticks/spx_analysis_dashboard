@@ -711,6 +711,68 @@ Gates: `check_strategy_signal.py` (offline, VPS-safe) and
 fabricated bars; `can_skip`). **The SQL has not run against a real
 index_ohlc/surface table** — no Postgres here; the first VPS load is its test.
 
+## Factor Trades: metric filters (2026-09-26)
+
+A population filter on a third (or fourth) metric's RAW `daily_features`
+value, `<` or `>`, ANDed, up to four. Regime filtering: the same heatmap over
+only the rows where, say, `ret_5d > 0.05`.
+
+- **It removes rows and never re-bins.** A trade's cell comes from its stored
+  `bin20_` column in `tt_bins`, so a filtered heatmap has the unfiltered one's
+  cell boundaries. Bin-based filtering (per ticker) is a different question
+  and is not designed out.
+- **ONE builder for every query: `Population` in `factor_trades.py`.**
+  `max_strike` used to be hand-written into eleven statements with
+  hand-numbered placeholders (`$3`, `$6`, `$9`…); every trade-selecting
+  statement now asks `Population.sql(start)` for its `PopSQL` (join, where,
+  args), numbered from its own args. The client twin is `populationBody(src)`
+  (six request builders used to spell out `max_strike`). **Adding a
+  population filter = one place server-side, one client-side.**
+- **The join is `LEFT JOIN LATERAL (… daily_features … LIMIT 1) df ON true`,
+  keyed on `tp`** — `trade_paths tp` is the one alias every population query
+  has (the grid has no `c`). LIMIT 1 so the join can never multiply a trade.
+  NaN counts as no value (`NaN > x` is TRUE in Postgres); values are cast to
+  float8. Performance depends on an index on `daily_features (ticker,
+  trade_date)` — see the VPS check in the commit that added this.
+- **The random baselines filter too** (settled with the user): "within this
+  regime, do my cells beat random?" A baseline from outside the regime
+  credits the regime's effect to the cells. Filtered zone ⊂ filtered universe
+  per date, so the exact-count match still holds. Exit-only reuses the zone's
+  entries and gets it automatically.
+- **Guard:** names are checked against `metric_filter.daily_feature_columns()`
+  — the SAME function `/api/factor-analysis/columns` now calls to build every
+  metric dropdown — and forward returns are refused by name as well
+  (`is_outcome`): one slipping through would be lookahead.
+- **"No value" and "failed the threshold" are reported apart**
+  (`filter_report`, per window, against the population without the metric
+  filters; each filter counted on its own). `/run` reports over the whole
+  heatmap population, `/zone` over the zone — portfolio mode has no `/run`.
+- **Percentiles (`/filter-stats`) are TRAIN WINDOW ONLY** — test rows would
+  leak into the threshold. Over binned rows with a trade path at the anchor,
+  before exit rules and cells, so they do not move with the rail. No units
+  map, by decision: it would rot across 100+ metrics.
+- **Min n is on, default 50, with a slider** (Factor Analysis' rule: below it
+  a cell is hatched and out of the colour scale), plus the share of non-empty
+  cells below it — half the grid hatched says the filter is too aggressive.
+- Filters are echoed by every endpoint, stored on saved cards (rail rows in
+  the cfg snapshot, the echo in the payload), shown on the run card, in
+  every CSV header (`_csvPopulationRows`; the trade CSV now has a `#`
+  provenance block too), and a locked card over a different population
+  raises its own banner (`lockedPopMismatch`). Portfolio mode keeps the
+  filter rows; the signal list's n is labelled `n(FA, unfiltered)`.
+
+Gates: `check_ft_population.py` (offline) drives /run, /zone and all three
+baselines, /suite and /grid, in signal AND portfolio mode, against a
+recording fake pool: with no filters every statement is byte-identical to
+the previous commit's code (`--ref`, default HEAD — so it is a pre-commit
+check; after the commit it compares the builder with itself and says so);
+with filters every trade-selecting statement carries both filters and
+max_strike with each placeholder pointing at its own threshold.
+`check_ft_filters_ui.py` clicks it in Edge against the real handlers'
+payloads (`can_skip`). **Headless virtual time does not run Alpine's
+transition frame**, so a hide-after-show via `x-show` never lands there:
+assert on content, not visibility.
+
 ## The topbar nav: six categories (2026-09-24)
 
 One partial, `templates/_nav.html`, included by all 17 page templates — it is

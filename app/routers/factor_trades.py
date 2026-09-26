@@ -23,6 +23,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
+from dataclasses import dataclass
 from datetime import date as _date
 from typing import Any, Optional
 
@@ -32,6 +34,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_oi_pool
+from app.metric_filter import daily_feature_columns, is_outcome
 from app.trade_path_rules import (
     CombineError,
     HORIZON_RULE_KEY,
@@ -732,6 +735,171 @@ async def _resolve_selection(conn, req, bin_cols, base: int, cutoff: str) -> tup
         "mode": "2f" if two_factor else "1f", "signals": []}
 
 
+# ── The trade POPULATION: max_strike and metric filters ──────────────────
+#
+# ONE BUILDER FOR EVERY QUERY. max_strike used to be hand-written into eleven
+# statements, each numbering its own placeholder ($3 here, $6 in one sampler,
+# $9 in another) -- which is how a population filter reaches the heatmap and
+# misses the grid. Every query that selects trades now asks Population.sql()
+# for its fragment, numbered from wherever that statement's own args end.
+#
+# METRIC FILTERS FILTER ON RAW daily_features VALUES, not on bins: "ret_5d >
+# 0.05" means the same thing on every ticker. They only REMOVE rows. The cell
+# a surviving trade falls in still comes from its stored bin20_ column in
+# tt_bins, so a filtered heatmap has exactly the unfiltered one's cell
+# boundaries -- fewer trades per cell, never a re-bin.
+#
+# THE RANDOM BASELINES FILTER TOO. They draw from the entry universe rather
+# than the binned rows, and a baseline drawn from outside the regime would
+# credit the regime's own effect to the cells. Filtered zone and filtered
+# universe keep the per-date subset property the exact-count match relies on.
+#
+# NaN IS NO VALUE. Postgres sorts NaN above every number, so `NaN > 0.05` is
+# TRUE; the predicate tests it explicitly, the same trap index_ohlc has.
+# Values are cast to float8 so integer columns take the same test.
+
+MAX_POP_FILTERS = 4
+POP_FILTER_OPS = ("<", ">")
+
+
+class PopFilter(BaseModel):
+    metric: str
+    op: str
+    value: float
+
+
+@dataclass
+class PopSQL:
+    """A statement's population fragment. `join` goes after the trade_paths
+    join (it reads tp), `where` is appended to the WHERE clause, and `args`
+    are appended to that statement's args, in order."""
+    join: str
+    where: str
+    args: list
+
+
+def _qi(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+class Population:
+    def __init__(self, max_strike, filters: list[tuple[str, str, float]]):
+        self.max_strike = float(max_strike) if max_strike and max_strike > 0 else None
+        self.filters = filters
+
+    def col(self, metric: str) -> str:
+        return f"df.{_qi(metric)}::float8"
+
+    def join(self) -> str:
+        """daily_features for the filter columns only. LATERAL ... LIMIT 1 so
+        the join can never multiply a trade, whatever the table's keys."""
+        if not self.filters:
+            return ""
+        cols = ", ".join(sorted({_qi(m) for m, _, _ in self.filters}))
+        return (f"\n        LEFT JOIN LATERAL (SELECT {cols} FROM daily_features d"
+                f" WHERE d.ticker = tp.ticker AND d.trade_date = tp.trade_date"
+                f" LIMIT 1) df ON true")
+
+    def passes(self, metric: str, op: str, ph: str) -> str:
+        c = self.col(metric)
+        return f"({c} <> 'NaN'::float8 AND {c} {op} {ph})"
+
+    def sql(self, start: int, *, filters: bool = True) -> PopSQL:
+        """Placeholders numbered from $start+1."""
+        args: list = []
+
+        def ph(v):
+            args.append(v)
+            return f"${start + len(args)}"
+
+        where = ""
+        if self.max_strike is not None:
+            where += f" AND tp.entry_price <= {ph(self.max_strike)}"
+        if not (filters and self.filters):
+            return PopSQL("", where, args)
+        for m, op, v in self.filters:
+            where += " AND " + self.passes(m, op, ph(v))
+        return PopSQL(self.join(), where, args)
+
+    def describe(self) -> list[dict]:
+        return [{"metric": m, "op": op, "value": v} for m, op, v in self.filters]
+
+
+async def _population(conn, req) -> "Population | str":
+    """The request's population, or an error string.
+
+    Metric names are checked against daily_feature_columns() -- the function
+    that builds the page's metric dropdowns -- because the name is
+    interpolated into SQL and because a FORWARD RETURN let through here would
+    be lookahead nobody could see. Outcomes are refused by name as well, in
+    case a classification ever marks one eligible."""
+    fs = list(getattr(req, "filters", None) or [])
+    if len(fs) > MAX_POP_FILTERS:
+        return f"at most {MAX_POP_FILTERS} metric filters"
+    out = []
+    if fs:
+        allowed = set((await daily_feature_columns(conn))["features"])
+        for f in fs:
+            if f.op not in POP_FILTER_OPS:
+                return f"filter operator must be < or >, not {f.op!r}"
+            if is_outcome(f.metric):
+                return (f"{f.metric!r} is a forward return -- filtering on it "
+                        f"would be lookahead")
+            if f.metric not in allowed:
+                return f"{f.metric!r} is not an available metric"
+            if not math.isfinite(f.value):
+                return f"filter value for {f.metric!r} must be a finite number"
+            out.append((f.metric, f.op, float(f.value)))
+    return Population(getattr(req, "max_strike", None), out)
+
+
+async def _filter_report(conn, combine_sql: str, where_bins: str, cell_pred: str,
+                         args: list, pop: Population) -> "dict | None":
+    """What the metric filters removed, per window, against the population
+    WITHOUT them (bins, cells and max_strike still applied).
+
+    "No value" and "failed the threshold" are counted apart: a metric that
+    has not started yet for a ticker is not the filter judging that trade.
+    Each filter is counted on its own against the unfiltered rows, so one row
+    can fail more than one filter."""
+    if not pop.filters:
+        return None
+    base = pop.sql(len(args), filters=False)
+    a = list(args) + base.args
+    sel, passes = [], []
+    for i, (m, op, v) in enumerate(pop.filters):
+        a.append(v)
+        c = pop.col(m)
+        nv = f"({c} IS NULL OR {c} = 'NaN'::float8)"
+        ok = pop.passes(m, op, f"${len(a)}")
+        passes.append(ok)
+        sel.append(f"COUNT(*) FILTER (WHERE {nv}) AS nv{i}")
+        sel.append(f"COUNT(*) FILTER (WHERE NOT {nv} AND NOT {ok}) AS fail{i}")
+    rows = await conn.fetch(f"""
+        WITH c AS (
+{combine_sql}
+        )
+        SELECT (c.trade_date < $2::date) AS is_train,
+               COUNT(*) AS n_before,
+               COUNT(*) FILTER (WHERE {" AND ".join(passes)}) AS n_after,
+               {", ".join(sel)}
+        FROM c
+        JOIN tt_bins bt USING (ticker, trade_date)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){pop.join()}
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{base.where}
+        GROUP BY 1
+        """, *a)
+    out = {w: {"before": 0, "after": 0,
+               "filters": [{"metric": m, "op": op, "value": v, "no_value": 0, "failed": 0}
+                           for m, op, v in pop.filters]} for w in ("train", "test")}
+    for r in rows:
+        w = out["train" if r["is_train"] else "test"]
+        w["before"], w["after"] = int(r["n_before"]), int(r["n_after"])
+        for i, f in enumerate(w["filters"]):
+            f["no_value"], f["failed"] = int(r[f"nv{i}"]), int(r[f"fail{i}"])
+    return out
+
+
 class RunReq(BaseModel):
     # Optional because portfolio mode selects by signal instead. Exactly one of
     # (primary_metric, signal_ids) is expected; the handlers say which they got
@@ -755,12 +923,63 @@ class RunReq(BaseModel):
     # that cannot be reconciled and no way to tell which population a given
     # box covered.
     max_strike:       Optional[float] = None
+    # Raw-value metric filters, ANDed. A population filter exactly like
+    # max_strike: applied in every query through Population, never in the
+    # client. See the Population block above.
+    filters:          list[PopFilter] = []
     # Page-level window. Everything except the heatmap reports on it: the
     # stat bar, exit reasons, ticker breakdown, price bins, and the
     # time-series panes, which simply stop at the cutoff in train mode
     # because no test trade is returned at all.
     window:           str = "train"
     label:            Optional[str] = None
+
+
+FILTER_PCTS = (5, 25, 50, 75, 95)
+_FILTER_STATS_CACHE: dict = {}
+
+
+@router.get("/filter-stats")
+async def filter_stats(metric: str = Query(...), entry_anchor: str = Query("open"),
+                       pool=Depends(get_oi_pool)):
+    """A filter metric's distribution, so a threshold can be typed sensibly.
+
+    TRAIN WINDOW ONLY: percentiles that included test rows would put test
+    information into the threshold chosen from them. Over the rows a filter
+    acts on -- binned (tt_bins) rows with a trade path at this anchor --
+    before exit rules, cells or other filters, so the numbers do not move as
+    the rest of the rail changes. Cached per (metric, anchor, cutoff).
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    from app.routers.oi_analysis import _get_tt_cutoff
+    cutoff_iso = await _get_tt_cutoff(pool)
+    if not cutoff_iso:
+        return {"error": "tt_bins has no cutoff_date"}
+    key = (metric, entry_anchor, cutoff_iso)
+    if key in _FILTER_STATS_CACHE:
+        return _FILTER_STATS_CACHE[key]
+    async with pool.acquire() as conn:
+        pop = await _population(conn, RunReq(filters=[PopFilter(metric=metric, op=">", value=0)]))
+        if isinstance(pop, str):
+            return {"error": pop}
+        c = pop.col(metric)
+        r = await conn.fetchrow(f"""
+            SELECT COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE {c} IS NOT NULL AND {c} <> 'NaN'::float8) AS n_value,
+                   percentile_cont($3::float8[]) WITHIN GROUP (ORDER BY {c})
+                       FILTER (WHERE {c} IS NOT NULL AND {c} <> 'NaN'::float8) AS q
+            FROM tt_bins bt
+            JOIN trade_paths tp USING (ticker, trade_date){pop.join()}
+            WHERE tp.entry_anchor = $1 AND tp.trade_date < $2::date
+            """, entry_anchor, _date.fromisoformat(cutoff_iso), [p / 100 for p in FILTER_PCTS])
+    n, nv = int(r["n"] or 0), int(r["n_value"] or 0)
+    out = {"metric": metric, "window": "train", "cutoff_date": cutoff_iso,
+           "n": n, "n_value": nv, "no_value_share": ((n - nv) / n) if n else None,
+           "pcts": [{"p": p, "v": (float(v) if v is not None else None)}
+                    for p, v in zip(FILTER_PCTS, r["q"] or [None] * len(FILTER_PCTS))]}
+    _FILTER_STATS_CACHE[key] = out
+    return out
 
 
 @router.post("/run")
@@ -827,12 +1046,12 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
-        # Applied to entry_price, which trade_paths stores AS-TRADED -- the
-        # price a fill would actually have happened at.
-        strike_pred, strike_args = "", []
-        if req.max_strike and req.max_strike > 0:
-            strike_pred = " AND tp.entry_price <= $3"
-            strike_args = [float(req.max_strike)]
+        # max_strike (applied to entry_price, which trade_paths stores
+        # AS-TRADED) and the metric filters, numbered after $1 anchor, $2 cutoff.
+        pop = await _population(conn, req)
+        if isinstance(pop, str):
+            return {"error": pop}
+        ps = pop.sql(2)
 
         n_bins = max(2, min(20, int(req.n_bins)))
         # Canonical bin20 collapse, identical to every other stored-bin
@@ -862,11 +1081,11 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                AVG(c.exit_bar)     AS avg_hold
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-        WHERE c.entry_anchor = $1 AND {where_bins}{strike_pred}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
+        WHERE c.entry_anchor = $1 AND {where_bins}{ps.where}
         GROUP BY {grp}, c.exit_rule, is_train
         """
-        rows = await conn.fetch(sql, req.entry_anchor, cutoff_d, *strike_args)
+        rows = await conn.fetch(sql, req.entry_anchor, cutoff_d, *ps.args)
 
         # Median / percentiles / max-DD cannot be derived from the grouped
         # aggregate above, so the overall stat set comes from a second pass
@@ -879,11 +1098,14 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                (c.trade_date < $2::date) AS is_train
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-        WHERE c.entry_anchor = $1 AND {where_bins}{strike_pred}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
+        WHERE c.entry_anchor = $1 AND {where_bins}{ps.where}
         ORDER BY c.trade_date
         """
-        srows = await conn.fetch(stat_sql, req.entry_anchor, cutoff_d, *strike_args)
+        srows = await conn.fetch(stat_sql, req.entry_anchor, cutoff_d, *ps.args)
+        # Over the heatmap's whole population (every cell), not a zone.
+        filter_report = await _filter_report(conn, combine_sql, where_bins, "TRUE",
+                                             [req.entry_anchor, cutoff_d], pop)
 
     # ── Fold into grid + breakdown ────────────────────────────────────────
     grid = [[None] * n_bins for _ in range(n_bins if two_factor else 1)]
@@ -969,6 +1191,8 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "secondary_metric": req.secondary_metric,
         "entry_anchor":     req.entry_anchor,
         "max_strike":       req.max_strike,
+        "filters":          pop.describe(),
+        "filter_report":    filter_report,
         # Echoed so a locked run carries its own window: comparing a TRAIN
         # lock against a TEST run would cross populations silently.
         "window":           active,
@@ -1097,7 +1321,7 @@ def _u01(expr: str) -> str:
             f" & 2147483647)::float8 / 2147483647.0")
 
 
-def _random_exit_zone_sql(combine_sql: str, ret_case: str, strike_pred: str) -> str:
+def _random_exit_zone_sql(combine_sql: str, ret_case: str, ps: PopSQL) -> str:
     """Random entry AND random exit: the layer beneath the entry baseline.
 
     The entry-only baseline holds timing and exit policy constant and
@@ -1133,9 +1357,9 @@ def _random_exit_zone_sql(combine_sql: str, ret_case: str, strike_pred: str) -> 
                {_u01("c.ticker || '|' || c.trade_date::text || '|' || $5::text"
                      " || '" + _EXIT_SALT + "'")} AS u
         FROM c
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
         JOIN want w ON w.trade_date = c.trade_date
-        WHERE c.entry_anchor = $1{strike_pred}
+        WHERE c.entry_anchor = $1{ps.where}
     ),
     picked AS (
         SELECT e.* FROM elig e
@@ -1160,7 +1384,7 @@ def _random_exit_zone_sql(combine_sql: str, ret_case: str, strike_pred: str) -> 
 
 
 def _random_exit_only_sql(combine_sql: str, where_bins: str, cell_pred: str,
-                          strike_pred: str, ret_case: str,
+                          ps: PopSQL, ret_case: str,
                           p_seed: int, p_ns: int, p_lo: int, p_hi: int) -> str:
     """The signal's REAL entries with a randomly drawn holding period.
 
@@ -1202,8 +1426,8 @@ def _random_exit_only_sql(combine_sql: str, where_bins: str, cell_pred: str,
         SELECT c.ticker, c.trade_date, tp.entry_price, {u} AS u
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{ps.where}
     )
     SELECT b.ticker, b.trade_date,
            (d.n_days * {BARS_PER_SESSION})::float8 AS exit_bar,
@@ -1221,11 +1445,11 @@ def _random_exit_only_sql(combine_sql: str, where_bins: str, cell_pred: str,
 
 
 def _zone_count_sql(combine_sql: str, where_bins: str,
-                    cell_pred: str, strike_pred: str) -> str:
+                    cell_pred: str, ps: PopSQL) -> str:
     """Per-date trade counts for the real zone -- the shape a baseline matches.
 
     Takes the ZONE QUERY'S OWN arg list unchanged, because cell_pred and
-    strike_pred are that query's fragments and their placeholder numbers are
+    the population fragment are that query's fragments and their placeholder numbers are
     computed against it. Renumbering them for a shorter list is exactly how
     the two populations would drift apart, so the list stays identical and
     this query simply does not need $2.
@@ -1243,14 +1467,14 @@ def _zone_count_sql(combine_sql: str, where_bins: str,
     SELECT c.trade_date, COUNT(*) AS k
     FROM c
     JOIN tt_bins bt USING (ticker, trade_date)
-    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
     WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
-          AND {where_bins} AND {cell_pred}{strike_pred}
+          AND {where_bins} AND {cell_pred}{ps.where}
     GROUP BY c.trade_date
     """
 
 
-def _random_zone_sql(combine_sql: str, strike_pred: str) -> str:
+def _random_zone_sql(combine_sql: str, ps: PopSQL) -> str:
     """Sample the SAME NUMBER of trades per date as the real zone, at random.
 
     Matching on the date distribution is the whole point. Sampling uniformly
@@ -1291,9 +1515,9 @@ def _random_zone_sql(combine_sql: str, strike_pred: str) -> str:
                                 || '|' || $5::text)
                ) AS rn
         FROM c
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
         JOIN want w ON w.trade_date = c.trade_date
-        WHERE c.entry_anchor = $1{strike_pred}
+        WHERE c.entry_anchor = $1{ps.where}
     )
     SELECT e.ticker, e.trade_date, e.exit_bar, e.exit_return, e.exit_rule,
            e.entry_price, (e.trade_date < $2::date) AS is_train
@@ -1356,13 +1580,14 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         where_bins, cell_pred, mask_sql, sel_params, prov = sel
         args = [req.entry_anchor, cutoff_d, *sel_params]
 
-        # Same population filter as /run. The placeholder index depends on how
-        # many args the cell predicate already consumed, so it is computed
-        # rather than hardcoded.
-        strike_pred = ""
-        if req.max_strike and req.max_strike > 0:
-            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
-            args = args + [float(req.max_strike)]
+        # Same population as /run, from the same builder, numbered after
+        # however many args the cell predicate consumed.
+        pop = await _population(conn, req)
+        if isinstance(pop, str):
+            return {"error": pop}
+        sel_args = list(args)
+        ps = pop.sql(len(args))
+        args = args + ps.args
 
         # Portfolio mode only. Rides along in the row that already exists, so
         # it adds no rows, no joins and no second query -- see
@@ -1386,13 +1611,18 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         -- the vendored function is not the place to add it. Rejoining
         -- trade_paths on its primary key is cheap and leaves the combine
         -- untouched.
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{ps.where}
         ORDER BY c.trade_date, c.ticker
         """
         baseline = None
+        filter_report = None
         if not req.randomize:
             rows = await conn.fetch(sql, *args)
+            # Over THIS zone. In portfolio mode there is no /run, so this is
+            # the only place the provenance card can get it from.
+            filter_report = await _filter_report(conn, combine_sql, where_bins,
+                                                 cell_pred, sel_args, pop)
         else:
             # Step 1: the SHAPE to match -- how many trades the real zone
             # fires on each date. Counted with the identical predicate, so
@@ -1401,7 +1631,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             # window filter runs downstream on the random rows exactly as it
             # does on real ones, so TRAIN and TEST both stay matched.
             cnt_rows = await conn.fetch(
-                _zone_count_sql(combine_sql, where_bins, cell_pred, strike_pred),
+                _zone_count_sql(combine_sql, where_bins, cell_pred, ps),
                 *args)
             if not cnt_rows:
                 return {"error": "the selected zone has no trades — nothing to "
@@ -1410,21 +1640,18 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             want_ks    = [int(r["k"]) for r in cnt_rows]
             seed = DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)
 
-            # Placeholders are fixed at $1..$5 in _random_zone_sql, so the
-            # optional strike filter takes $6 -- it cannot reuse the zone
-            # query's computed index, which counted a different arg list.
+            # Placeholders are fixed at $1..$5 in _random_zone_sql ($1..$8 in
+            # _random_exit_zone_sql), so the population is numbered from
+            # there -- it cannot reuse the zone query's own numbering.
             kind = (req.baseline_kind or "entry").strip()
             if kind not in ("entry", "exit", "entry_exit"):
                 return {"error": f"unknown baseline_kind {req.baseline_kind!r}"}
 
             if kind == "entry":
-                r_strike, r_args = "", []
-                if req.max_strike and req.max_strike > 0:
-                    r_strike = " AND tp.entry_price <= $6"
-                    r_args = [float(req.max_strike)]
+                rps = pop.sql(5)
                 rows = await conn.fetch(
-                    _random_zone_sql(combine_sql, r_strike),
-                    req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *r_args)
+                    _random_zone_sql(combine_sql, rps),
+                    req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *rps.args)
                 hold_note = None
             else:
                 # Both random-exit kinds. One CDF, one CASE, built once and
@@ -1447,9 +1674,9 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
                        COUNT(*) AS n
                 FROM c
                 JOIN tt_bins bt USING (ticker, trade_date)
-                JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+                JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
                 WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
-                      AND {where_bins} AND {cell_pred}{strike_pred}
+                      AND {where_bins} AND {cell_pred}{ps.where}
                 GROUP BY 1
                 """, *args)
                 sess_counts = {int(r["sess"]): int(r["n"]) for r in h_rows}
@@ -1466,14 +1693,11 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
                                         for n in ns)
                             + "\n           END")
                 if kind == "entry_exit":
-                    r_strike, r_args = "", []
-                    if req.max_strike and req.max_strike > 0:
-                        r_strike = " AND tp.entry_price <= $9"
-                        r_args = [float(req.max_strike)]
+                    rps = pop.sql(8)
                     rows = await conn.fetch(
-                        _random_exit_zone_sql(combine_sql, ret_case, r_strike),
+                        _random_exit_zone_sql(combine_sql, ret_case, rps),
                         req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed),
-                        ns, los, his, *r_args)
+                        ns, los, his, *rps.args)
                 else:
                     # exit-only: the REAL entries, so it reuses the zone
                     # query's own predicates and arg list, and appends its
@@ -1482,7 +1706,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
                     base_n = len(args)
                     rows = await conn.fetch(
                         _random_exit_only_sql(
-                            combine_sql, where_bins, cell_pred, strike_pred,
+                            combine_sql, where_bins, cell_pred, ps,
                             ret_case, base_n + 1, base_n + 2, base_n + 3, base_n + 4),
                         *args, str(seed), ns, los, his)
                 # A resolved path has every max_days column populated, so a
@@ -1657,6 +1881,8 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "primary_metric":   req.primary_metric,
         "secondary_metric": req.secondary_metric,
         "max_strike":       req.max_strike,
+        "filters":          pop.describe(),
+        "filter_report":    filter_report,
         "n_bins":           max(2, min(20, int(req.n_bins))),
         "baseline_kind":    req.baseline_kind if req.randomize else None,
         "seed":             (DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)) if req.randomize else None,
@@ -1780,7 +2006,7 @@ class BatchCtx:
     """
 
     def __init__(self, req, rules, by_key, cutoff_d, cutoff_iso, args,
-                 where_bins, cell_pred, strike_pred):
+                 where_bins, cell_pred, pop, ps):
         self.req = req
         self.rules = rules
         self.by_key = by_key
@@ -1789,7 +2015,8 @@ class BatchCtx:
         self.args = args
         self.where_bins = where_bins
         self.cell_pred = cell_pred
-        self.strike_pred = strike_pred
+        self.pop = pop          # Population: the random samplers number their own
+        self.ps = ps            # PopSQL already folded into self.args
         self.want_dates = None
         self.want_ks = None
         self.cdf = None          # (ns, los, his)
@@ -1830,7 +2057,7 @@ class BatchCtx:
         combine_sql, _ = self.combine(self.req.rule_keys)
         cnt = await conn.fetch(
             _zone_count_sql(combine_sql, self.where_bins,
-                            self.cell_pred, self.strike_pred), *self.args)
+                            self.cell_pred, self.ps), *self.args)
         if not cnt:
             return "the selected zone has no trades — nothing to match against"
         self.want_dates = [r["trade_date"] for r in cnt]
@@ -1847,9 +2074,9 @@ class BatchCtx:
                COUNT(*) AS n
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){self.ps.join}
         WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
-              AND {self.where_bins} AND {self.cell_pred}{self.strike_pred}
+              AND {self.where_bins} AND {self.cell_pred}{self.ps.where}
         GROUP BY 1
         """, *self.args)
         ns, los, his = _hold_cdf({int(r["sess"]): int(r["n"]) for r in h},
@@ -1869,7 +2096,7 @@ class BatchCtx:
 
 
 def _policy_sql(combine_sql: str, where_bins: str,
-                cell_pred: str, strike_pred: str) -> str:
+                cell_pred: str, ps: PopSQL) -> str:
     """The zone's own trades under one exit policy -- no randomisation.
 
     $2 is cast for the same reason _zone_count_sql casts it: it is the only
@@ -1884,8 +2111,8 @@ def _policy_sql(combine_sql: str, where_bins: str,
            (c.trade_date < $2::date) AS is_train
     FROM c
     JOIN tt_bins bt USING (ticker, trade_date)
-    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-    WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
+    WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{ps.where}
     -- NOT optional. max_dd is a running peak-to-trough over np.cumsum, so
     -- it depends on the order rows arrive in; without this the policy row's
     -- Max DD and Calmar would be computed over whatever order the planner
@@ -1917,30 +2144,24 @@ async def _run_variant(pool, ctx, v: dict) -> dict:
         if not kind:
             rows = await conn.fetch(
                 _policy_sql(combine_sql, ctx.where_bins, ctx.cell_pred,
-                            ctx.strike_pred), *ctx.args)
+                            ctx.ps), *ctx.args)
         elif kind == "entry":
-            r_strike, r_args = "", []
-            if ctx.req.max_strike and ctx.req.max_strike > 0:
-                r_strike = " AND tp.entry_price <= $6"
-                r_args = [float(ctx.req.max_strike)]
+            rps = ctx.pop.sql(5)
             rows = await conn.fetch(
-                _random_zone_sql(combine_sql, r_strike),
+                _random_zone_sql(combine_sql, rps),
                 ctx.req.entry_anchor, ctx.cutoff_d, ctx.want_dates, ctx.want_ks,
-                str(seed), *r_args)
+                str(seed), *rps.args)
         elif kind == "entry_exit":
-            r_strike, r_args = "", []
-            if ctx.req.max_strike and ctx.req.max_strike > 0:
-                r_strike = " AND tp.entry_price <= $9"
-                r_args = [float(ctx.req.max_strike)]
+            rps = ctx.pop.sql(8)
             rows = await conn.fetch(
-                _random_exit_zone_sql(combine_sql, ctx.ret_case, r_strike),
+                _random_exit_zone_sql(combine_sql, ctx.ret_case, rps),
                 ctx.req.entry_anchor, ctx.cutoff_d, ctx.want_dates, ctx.want_ks,
-                str(seed), ns, los, his, *r_args)
+                str(seed), ns, los, his, *rps.args)
         elif kind == "exit":
             base_n = len(ctx.args)
             rows = await conn.fetch(
                 _random_exit_only_sql(combine_sql, ctx.where_bins, ctx.cell_pred,
-                                      ctx.strike_pred, ctx.ret_case,
+                                      ctx.ps, ctx.ret_case,
                                       base_n + 1, base_n + 2, base_n + 3, base_n + 4),
                 *ctx.args, str(seed), ns, los, his)
         else:
@@ -2114,13 +2335,14 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         where_bins, cell_pred, _mask_sql, sel_params, _prov = sel
         args = [req.entry_anchor, cutoff_d, *sel_params]
 
-        strike_pred = ""
-        if req.max_strike and req.max_strike > 0:
-            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
-            args = args + [float(req.max_strike)]
+        pop = await _population(conn, req)
+        if isinstance(pop, str):
+            return {"error": pop}
+        ps = pop.sql(len(args))
+        args = args + ps.args
 
     ctx = BatchCtx(req, rules, by_key, cutoff_d, cutoff_iso, args,
-                   where_bins, cell_pred, strike_pred)
+                   where_bins, cell_pred, pop, ps)
 
     base_seed = DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)
     seeds = _suite_seeds(n, base_seed)
@@ -2242,6 +2464,7 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         "rule_keys": list(req.rule_keys),
         "entry_anchor": req.entry_anchor,
         "max_strike": req.max_strike,
+        "filters": pop.describe(),
         "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in SUITE_METRICS],
         "rows": out_rows,
         "tickers": tickers,
@@ -2376,10 +2599,11 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         where_bins, cell_pred, _mask_sql, sel_params, _prov = sel
         args = [req.entry_anchor, cutoff_d, *sel_params]
 
-        strike_pred = ""
-        if req.max_strike and req.max_strike > 0:
-            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
-            args = args + [float(req.max_strike)]
+        pop = await _population(conn, req)
+        if isinstance(pop, str):
+            return {"error": pop}
+        ps = pop.sql(len(args))
+        args = args + ps.args
 
     # ── Cross product ────────────────────────────────────────────────────
     fam_rules: dict[str, list] = {}
@@ -2532,10 +2756,10 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     cnt_sql = f"""
     SELECT COUNT(*) AS k
     FROM tt_bins bt
-    JOIN trade_paths tp USING (ticker, trade_date)
+    JOIN trade_paths tp USING (ticker, trade_date){ps.join}
     WHERE tp.entry_anchor = $1 AND {resolution_pred}
           AND $2::date IS NOT NULL
-          AND {where_bins} AND {cell_pred}{strike_pred}
+          AND {where_bins} AND {cell_pred}{ps.where}
     """
     async with pool.acquire() as conn:
         trades_each = int((await conn.fetchrow(cnt_sql, *args))["k"] or 0)
@@ -2609,9 +2833,9 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
            (tp.trade_date < $2::date) AS is_train,
            {", ".join(sel)}
     FROM tt_bins bt
-    JOIN trade_paths tp USING (ticker, trade_date)
+    JOIN trade_paths tp USING (ticker, trade_date){ps.join}
     WHERE tp.entry_anchor = $1 AND {resolution_pred}
-          AND {where_bins} AND {cell_pred}{strike_pred}
+          AND {where_bins} AND {cell_pred}{ps.where}
     -- Row order is part of the contract: max_dd is a running peak-to-trough
     -- over np.cumsum, so every combination must fold the same trades in the
     -- same sequence. Matches the ordering build_combine_sql's consumers use.
@@ -2780,7 +3004,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     if req.verify:
         verify_report = await _grid_verify(
             pool, combos_meta, held, by_key, prows, key_ix, bars, rets,
-            _resolve, where_bins, cell_pred, strike_pred, args,
+            _resolve, where_bins, cell_pred, ps, args,
             max(1, min(int(req.verify), len(combos_meta))))
         if verify_report.get("mismatches"):
             return {"error": "VERIFY FAILED — the vectorised path disagrees "
@@ -2794,6 +3018,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "cells": req.cells,
         "entry_anchor": req.entry_anchor,
         "max_strike": req.max_strike,
+        "filters": pop.describe(),
         "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in GRID_METRICS],
         "tickers": tickers,
         "dates": dates,
@@ -2818,7 +3043,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
 
 async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
                        bars, rets, resolve_fn, where_bins, cell_pred,
-                       strike_pred, args, sample: int) -> dict:
+                       ps: PopSQL, args, sample: int) -> dict:
     """Diff the vectorised path against build_combine_sql, per trade.
 
     Bit-identical or it fails. There are no legitimate small differences
@@ -2857,9 +3082,9 @@ async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
             SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule
             FROM c
             JOIN tt_bins bt USING (ticker, trade_date)
-            JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+            JOIN trade_paths tp USING (ticker, trade_date, entry_anchor){ps.join}
             WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
-                  AND {where_bins} AND {cell_pred}{strike_pred}
+                  AND {where_bins} AND {cell_pred}{ps.where}
             ORDER BY c.trade_date, c.ticker
             """, *args)
 

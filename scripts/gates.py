@@ -172,6 +172,14 @@ GATES = [
     # Strategy Signal: the decision rule, the percentile, the index/surface
     # clock and the config store, offline; then the page clicked in Edge
     # against the real router's output over fabricated bars.
+    # Factor Trades' population (max_strike + metric filters): every query
+    # built by ONE helper, byte-identical to the previous code when unused,
+    # present in every trade-selecting statement when used. Offline; reads
+    # the previous code from git.
+    _s("check_ft_population.py",
+       note="filters reach every query; unchanged when unused; guarded"),
+    _s("check_ft_filters_ui.py", can_skip=True,
+       note="filter rows, min n, lock banner, CSV header — clicked in Edge"),
     _s("check_strategy_signal.py",
        note="decision, percentile, one clock, one fetch per source, store"),
     _s("check_strategy_signal_ui.py", can_skip=True,

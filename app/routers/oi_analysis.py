@@ -15,7 +15,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
-from app.metric_filter import get_excluded_metrics, build_feature_cols
+from app.metric_filter import get_excluded_metrics, build_feature_cols, daily_feature_columns
 from app.split_factors import make_split_factor_map
 
 # ── Secondary Signal Scanner cache ────────────────────────────────────────────
@@ -590,18 +590,11 @@ async def list_tickers(pool=Depends(get_oi_pool)):
 async def list_columns(pool=Depends(get_oi_pool)):
     if not pool:
         return {"features": [], "outcomes": [], "feature_families": []}
+    # The same function Factor Trades' filter guard calls, so what the
+    # dropdowns offer and what that guard accepts are one list.
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT column_name FROM information_schema.columns
-               WHERE table_name = 'daily_features' AND table_schema = 'public'
-               AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
-               AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
-               ORDER BY ordinal_position""")
-        excl_set = await get_excluded_metrics(conn)
-
-    all_cols = [r["column_name"] for r in rows]
-    outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
-    features = build_feature_cols(all_cols, outcomes, excl_set)
+        cols = await daily_feature_columns(conn)
+    excl_set, outcomes, features = cols["elig"], cols["outcomes"], cols["features"]
 
     # Build family-grouped structure for <optgroup> rendering in all metric dropdowns.
     # Only possible when metric_classification exists (excl_set is not None).

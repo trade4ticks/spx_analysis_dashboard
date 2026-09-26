@@ -137,6 +137,17 @@
     .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
     .ft-win span.on.test { background:rgba(232,67,147,.25); color:#e84393; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
+    /* Metric filter rows: metric on its own line (the rail is narrow), then
+       operator, value and remove, then the train-window distribution. */
+    .ft-filter { border:1px solid var(--border); border-radius:4px; padding:5px 6px; margin-bottom:6px; }
+    .ft-filter-line { display:flex; gap:4px; align-items:center; margin-top:4px; }
+    .ft-filter-line select { width:auto; flex:none; }
+    .ft-filter-line input { flex:1; min-width:0; }
+    .ft-filter-x { cursor:pointer; color:var(--dim); padding:0 4px; font-size:14px; }
+    .ft-filter-x:hover { color:#e84393; }
+    .ft-filter-off { color:#e0b066; font-size:10px; margin-top:3px; }
+    .ft-filter-st { font-size:9.5px; color:var(--dim); margin-top:3px; line-height:1.4;
+                    font-variant-numeric:tabular-nums; }
     /* Suite table. Each cell stacks the headline (how many draws the policy
        beat) over the supporting distribution, because the headline is the
        number being read and the rest is why. */
@@ -306,6 +317,44 @@
             </select>
           </div>
         </template>
+      </div>
+
+      {#- METRIC FILTERS. A population filter like max strike, on RAW
+          daily_features values, ANDed. Outside the mode-specific section so
+          it stays in PORTFOLIO mode, where the metric pickers are hidden: the
+          filter narrows a portfolio's trades exactly as it narrows a zone's.
+          It removes rows and never re-bins -- a trade's cell is its stored
+          bin -- so a filtered heatmap has the unfiltered one's cells. Like
+          max strike, it takes effect on the next Run. -#}
+      <div class="ft-sec">
+        <div class="ft-sec-h" title="Raw metric values from daily_features, ANDed together. Removes trades from every query — heatmap, stats, charts, grid, suite, baselines, exports — and never re-bins: a trade stays in its stored cell.">Metric filters</div>
+        <template x-for="(f, fi) in filters" :key="f.id">
+          <div class="ft-filter">
+            <select x-model="f.metric" @change="ensureFilterStats(f.metric)" style="width:100%">
+              <option value="">choose a metric…</option>
+              <template x-for="grp in groupMetricsByFamily(metrics)" :key="'fg-'+f.id+'-'+grp.family_num">
+                <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                  <template x-for="mm in grp.metrics" :key="'f-'+f.id+'-'+mm">
+                    <option :value="mm" x-text="mm" :selected="mm === f.metric"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
+            <div class="ft-filter-line">
+              <select x-model="f.op" title="Keep trades whose value is above or below the threshold">
+                <option value=">">&gt;</option>
+                <option value="<">&lt;</option>
+              </select>
+              <input type="number" step="any" x-model.lazy="f.value" :placeholder="filterMedian(f)"
+                     title="The metric's own raw units — see the train-window percentiles below">
+              <span class="ft-filter-x" title="Remove this filter" @click="removeFilter(fi)">&times;</span>
+            </div>
+            <div class="ft-filter-off" x-show="filterRowState(f)" x-text="filterRowState(f)"></div>
+            <div class="ft-filter-st" x-show="filterStatsText(f)" x-text="filterStatsText(f)"></div>
+          </div>
+        </template>
+        <button class="ft-savebtn" @click="addFilter()" :disabled="filters.length >= 4"
+                title="Narrow the population on a third (or fourth) metric's raw value">+ Add filter</button>
       </div>
 
       {#- Entry anchor is page-level, so it sits outside the mode-specific
@@ -669,6 +718,18 @@
             <div class="p" x-show="c.r.max_strike"
                  title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
                  x-text="'max strike $' + c.r.max_strike"></div>
+            {#- Metric filters, and what they removed. Coloured like the other
+                things that change what every number means. -#}
+            <template x-for="(fl, fli) in (c.r.filters || [])" :key="'rf-'+c.i+'-'+fli">
+              <div class="p" style="color:#e0b066"
+                   title="Population filter on the raw daily_features value. Removes trades; bins are unchanged."
+                   x-text="'filter ' + filterLabel(fl)"></div>
+            </template>
+            <template x-for="(ln, lni) in filterReportLines(c.r)" :key="'rr-'+c.i+'-'+lni">
+              <div class="p" style="color:var(--muted)"
+                   title="Against the population without the metric filters, in this card's window. 'No value' is a metric with no reading for that ticker-day (e.g. before its history starts), not the threshold rejecting it. Each filter is counted on its own, so one trade can fail more than one."
+                   x-text="ln"></div>
+            </template>
             <template x-for="k in (c.r.rules || [])" :key="'rk-'+c.i+'-'+k"><div class="p" x-text="k"></div></template>
             <!-- Provenance that silently changes what the numbers mean. -->
             <div class="p warn" x-show="c.r.horizon_auto_added"
@@ -725,6 +786,16 @@
                   : 'Locked view — cells are inert here. Switch to Edited to change the zone.'"></span>
           <!-- Periodic reminder, not a warning: bright grey, on the caption
                line, where it is read in context rather than dismissed. -->
+          {#- Minimum trades per cell: below it a cell is hatched and left out
+              of the colour scale (Factor Analysis' rule and default). The
+              share below says when a filter has thinned the grid too far. -#}
+          <span class="ft-note" style="display:inline-flex;align-items:center;gap:5px"
+                title="Cells with fewer trades than this are hatched and do not set the colour scale.">
+            min n
+            <input type="range" min="0" max="200" step="5" x-model.number="hmMinSampleN" style="width:90px">
+            <b x-text="hmMinSampleN"></b>
+            <span x-text="hmBelowNote ? '· ' + hmBelowNote : ''"></span>
+          </span>
           <span class="ft-tt">train/test · bins frozen at
             <span x-text="cutoffDate || '…'"></span> · selection on TRAIN,
             test is the verdict · not comparable with Recall (in-sample)</span>
@@ -759,6 +830,17 @@
           different metric pairs or bin counts is not: the same [ix, iy]
           addresses different bins on each side, so neither the Change row nor
           the Change heatmap is like-for-like. Warned, not blocked. -#}
+      {#- Different filters or max strike: the two sides are different trade
+          sets. A filtered run compared against an unfiltered lock is the
+          misreading this exists to stop. Warned, not blocked. -#}
+      <div x-show="lockedPopMismatch"
+           style="margin-bottom:8px;padding:5px 9px;border-radius:3px;font-size:11px;
+                  background:rgba(232,67,147,.10);border:1px solid rgba(232,67,147,.35);color:#e84393">
+        Locked and current runs cover <b>different populations</b> —
+        <span x-text="lockedPopMismatch"></span>. The Change row compares two
+        different trade sets.
+      </div>
+
       <div x-show="lockedPairMismatch"
            style="margin-bottom:8px;padding:5px 9px;border-radius:3px;font-size:11px;
                   background:rgba(232,67,147,.10);border:1px solid rgba(232,67,147,.35);color:#e84393">
@@ -1333,10 +1415,10 @@
                       trade_paths subset, after max_strike -- so the header
                       names which n it is rather than leaving a number that
                       will not match the stat bar. -#}
-                  <th class="sig-th-sort" style="width:70px"
+                  <th class="sig-th-sort" style="width:92px"
                       :class="sigSortClass('agg_n')" @click="sigSortBy('agg_n')"
-                      title="Factor Analysis n — daily_features universe, train window. This page reports fewer: only ticker-days with a resolved trade path, after the max-strike filter.">
-                    n(FA) <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
+                      title="Factor Analysis n — daily_features universe, train window, UNFILTERED: neither max strike nor this page's metric filters apply to it. This page reports fewer: only ticker-days with a resolved trade path, after both.">
+                    n(FA, unfiltered) <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
                   </th>
                   <th style="width:114px">Thumb</th>
                 </tr>
