@@ -1821,6 +1821,95 @@ def check_component_filters() -> None:
           f"a filter leaving no VIX value makes that section 'nodata', distinct from 'skipped' ({so['states']})")
 
 
+EXPORT_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8'));
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const c = factory();
+c.$nextTick = f => f && f();
+c.registry = job.registry;
+c.setTrades(job.payload);
+const R = k => c.registry.find(m => m.key === k);
+const csv = () => c.exportText();
+const out = { none: csv() };
+c.setHi(R('vix'), 25);
+c.toggleCat(R('day_of_week'), 1);          // untick Tuesday
+c.setLo(R('premium'), 1000);               // a log column: already exported
+out.filtered = csv();
+out.count = c.filteredCount;
+c.resetAllFilters();
+c.setHi(R('vix3m_vix'), 1.09);
+out.ratioEntry = csv();
+c.setRatioBasis('close');
+c.setHi(R('vix3m_vix'), 1.10);
+out.ratioClose = csv();
+out.quoted = obTradeCsv({ a: ['x, "y"', null, 3.25] }, [0, 1, 2], [{ header: 'a', column: 'a' }]);
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def check_export_csv() -> None:
+    """The Export CSV button's file, built by the shipped JS: exactly the
+    trades the page shows, the log's own columns, and one column per active
+    filter holding the value it judged (plus the entry bar for an index level)."""
+    print("export CSV (shipped JS, stubbed Alpine)")
+    import csv as _csv
+    import io
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("export CSV (node not installed)")
+        return
+    cols = {
+        "date_opened": ["2021-01-04", "2021-02-02", "2021-03-01", "2021-04-05", "2021-05-03", "2021-06-08"],
+        "time_opened": ["10:00:00", "10:00:00", "15:32:00", "10:00:00", "10:00:00", "10:00:00"],
+        "date_closed": ["2021-01-20", "2021-02-15", "2021-03-19", "2021-04-20", "2021-05-20", "2021-06-21"],
+        "pnl": [100.0, -50.0, 200.0, 0.0, -300.0, 75.0],
+        "day_of_week": [0, 1, 0, 0, 0, 1],
+        "exit_reason": ["Profit Target", "Stop, Loss", "Profit Target", "Expired", "Stop, Loss", None],
+        "premium": [1250.0, 900.0, 1600.0, -500.0, 1250.0, 900.0],
+        "max_profit": [None] * 6,
+        "vix_level": [17.2, None, 22.9, 31.5, 19.0, 25.0],
+        "vix_bar_time": ["10:00:00", None, "15:30:00", "10:00:00", "10:00:00", "10:00:00"],
+        "vix3m_bar_time": ["10:00:00", None, "15:30:00", "10:00:00", "10:00:00", "10:00:00"],
+        "vix3m_vix_ratio_entry": [1.10, None, 1.02, 0.95, 1.08, 1.11],
+        "vix3m_vix_ratio_close": [1.20, 1.05, 0.99, 0.90, 1.15, 1.30],
+    }
+    payload = {"n": 6, "columns": cols, "date_min": "2021-01-04", "date_max": "2021-06-21", "notes": {},
+               "suggested_name": "t", "market": {"joined": True}}
+    p = subprocess.run(["node", "-e", EXPORT_DRIVER, str(JS), str(CORE)],
+                       input=json.dumps({"registry": json.loads(json.dumps(REGISTRY)), "payload": payload}),
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        check(False, f"export driver ran ({p.stderr.strip()[:300]})")
+        return
+    o = json.loads(p.stdout)
+    rows = {k: list(_csv.reader(io.StringIO(o[k]))) for k in ("none", "filtered", "ratioEntry", "ratioClose", "quoted")}
+    base = ["date_opened", "time_opened", "date_closed", "premium", "pnl", "exit_reason"]
+    n = rows["none"]
+    check(n[0] == base and len(n) == 7,
+          f"no filter: every trade, the log's own columns only — no market column, none empty in the log ({n[0]})")
+    f = rows["filtered"]
+    check(f[0] == base + ["Day of Week", "VIX Level", "VIX entry bar"],
+          f"active filters add the value each judged (premium is already a log column, not repeated) ({f[0]})")
+    check(len(f) - 1 == o["count"] == 3 and [r[0] for r in f[1:]] == ["2021-01-04", "2021-03-01", "2021-05-03"],
+          f"rows are exactly the trades the page shows ({len(f) - 1} rows, page {o['count']})")
+    check(f[2][6:] == ["Mon", "22.9", "15:30:00"] and f[3][5] == "Stop, Loss",
+          f"values as held, entry bar beside the level, weekday by name, a comma kept inside one cell ({f[2]}, {f[3]})")
+    e, cl = rows["ratioEntry"], rows["ratioClose"]
+    check(e[0][-3:] == ["VIX3M/VIX Ratio (entry)", "VIX entry bar", "VIX3M entry bar"] and e[1][-3] == "1.02",
+          f"a ratio filter exports the basis it read, with both series' entry bars ({e[0][-3:]})")
+    check(cl[0][-1] == "VIX3M/VIX Ratio (daily close)" and "VIX entry bar" not in cl[0] and cl[1][-1] == "1.05",
+          f"on the daily-close basis it exports the close column and no entry bar ({cl[0][-2:]})")
+    crlf = chr(13) + chr(10)
+    check(o["quoted"] == crlf.join(['a', '"x, ""y"""', '', '3.25', '']),
+          f"quotes and commas escaped, null as an empty cell ({o['quoted']!r})")
+
+
 def main() -> int:
     check_registry()
     check_against_source()
@@ -1829,6 +1918,7 @@ def main() -> int:
     check_section_parity()
     check_auto_bins()
     check_component_filters()
+    check_export_csv()
     check_deployment_and_extra_stats()
     check_surface_ranking_ui()
     check_surface_rows()

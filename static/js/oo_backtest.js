@@ -374,6 +374,35 @@ function obFmt(v, fmt) {
   }
 }
 
+/* The trade log's own columns, in export order. Market and surface values are
+ * NOT here: an export carries one of those only when a filter judged it. A
+ * column with no value anywhere in the log (CSV-only fields on a Mesosim log,
+ * and the reverse) is left out by the caller. */
+const OB_EXPORT_BASE = [
+  'date_opened', 'time_opened', 'date_closed', 'time_closed', 'days_in_trade', 'strategy', 'position_id',
+  'legs', 'contracts', 'premium', 'margin_req', 'pnl', 'pnl_pct', 'max_profit', 'max_loss', 'exit_reason',
+  'spx_open_price', 'spx_close_price', 'missing_data_at_fill',
+];
+
+function obCsvCell(v) {
+  if (v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v))) return '';
+  const s = String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/* fields: [{header, column, map?}] — one CSV column each, rows in idx order.
+ * Values are written as held (full precision), never as the page formats them. */
+function obTradeCsv(cols, idx, fields) {
+  const lines = [fields.map(f => obCsvCell(f.header)).join(',')];
+  for (const i of idx) {
+    lines.push(fields.map(f => {
+      const v = (cols[f.column] || [])[i];
+      return obCsvCell(f.map && v !== null && v !== undefined ? f.map(v) : v);
+    }).join(','));
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('ooBacktest', () => ({
     registry: [],
@@ -1833,6 +1862,55 @@ document.addEventListener('alpine:init', () => {
         out.push({ warn: false, text: 'Premium summed from entry leg fills — no entry_net_premium in this export' });
       }
       return out;
+    },
+
+    /* The export's columns: the log's own, then for each ACTIVE page filter
+     * the value it judged each trade on (the column it actually read — the
+     * chosen ratio basis, a surface row in page scope), plus the entry bar
+     * each index level came from. The same specs as recompute(), so the rows
+     * are exactly the trades the page is showing. A date filter or one on a
+     * log column (premium, exit reason) adds nothing: it is already there. */
+    exportFields() {
+      const cols = OB_DATA.columns || {};
+      const has = c => (cols[c] || []).some(v => v !== null && v !== undefined);
+      const fields = OB_EXPORT_BASE.filter(has).map(c => ({ header: c, column: c }));
+      const seen = new Set(fields.map(f => f.column));
+      const add = f => { if (!seen.has(f.column) && cols[f.column]) { seen.add(f.column); fields.push(f); } };
+      for (const m of this.registry.filter(x => x.filter && this.isActive(x))) {
+        const column = this.metricColumn(m);
+        const basis = m.basis ? (this.ratioBasis === 'close' ? ' (daily close)' : ' (entry)') : '';
+        const unit = m.format === 'pct' ? ' (%)' : '';
+        const labels = m.type === 'categorical' && m.categories
+          ? new Map(m.categories.map(o => [o.value, o.label])) : null;
+        add({ header: m.label + basis + unit, column, map: labels ? v => labels.get(v) ?? v : null });
+        if (m.basis && this.ratioBasis === 'close') continue;   // a daily close has no entry bar
+        for (const s of m.series || []) add({ header: `${s.toUpperCase()} entry bar`, column: `${s}_bar_time` });
+      }
+      for (const m of this.surfRows.filter(r => this.rowFilterOnPage(r))) {
+        const suffix = m.format && m.format.suffix ? ` (${m.format.suffix.trim()})` : '';
+        add({ header: m.label + suffix, column: m.column });
+      }
+      return fields;
+    },
+
+    /* The file's text: the filtered trades (OB_DATA.idx, as recompute() left it). */
+    exportText() { return obTradeCsv(OB_DATA.columns || {}, OB_DATA.idx || [], this.exportFields()); },
+
+    exportCsv() {
+      if (!OB_DATA.columns || !OB_DATA.idx.length) return;
+      const csv = this.exportText();
+      const name = ((this.meta.saved && this.meta.saved.name) || this.meta.suggested_name || 'trades')
+        .replace(/[^\w.-]+/g, '_');
+      const tag = this.activeCount() ? `filtered_${OB_DATA.idx.length}` : `all_${OB_DATA.idx.length}`;
+      // BOM: Excel otherwise reads a UTF-8 file as the system code page.
+      const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}_${tag}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     },
 
     sourceLabel() {

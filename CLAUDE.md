@@ -34,6 +34,12 @@ $10/$25/$50/$100/$250 gives a bin count nearest 24 (tie → smaller step), outli
 metrics are excluded from the fixed pd.cut parity; `check_auto_bins` tests them against a
 numpy reference instead. Everything else stays `fixed`.
 
+**Export CSV** (status line, 2026-10-04) writes exactly the trades the page shows — the same
+`activeSpecs()` as `recompute()`. Columns: the log's own (`OB_EXPORT_BASE`, minus any empty in
+this log), then one per ACTIVE filter holding the column it read (the chosen ratio basis, a
+page-scoped surface row) plus the entry bar time for index levels. Market values never ride
+along unfiltered. Values are written as held, not as displayed. Gate: `check_export_csv`.
+
 A value outside a fixed category list (e.g. a Saturday) gets its own bar, never dropped. Three section states, worded differently: **skipped** (the log has no values in
 the column), **no data** (the current filter leaves none), **ready**. `check_oo_backtest`
 holds JS parity with `calculate_bin_stats` / `calculate_correlation` on the full set and a

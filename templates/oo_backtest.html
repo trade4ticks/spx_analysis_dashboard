@@ -353,6 +353,8 @@
         <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + (meta ? meta.n.toLocaleString() : 0) + ' trades'"></span>
         <span class="ob-dim" x-show="activeCount()" x-text="' · ' + activeCount() + ' filter' + (activeCount() === 1 ? '' : 's') + ' active'"></span>
         <a href="#" class="ob-reset" x-show="activeCount()" @click.prevent="resetAllFilters()">reset all filters</a>
+        <button class="btn primary" style="margin-left:auto;" @click="exportCsv()" :disabled="!filteredCount"
+                title="Download the trades shown — every active filter applied — with the value each filter judged on">Export CSV</button>
       </div>
 
       <div class="ob-card" x-show="loaded && filteredCount === 0">
