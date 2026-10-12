@@ -1677,56 +1677,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.meta.connected || !this.meta.date) return;
       this.candLoading = true; this.candError = '';
       try {
-        const q = new URLSearchParams({ date: this.meta.date });
-        if (this.noise) q.set('noise', this.noise);
-        let cols = this.activeRoleKeys();
-        if (this.showTrade) {
-          // Inserted NEXT TO their midpoint counterparts rather than appended,
-          // because the reading is the disagreement between the pair and two
-          // columns eight apart are not compared.
-          const out = [];
-          for (const k of cols) {
-            out.push(k);
-            if (k === 'noise') out.push('noise_trade');
-            if (k === 'ratio') out.push('ratio_trade');
-          }
-          cols = out;
-        }
-        if (cols.length) q.set('columns', cols.join(','));
-        if (this.extraCols.length) q.set('extra', this.extraCols.join(','));
-        if (this.sortKey) q.set('sort', this.sortKey);
-        q.set('desc', String(this.sortDesc));
-        // Only thresholds the user has actually moved. Sending the whole set
-        // every time would freeze the pipeline's defaults into the URL, so a
-        // default changed upstream would stop reaching the page.
-        for (const k of this.filterKeys) {
-          const v = this.filters[k];
-          const dflt = (this.meta.filters && this.meta.filters.defaults || {})[k];
-          if (v != null && v !== dflt) q.set(k, String(v));
-        }
-        // THE PANE'S OWN CONSTRAINTS, which used to live only in the browser.
-        //
-        // Every piece of this worked except the sending: the pane pushed a
-        // constraint, the chip appeared, the number was accepted, and the
-        // request went out without it -- so the row count never moved and
-        // rows below the threshold stayed on screen. `> 0.40` and `> 40`
-        // behaved identically because neither was ever asked about.
-        //
-        // It was invisible until the pane's ranges were fixed (2026-09-23),
-        // because until then every database-read metric had no range and its
-        // two buttons were disabled, so no constraint could be added at all.
-        // The one metric that escaped that -- $ vol/min, the derived one --
-        // has a named slider of its own, and sliders were always sent.
-        //
-        // A constraint with no number yet is NOT sent: the server answers a
-        // non-numeric threshold with a 400, and an empty input is a filter
-        // being typed, not a filter being asked for.
-        const clauses = this.custom
-          .filter(c => c.value != null && c.value !== '' && isFinite(c.value))
-          .map(c => `${c.key}:${c.op}:${c.value}`);
-        if (clauses.length) q.set('filters', clauses.join(','));
-
-        const j = await scGetJson('/api/equities-scalp/candidates?' + q);
+        const j = await scGetJson('/api/equities-scalp/candidates?' + this.candidateQuery());
         if (j.error) { this.candError = j.error; this.cand = null; }
         else {
           this.cand = j;
@@ -1743,6 +1694,116 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.candLoading = false;
       }
+    },
+
+    /* The candidates request, as the table asks it. ONE builder, shared with
+     * the CSV export: an export that assembled its own query would be a
+     * second copy of the filter wiring, and the pane's constraints have
+     * already gone missing from one copy of it (2026-09-24). */
+    candidateQuery() {
+      const q = new URLSearchParams({ date: this.meta.date });
+      if (this.noise) q.set('noise', this.noise);
+      let cols = this.activeRoleKeys();
+      if (this.showTrade) {
+        // Inserted NEXT TO their midpoint counterparts rather than appended,
+        // because the reading is the disagreement between the pair and two
+        // columns eight apart are not compared.
+        const out = [];
+        for (const k of cols) {
+          out.push(k);
+          if (k === 'noise') out.push('noise_trade');
+          if (k === 'ratio') out.push('ratio_trade');
+        }
+        cols = out;
+      }
+      if (cols.length) q.set('columns', cols.join(','));
+      if (this.extraCols.length) q.set('extra', this.extraCols.join(','));
+      if (this.sortKey) q.set('sort', this.sortKey);
+      q.set('desc', String(this.sortDesc));
+      // Only thresholds the user has actually moved. Sending the whole set
+      // every time would freeze the pipeline's defaults into the URL, so a
+      // default changed upstream would stop reaching the page.
+      for (const k of this.filterKeys) {
+        const v = this.filters[k];
+        const dflt = (this.meta.filters && this.meta.filters.defaults || {})[k];
+        if (v != null && v !== dflt) q.set(k, String(v));
+      }
+      // THE PANE'S OWN CONSTRAINTS, which used to live only in the browser.
+      //
+      // Every piece of this worked except the sending: the pane pushed a
+      // constraint, the chip appeared, the number was accepted, and the
+      // request went out without it -- so the row count never moved and
+      // rows below the threshold stayed on screen. `> 0.40` and `> 40`
+      // behaved identically because neither was ever asked about.
+      //
+      // It was invisible until the pane's ranges were fixed (2026-09-23),
+      // because until then every database-read metric had no range and its
+      // two buttons were disabled, so no constraint could be added at all.
+      // The one metric that escaped that -- $ vol/min, the derived one --
+      // has a named slider of its own, and sliders were always sent.
+      //
+      // A constraint with no number yet is NOT sent: the server answers a
+      // non-numeric threshold with a 400, and an empty input is a filter
+      // being typed, not a filter being asked for.
+      const clauses = this.custom
+        .filter(c => c.value != null && c.value !== '' && isFinite(c.value))
+        .map(c => `${c.key}:${c.op}:${c.value}`);
+      if (clauses.length) q.set('filters', clauses.join(','));
+      return q;
+    },
+
+    /* The ranked table as CSV: the rows it shows (passing only, or every row
+     * when "show excluded" is ticked), in its order, with its columns.
+     * Values are written as held, not as displayed — a CSV is for further
+     * work, and 1,234 or a rounded ratio is a lossy copy of the number. */
+    candidateCsv(cand, showFails) {
+      const esc = v => {
+        if (v == null) return '';
+        const t = String(v);
+        return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+      };
+      const cols = cand.columns || [];
+      const head = ['ticker', ...cols.map(c => this.colLabel(c))];
+      if (showFails) head.push('passes', 'excluded_by');
+      const rows = (cand.rows || []).filter(r => showFails || r.passes);
+      const lines = [head.map(esc).join(',')];
+      for (const r of rows) {
+        const cells = [r.symbol, ...cols.map(c => r.values[c.key])];
+        if (showFails) {
+          cells.push(r.passes ? 'yes' : 'no',
+                     (r.fails || []).map(f => this.filterLabel(f)).join('; '));
+        }
+        lines.push(cells.map(esc).join(','));
+      }
+      return lines.join('\r\n') + '\r\n';
+    },
+
+    /* The table's rows are capped by the endpoint (`limit`, 600); when the
+     * cap cut it short, the export asks again with the same query and the
+     * endpoint's ceiling, so "all rows" is all of them and not the first
+     * screenful. */
+    async exportCsv() {
+      if (!this.cand || !this.visibleRows().length) return;
+      let cand = this.cand;
+      if ((cand.n_shown ?? cand.rows.length) < cand.n_total) {
+        const q = this.candidateQuery();
+        q.set('limit', '5000');
+        const j = await scGetJson('/api/equities-scalp/candidates?' + q);
+        if (j.error) { this.candError = j.error; return; }
+        cand = j;
+      }
+      const csv = this.candidateCsv(cand, this.showFails);
+      const n = (cand.rows || []).filter(r => this.showFails || r.passes).length;
+      const tag = this.showFails ? `all_${n}` : `pass_${n}`;
+      // BOM: Excel otherwise reads a UTF-8 file as the system code page.
+      const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scalp_candidates_${this.meta.date}_${tag}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     },
 
     /* The role keys currently shown. Derived from the server's own role list

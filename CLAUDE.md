@@ -855,6 +855,14 @@ network stubbed and reads the URL it builds; a source check would have passed
 against the broken version, since the word "filters" appears throughout the
 file.
 
+**Export CSV on Ranked candidates** (2026-10-12) writes the table's rows —
+passing only, or every row with `passes`/`excluded_by` when *show excluded* is
+ticked — in its order, with its column labels, values as held. It builds its
+request with the SAME `candidateQuery()` as `loadCandidates()` (a second copy
+of the filter wiring is how the pane's constraints went missing once), and
+when the endpoint's 600-row `limit` cut the table short it asks again with
+`limit=5000`. Gated in `check_scalp_filters.py`.
+
 ## Equities Wall (`/wall`, in progress — 2026-09-22)
 
 A page of dozens to ~100 small live tapes, so a whole watchlist can be
