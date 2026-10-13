@@ -114,7 +114,8 @@ def build_registry() -> list[dict]:
         # Auto: the fixed -$2,000..$2,000 / $250 bins left 10 of 14 empty on a
         # strategy taking ~$5 premium. calc.premium_bin_spec() stays for the
         # source-app comparison but no longer drives the page.
-        _range("premium", "Premium", "premium", -2000, 2000, 50, None, "usd", [],
+        # Slider step $1: $50 was too coarse on small-premium strategies.
+        _range("premium", "Premium", "premium", -2000, 2000, 1, None, "usd", [],
                auto=_auto_bins([10, 25, 50, 100, 250])),
         _range("vix", "VIX Level", "vix_level", 9, 80, 1, calc.vix_bin_spec(), "num", ["vix"]),
         _range("vix3m", "VIX3M Level", "vix3m_level", 9, 80, 1, calc.vix_bin_spec(), "num", ["vix3m"]),
