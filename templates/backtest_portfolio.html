@@ -146,6 +146,14 @@
     .bp-legend { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:10px;
                  color:var(--dim); margin-top:6px; }
     .bp-leg { display:flex; align-items:center; gap:5px; }
+    /* A legend entry is a switch for its line, so it is a button. Hidden
+       reads as dimmed and struck through, not removed: it stays where it
+       was so it can be clicked back. */
+    .bp-legbtn { background:none; border:0; padding:1px 2px; margin:0;
+                 font:inherit; color:inherit; cursor:pointer; border-radius:3px; }
+    .bp-legbtn:hover { color:var(--text, #e8ecf1); }
+    .bp-legbtn:focus-visible { outline:1px solid var(--dim); }
+    .bp-legbtn.off { opacity:0.4; text-decoration:line-through; }
 
     /* ── the monthly grid ─────────────────────────────────────────────
        DOM, not canvas: twelve cells a year is nothing to lay out, and the
@@ -647,17 +655,21 @@
                    aria-label="Cumulative P/L per strategy and for the portfolio"></canvas></div>
             </div>
             <div>
-              <div class="ob-lbl">Drawdown — the portfolio's</div>
+              <div class="ob-lbl">Drawdown — per strategy and the portfolio</div>
               <div class="bp-chart"><canvas id="bp-dd-chart" role="img"
-                   aria-label="Portfolio drawdown from its running peak"></canvas></div>
+                   aria-label="Drawdown from the running peak, per strategy and for the portfolio"></canvas></div>
             </div>
           </div>
-          <div class="bp-legend">
-            <template x-for="r in rows" :key="'leg' + r.key">
-              <span class="bp-leg">
+          <div class="bp-legend" role="group" aria-label="Lines shown on the equity and drawdown charts">
+            <template x-for="r in legendRows()" :key="'perf' + r.key">
+              <button type="button" class="bp-leg bp-legbtn"
+                      :class="isShown('perf', r.key) ? '' : 'off'"
+                      :aria-pressed="isShown('perf', r.key) ? 'true' : 'false'"
+                      title="Show or hide this line — display only, no figure changes"
+                      @click="toggleSeries('perf', r.key)">
                 <span class="bp-swatch" :style="'background:' + r.color"></span>
                 <span x-text="r.name"></span>
-              </span>
+              </button>
             </template>
           </div>
           {# THE TWO KEYS. Both shades are the same grey at two densities, so
@@ -705,11 +717,12 @@
             </div>
           </template>
           <div class="ob-note" style="margin-top:6px">
-            One point per close date; the drawdown keeps each day's WORST
-            reading, so the trough here is the Max DD in the table rather
-            than a shallower day-end version of it. Only the portfolio's
-            drawdown is drawn — one curve per strategy on the same axes is a
-            picture of nothing in particular.
+            One point per close date, each day's net, so the portfolio's
+            trough here is the Max DD in the table. Each strategy's drawdown
+            is from its own running peak; the portfolio's is filled and its
+            deepest point marked. The legend shows and hides lines on both
+            charts — display only: the TOTAL and the table still count every
+            strategy.
             <template x-if="unfilteredKey()">
               <span>
                 <b>These two charts draw the whole range; the table does
@@ -746,7 +759,19 @@
         <div class="ob-card-body">
           <div class="bp-chart" style="height:200px">
             <canvas id="bp-cap-chart" role="img"
-                    aria-label="Capital deployed per SPX session across the portfolio"></canvas>
+                    aria-label="Capital deployed per SPX session, per strategy and for the portfolio"></canvas>
+          </div>
+          <div class="bp-legend" role="group" aria-label="Lines shown on the capital deployed chart">
+            <template x-for="r in legendRows()" :key="'cap' + r.key">
+              <button type="button" class="bp-leg bp-legbtn"
+                      :class="isShown('cap', r.key) ? '' : 'off'"
+                      :aria-pressed="isShown('cap', r.key) ? 'true' : 'false'"
+                      title="Show or hide this line — display only, no figure changes"
+                      @click="toggleSeries('cap', r.key)">
+                <span class="bp-swatch" :style="'background:' + r.color"></span>
+                <span x-text="r.name"></span>
+              </button>
+            </template>
           </div>
           <template x-if="liveKey()">
             <div class="bp-liveleg">
@@ -778,8 +803,9 @@
             </div>
           </template>
           <div class="ob-note" style="margin-top:6px">
-            Each strategy's concurrent positions times its own capital, summed
-            per SPX session.
+            Each strategy's concurrent positions times its own capital, one
+            line each, and their sum per SPX session filled as the portfolio.
+            Hiding a line from the legend does not take it out of the sum.
             <template x-if="unfilteredKey()">
               <span><b>This chart draws the whole range; the table does
                 not.</b> Trades a filter could not judge are deployed here as
@@ -875,6 +901,18 @@
                 disagree about what a position is.
               </div>
             </div>
+          </div>
+          <div class="bp-legend" role="group" aria-label="Lines shown on the distribution and active-per-day charts">
+            <template x-for="r in legendRows()" :key="'mix' + r.key">
+              <button type="button" class="bp-leg bp-legbtn"
+                      :class="isShown('mix', r.key) ? '' : 'off'"
+                      :aria-pressed="isShown('mix', r.key) ? 'true' : 'false'"
+                      title="Show or hide this line — display only, no figure changes"
+                      @click="toggleSeries('mix', r.key)">
+                <span class="bp-swatch" :style="'background:' + r.color"></span>
+                <span x-text="r.key === 'total' ? 'Portfolio total' : r.name"></span>
+              </button>
+            </template>
           </div>
         </div>
       </div>

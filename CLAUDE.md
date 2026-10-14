@@ -335,11 +335,20 @@ table must not do. `obDailyCurve` reduces the trade-level equity to one point
 per close date, keeping each day's day-END cumulative and its WORST
 drawdown: the worst trade-level point always falls on some day, so the
 chart's trough IS the table's Max DD rather than a shallower day-boundary
-reading of it (the gate asserts the two strings match). Only the PORTFOLIO's
-drawdown is drawn — one curve per strategy on the same axes is a picture of
-nothing in particular. Capital deployed is the summed per-strategy series,
-stepped (it changes at a close), and its peak is the figure `ann ret %`
-divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
+reading of it (the gate asserts the two strings match). Capital deployed is
+the summed per-strategy series, stepped (it changes at a close), and its peak
+is the figure `ann ret %` divides by.
+
+**Per-strategy lines and clickable legends (2026-10-14).** Drawdown and
+Capital deployed now draw each strategy's own line beside the portfolio's
+(which stays dataset 0, filled; the drawdown's deepest-point mark stays
+dataset 1). Each card has ONE legend of buttons, which drives every chart
+in that card: Performance → equity + drawdown, Capital deployed → its chart,
+distribution/active-per-day → both. `hidden` (`{group: {rowKey: true}}`) is
+**display only**: `toggleSeries` calls `renderCharts`, never `recompute`, so
+hiding a strategy moves no table figure and no TOTAL line — a hidden
+strategy is still in the sum. The UI gate clicks each legend and asserts
+exactly that. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
 nothing to lay out and the numbers want to be readable; shade is the month's
 size against the biggest month, the same opacity rule the bar charts use.
 Everything is dated by CLOSE.

@@ -417,6 +417,12 @@ document.addEventListener('alpine:init', () => {
     pairA: 0, pairB: 0,
     rollWeeks: 26,
     riskWindow: 90,
+    // WHICH LINES ARE DRAWN, per legend: { group: { seriesKey: true } } for
+    // a HIDDEN series. Display only -- nothing that computes reads it, so
+    // hiding a strategy never moves a number in the table or the TOTAL line.
+    // Keys are the summary rows' (`k<id>`, `total`), so one map serves every
+    // chart a legend controls.
+    hidden: { perf: {}, cap: {}, mix: {} },
     risk: { days: 0, window: 90, fits: true },
     profiles: [],
     profilePick: 0,
@@ -1300,6 +1306,7 @@ document.addEventListener('alpine:init', () => {
       // the whole span like the two charts beside it. The TABLE's peak
       // stays on the strict set, so the two can differ and the card says so.
       let deployedDraw = new Array(sessions.length).fill(0);
+      const capBy = [];             // per strategy, the chart's series
       // THE CHARTS' OWN POOL. Same trades as `pooled` unless a filter is
       // blind to part of the history, in which case the equity and drawdown
       // charts keep drawing it and shade it instead of stopping short.
@@ -1347,6 +1354,7 @@ document.addEventListener('alpine:init', () => {
         const seriesDraw = lenient.size
           ? obDeployedSeries(concDraw, sessions, capital) : series;
         for (let i = 0; i < deployedDraw.length; i++) deployedDraw[i] += seriesDraw[i];
+        capBy.push({ key: 'k' + c.id, name: c.name, color: p.color, series: seriesDraw });
 
         for (const i of idx) {
           pooled.idx.push(pooled.pnl.length);
@@ -1417,13 +1425,14 @@ document.addEventListener('alpine:init', () => {
         const c = this.chosen.find(x => x.id === r.id);
         const cols = c && this.scaledCols(c);
         if (!cols) continue;
-        curves.eq.push({ name: r.name, color: r.color,
+        curves.eq.push({ key: r.key, name: r.name, color: r.color,
                          points: obEquity(cols, r.idxDraw).points });
       }
       if (pooledDraw.pnl.length) {
         const peq = obEquity(pooledDraw, [...pooledDraw.pnl.keys()]);
         const daily = peq.points;
-        curves.eq.push({ name: 'TOTAL', color: BP_TOTAL, points: daily, total: true });
+        curves.eq.push({ key: 'total', name: 'TOTAL', color: BP_TOTAL, points: daily,
+                         total: true });
         curves.dd = daily;
         curves.maxDD = peq.maxDD;
       }
@@ -1437,6 +1446,9 @@ document.addEventListener('alpine:init', () => {
       // blind filters. Stated in the key; the edge itself is the data.
       curves.coverageFrom = bpUnfilteredTo(this.chosen, this.registry);
       curves.cap = deployedDraw;
+      // Each strategy's own drawn series, summing to `cap` session by
+      // session -- drawn beside it, never instead of it.
+      curves.capBy = capBy;
       // The table's figure, kept so the card can say when the drawn peak
       // runs above it rather than leaving two numbers to be compared.
       curves.capPeakStrict = deployed.length ? Math.max(...deployed) : 0;
@@ -1451,7 +1463,7 @@ document.addEventListener('alpine:init', () => {
       curves.overlap = [];
       for (const r of rows) {
         if (r.total || !r.conc || !r.conc.days.length) continue;
-        curves.overlap.push({ name: r.name, color: r.color, conc: r.conc });
+        curves.overlap.push({ key: r.key, name: r.name, color: r.color, conc: r.conc });
       }
       curves.dist = [];
       for (const r of rows) {
@@ -1459,7 +1471,7 @@ document.addEventListener('alpine:init', () => {
         const c = this.chosen.find(x => x.id === r.id);
         const cols = c && this.scaledCols(c);
         if (!cols) continue;
-        curves.dist.push({ name: r.name, color: r.color,
+        curves.dist.push({ key: r.key, name: r.name, color: r.color,
                            pnl: r.idx.map(i => cols.pnl[i]) });
       }
       BP_DATA.curves = curves;
@@ -1603,12 +1615,17 @@ document.addEventListener('alpine:init', () => {
         o.plugins.bpUnfilteredShade = { to: c.unfilteredTo ? obDay(c.unfilteredTo) : null };
         return o;
       };
+      // A legend click hides a line and nothing else: the series are built
+      // in full either way, so the TOTAL and every number above are what
+      // they were. Chart.js leaves a hidden dataset out of the y range,
+      // which is the point of hiding one.
+      const off = (group, key) => !!(this.hidden[group] || {})[key];
 
       // EQUITY: a line per strategy plus the portfolio, sharing an axis.
       const total = c.eq.find(s => s.total);
       const xr = span(total ? total.points : (c.eq[0] && c.eq[0].points));
       const eqData = { datasets: c.eq.map(sv => ({
-        label: sv.name,
+        label: sv.name, hidden: off('perf', sv.key),
         data: sv.points.map(p => ({ x: obDay(p.date), y: p.cumulative })),
         borderColor: sv.color,
         borderWidth: sv.total ? 1.8 : 1,
@@ -1621,34 +1638,55 @@ document.addEventListener('alpine:init', () => {
                 unf(shaded(base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`, xr))),
                 [bpLiveShade, bpUnfilteredShade]);
 
-      // DRAWDOWN: the portfolio's only, with its deepest point marked.
+      // DRAWDOWN: the portfolio's, with its deepest point marked, and each
+      // strategy's own beneath it. The portfolio stays dataset 0 and the mark
+      // dataset 1; the strategies follow. The legend under the pair drives
+      // both charts, so a strategy is on both or on neither.
       const dd = c.dd || [];
       const mark = c.maxDD
         ? [{ x: obDay(c.maxDD.date), y: c.maxDD.drawdown }] : [];
       const ddData = { datasets: [
-        { data: dd.map(p => ({ x: obDay(p.date), y: p.drawdown })),
+        { label: 'TOTAL', hidden: off('perf', 'total'),
+          data: dd.map(p => ({ x: obDay(p.date), y: p.drawdown })),
           borderColor: BP_PINK, backgroundColor: 'rgba(232,67,147,0.16)',
-          fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 5, tension: 0 },
-        { data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6,
+          fill: 'origin', borderWidth: 1.4, pointRadius: 0, pointHitRadius: 5,
+          tension: 0, order: 0 },
+        { label: 'Deepest', hidden: off('perf', 'total'),
+          data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6,
           pointBackgroundColor: BP_PINK, pointBorderColor: '#2d2d2d',
-          pointBorderWidth: 2, showLine: false },
+          pointBorderWidth: 2, showLine: false, order: -1 },
+        ...c.eq.filter(sv => !sv.total).map(sv => ({
+          label: sv.name, hidden: off('perf', sv.key),
+          data: sv.points.map(p => ({ x: obDay(p.date), y: p.drawdown })),
+          borderColor: sv.color, borderWidth: 1, pointRadius: 0,
+          pointHitRadius: 5, tension: 0, fill: false, order: 1 })),
       ] };
       this.draw('dd', 'bp-dd-chart', ddData,
-                unf(shaded(base(it => (it.datasetIndex === 1 ? 'Deepest: ' : 'Drawdown ')
-                            + bpFmtMoney(it.parsed.y), xr))),
+                unf(shaded(base(it => (it.datasetIndex === 1
+                  ? 'Deepest: ' + bpFmtMoney(it.parsed.y)
+                  : `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)}`), xr))),
                 [bpLiveShade, bpUnfilteredShade]);
 
       // CAPITAL DEPLOYED: a step per session, since it changes at a close.
-      const cap = [];
+      // The portfolio's sum is dataset 0, filled; each strategy's own series
+      // is a line over the same sessions, so they sum to it at every step.
+      const capIdx = [];
       for (let i = 0; i < c.sessions.length; i++) {
-        if (c.cap[i] || (i && c.cap[i - 1])) {
-          cap.push({ x: obDay(c.sessions[i]), y: c.cap[i] });
-        }
+        if (c.cap[i] || (i && c.cap[i - 1])) capIdx.push(i);
       }
-      const capData = { datasets: [{
-        data: cap, borderColor: BP_BLUE, backgroundColor: 'rgba(52,152,219,0.12)',
-        fill: 'origin', borderWidth: 1, pointRadius: 0, pointHitRadius: 5,
-        stepped: 'before' }] };
+      const capPts = (arr) => capIdx.map(i => ({ x: obDay(c.sessions[i]), y: arr[i] }));
+      const cap = capPts(c.cap);
+      const capData = { datasets: [
+        { label: 'TOTAL', hidden: off('cap', 'total'),
+          data: cap, borderColor: BP_TOTAL, backgroundColor: 'rgba(232,236,241,0.06)',
+          fill: 'origin', borderWidth: 1.8, pointRadius: 0, pointHitRadius: 5,
+          stepped: 'before', order: 0 },
+        ...(c.capBy || []).map(sv => ({
+          label: sv.name, hidden: off('cap', sv.key),
+          data: capPts(sv.series), borderColor: sv.color, fill: false,
+          borderWidth: 1, pointRadius: 0, pointHitRadius: 5,
+          stepped: 'before', order: 1 })),
+      ] };
       // THE PAIRWISE SCATTER: one point a week, the two strategies' P/L.
       const w = BP_DATA.weekly;
       if (w && w.cols.length > 1) {
@@ -1725,7 +1763,7 @@ document.addEventListener('alpine:init', () => {
             const k = at.get(e);
             if (k !== undefined) counts[k] = h.counts[i];
           });
-          return { label: d.name, data: counts,
+          return { label: d.name, data: counts, hidden: off('mix', d.key),
                    backgroundColor: obRgbaFrom(d.color, 0.6),
                    borderWidth: 0, grouped: false };
         });
@@ -1750,7 +1788,7 @@ document.addEventListener('alpine:init', () => {
       // ── STRATEGIES ACTIVE PER DAY ────────────────────────────────────
       if (c.overlap && c.overlap.length) {
         const sets = c.overlap.map(o => ({
-          label: o.name,
+          label: o.name, hidden: off('mix', o.key),
           data: o.conc.days.map((d, i) => ({ x: obDay(d), y: o.conc.counts[i] })),
           borderColor: o.color, borderWidth: 1, pointRadius: 0,
           pointHitRadius: 5, tension: 0, stepped: 'before', fill: false,
@@ -1764,7 +1802,7 @@ document.addEventListener('alpine:init', () => {
         }
         const days = [...totals.keys()].sort();
         sets.push({
-          label: 'Portfolio total',
+          label: 'Portfolio total', hidden: off('mix', 'total'),
           data: days.map(d => ({ x: obDay(d), y: totals.get(d) })),
           borderColor: BP_TOTAL, borderWidth: 1.8, borderDash: [4, 3],
           pointRadius: 0, pointHitRadius: 5, tension: 0, stepped: 'before',
@@ -1850,9 +1888,28 @@ document.addEventListener('alpine:init', () => {
       }
 
       this.draw('cap', 'bp-cap-chart', capData,
-                unf(shaded(base(it => `${bpFmtMoney(it.parsed.y)} deployed`,
+                unf(shaded(base(it => `${it.dataset.label}: ${bpFmtMoney(it.parsed.y)} deployed`,
                             cap.length ? { min: cap[0].x, max: cap[cap.length - 1].x } : {}))),
                 [bpLiveShade, bpUnfilteredShade]);
+    },
+
+    /* THE CLICKABLE LEGENDS. One per card: the Performance legend drives
+     * equity AND drawdown, Capital deployed its own chart, and the
+     * distribution/active-per-day card both of its charts. A click redraws;
+     * it does not recompute -- `recompute` never reads `hidden`. */
+    legendRows() {
+      void this.tick;
+      return this.rows.map(r => ({ key: r.key, name: r.name,
+                                   color: r.total ? BP_TOTAL : r.color }));
+    },
+    isShown(group, key) {
+      return !(this.hidden[group] || {})[key];
+    },
+    toggleSeries(group, key) {
+      const g = { ...(this.hidden[group] || {}) };
+      if (g[key]) delete g[key]; else g[key] = true;
+      this.hidden = { ...this.hidden, [group]: g };
+      this.renderCharts();
     },
 
     drawBar(key, id, data, options) {

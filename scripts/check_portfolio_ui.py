@@ -360,6 +360,8 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('the trough equals the table Max DD, nothing being shaded',
      BP_DATA.curves.unfilteredTo ? tableDD : bpFmtMoney(trough), tableDD);
   ok('the deepest point is marked', dd.data.datasets[1].data.length, 1);
+  ok('a drawdown per strategy beside the portfolio',
+     dd.data.datasets.length, c.chosen.length + 2);
 
   // ── TRADES THAT PREDATE THE MARKET DATA ───────────────────────────
   // index_ohlc starts 2017-01-03, so this strategy's first four years have
@@ -599,6 +601,65 @@ window.addEventListener('load', () => setTimeout(async () => {
   // about what a position is.
   const ovPeak = Math.max(...ov.data.datasets[2].data.map(p => p.y));
   ok('the overlap peak is a real count', ovPeak > 0, true);
+
+  // ── THE LEGENDS, CLICKED ──────────────────────────────────────────
+  // A legend entry hides a line on every chart its card owns, and NOTHING
+  // ELSE: the table's TOTAL row and the TOTAL line do not move.
+  const capNow = Chart.getChart('bp-cap-chart');
+  ok('a deployed line per strategy beside the sum',
+     capNow.data.datasets.length, cc.chosen.length + 1);
+  // Per strategy, the drawn series sum to the portfolio's at every step.
+  const capSumOk = capNow.data.datasets[0].data.every((p, i) =>
+    Math.abs(capNow.data.datasets.slice(1).reduce((a, d) => a + d.data[i].y, 0) - p.y) < 1e-6);
+  ok('the strategies sum to the deployed total', capSumOk, true);
+
+  const legBtns = (label) => [...document.querySelectorAll(
+    `.bp-legend[aria-label^="${label}"] .bp-legbtn`)];
+  const perfBtns = legBtns('Lines shown on the equity');
+  ok('the performance legend has every strategy and TOTAL',
+     perfBtns.length, cc.chosen.length + 1);
+  const name0 = cc.rows[0].name;
+  const rowText = () => [...document.querySelectorAll('.bp-table tr.total td')]
+    .map(td => td.textContent.trim()).join(' ');
+  const totalBefore = rowText();
+  const eqTotBefore = JSON.stringify(Chart.getChart('bp-eq-chart').data.datasets
+    .find(d => d.label === 'TOTAL').data);
+  const visible = (id, label) => {
+    const ch = Chart.getChart(id);
+    const i = ch.data.datasets.findIndex(d => d.label === label);
+    return ch.isDatasetVisible(i);
+  };
+  perfBtns[0].click();
+  await wait(150);
+  ok('a click hides the strategy on the equity chart',
+     visible('bp-eq-chart', name0), false);
+  ok('and on the drawdown chart', visible('bp-dd-chart', name0), false);
+  ok('the entry reads as off', perfBtns[0].classList.contains('off'), true);
+  ok('the TOTAL row does not move', rowText(), totalBefore);
+  ok('nor does the TOTAL line', JSON.stringify(Chart.getChart('bp-eq-chart')
+     .data.datasets.find(d => d.label === 'TOTAL').data) === eqTotBefore, true);
+  ok('other cards keep it', visible('bp-cap-chart', name0), true);
+  perfBtns[0].click();
+  await wait(150);
+  ok('a second click brings it back', visible('bp-dd-chart', name0), true);
+
+  const capBtns = legBtns('Lines shown on the capital');
+  capBtns[1].click();
+  await wait(150);
+  ok('the deployed legend hides its line',
+     visible('bp-cap-chart', cc.rows[1].name), false);
+  capBtns[1].click();
+  await wait(150);
+
+  const mixBtns = legBtns('Lines shown on the distribution');
+  mixBtns[0].click();
+  await wait(150);
+  ok('the mix legend hides the histogram', visible('bp-dist-chart', name0), false);
+  ok('and the active-per-day line', visible('bp-overlap-chart', name0), false);
+  ok('the table still does not move', rowText(), totalBefore);
+  mixBtns[0].click();
+  await wait(150);
+  ok('and it comes back', visible('bp-overlap-chart', name0), true);
 
   const risk = Chart.getChart('bp-risk-chart');
   ok('the risk chart drew', !!risk, true);
