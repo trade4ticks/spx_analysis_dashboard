@@ -19,6 +19,8 @@ Endpoints:
                                same payload as /parse, plus `saved`
   PUT    /strategies/{id}/capital  {"capital_per_position": number|null} --
                                the display input only; no re-parse
+  PUT    /strategies/{id}/notes    {"notes": text} -- the notes only; the
+                               file, its facts and the list order are untouched
   DELETE /strategies/{id}
   GET    /surface/catalog      ranked surface metrics: catalog fields + min_date
                                (first non-null date, read from the table)
@@ -240,6 +242,17 @@ async def load_saved(strategy_id: int, pool=Depends(get_pool)):
 async def set_saved_capital(strategy_id: int, body: dict = Body(...), pool=Depends(get_pool)):
     try:
         saved = await store.set_capital(pool, strategy_id, body.get("capital_per_position"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if saved is None:
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    return {"strategy": saved}
+
+
+@router.put("/strategies/{strategy_id}/notes")
+async def set_saved_notes(strategy_id: int, body: dict = Body(...), pool=Depends(get_pool)):
+    try:
+        saved = await store.set_notes(pool, strategy_id, body.get("notes"))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if saved is None:

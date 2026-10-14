@@ -662,6 +662,22 @@ async def check_saved_strategies(pool) -> None:
             check(True, f"capital {bad!r} is refused")
     check(await store.set_capital(pool, 999999, 100) is None, "set_capital on a missing id returns None (404)")
 
+    # Notes: edited after the save, alone.
+    renoted = await store.set_notes(pool, cap["id"], "  re-worded\nsecond line  ")
+    meta_n, raw_n = await store.load_strategy_file(pool, cap["id"])
+    check(renoted["notes"] == "re-worded\nsecond line" and meta_n["notes"] == renoted["notes"]
+          and meta_n["capital_per_position"] == 7500.0 and raw_n == raw
+          and renoted["updated_at"] == cap["updated_at"],
+          "set_notes changes only the notes (trimmed); file, capital and updated_at untouched")
+    check((await store.set_notes(pool, cap["id"], ""))["notes"] == "", "notes can be cleared")
+    for bad, why in (("x" * (store.NOTES_MAX + 1), "too long"), (123, "non-text")):
+        try:
+            await store.set_notes(pool, cap["id"], bad)
+            check(False, f"{why} notes are refused")
+        except ValueError:
+            check(True, f"{why} notes are refused")
+    check(await store.set_notes(pool, 999999, "x") is None, "set_notes on a missing id returns None (404)")
+
     # Migration: a table created before the column existed gains it on first use.
     async with pool.acquire() as conn:
         await conn.execute(f"DROP TABLE {store.TABLE}")

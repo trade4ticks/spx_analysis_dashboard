@@ -437,6 +437,12 @@ document.addEventListener('alpine:init', () => {
     saveBusy: false,
     saveError: '',
     saveMsg: '',
+    // Editing a LOADED saved strategy's notes (PUT .../notes). The draft is
+    // separate from meta so Cancel leaves what was saved on screen.
+    notesEditing: false,
+    notesDraft: '',
+    notesBusy: false,
+    notesMsg: '',
 
     // Filters. `ranges` and `cats` are keyed by registry key and built from
     // the loaded data by initFilters(); nothing here is a static default.
@@ -566,6 +572,9 @@ document.addEventListener('alpine:init', () => {
         this.capitalInput = String(c === null || c === undefined ? OB_DEFAULT_CAPITAL : c);
       }
       this.capitalMsg = '';
+      // A new log closes any notes edit of the previous one.
+      this.notesEditing = false;
+      this.notesMsg = '';
       this.meta = meta;
       this.computeAutoBins();
       // A new log invalidates any ranking of the previous one.
@@ -1426,6 +1435,49 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {
         console.error('oo-backtest capital', e);
         this.capitalMsg = `Not saved: ${e.message}`;
+      }
+    },
+
+    /* NOTES of the loaded saved strategy: edit, then Save or Cancel. Only the
+     * notes are written -- no re-parse, and the saved list keeps its order. */
+    editNotes() {
+      const sv = this.meta && this.meta.saved;
+      if (!sv) return;
+      this.notesDraft = sv.notes || '';
+      this.notesMsg = '';
+      this.notesEditing = true;
+      this.$nextTick(() => {
+        const t = document.querySelector('.ob-notes-edit textarea');
+        if (t) t.focus();
+      });
+    },
+    cancelNotes() {
+      this.notesEditing = false;
+      this.notesMsg = '';
+    },
+    async commitNotes() {
+      const sv = this.meta && this.meta.saved;
+      if (!sv || this.notesBusy) return;
+      this.notesBusy = true;
+      this.notesMsg = '';
+      try {
+        const r = await fetch(`/api/oo-backtest/strategies/${sv.id}/notes`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notes: this.notesDraft }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        const notes = body.strategy.notes;
+        // Both places the page shows them: the loaded strategy, and the
+        // saved list the dropdown's note line reads.
+        this.meta = { ...this.meta, saved: { ...this.meta.saved, notes } };
+        this.savedList = this.savedList.map(x => (x.id === sv.id ? { ...x, notes } : x));
+        this.notesEditing = false;
+        this.notesMsg = 'Notes saved';
+      } catch (e) {
+        console.error('oo-backtest notes', e);
+        this.notesMsg = `Not saved: ${e.message}`;
+      } finally {
+        this.notesBusy = false;
       }
     },
 

@@ -237,6 +237,20 @@ async def set_capital(pool, strategy_id: int, capital_per_position) -> dict | No
     return _row(r) if r else None
 
 
+async def set_notes(pool, strategy_id: int, notes) -> dict | None:
+    """Update only the notes. updated_at is left alone, as for the capital:
+    the list is ordered by when the FILE was last saved, and re-wording a
+    note does not change what was saved."""
+    if notes is not None and not isinstance(notes, str):
+        raise ValueError("Notes must be text.")
+    notes = clean_notes(notes)
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        r = await conn.fetchrow(f"UPDATE {TABLE} SET notes = $2 WHERE id = $1 RETURNING {_LIST_COLS}",
+                                strategy_id, notes)
+    return _row(r) if r else None
+
+
 async def delete_strategy(pool, strategy_id: int) -> bool:
     """True if a row was deleted."""
     async with pool.acquire() as conn:

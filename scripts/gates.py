@@ -167,6 +167,9 @@ GATES = [
     # only clicking it could see that. Skips where there is no browser.
     _s("check_portfolio_ui.py", can_skip=True,
        note="the buttons a person presses actually do their thing"),
+    # Editing a saved strategy's notes on the OO page, clicked in Edge.
+    _s("check_oo_notes_ui.py", can_skip=True,
+       note="OO page: a saved strategy's notes edit, save and cancel"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
     # Strategy Signal: the decision rule, the percentile, the index/surface

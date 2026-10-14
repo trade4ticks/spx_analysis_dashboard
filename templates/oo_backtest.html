@@ -163,8 +163,27 @@
           <div class="ob-loaded" x-show="loaded">
             <div x-text="loadedLabel()"></div>
             <div class="ob-dim" x-text="sourceLabel() + ' · ' + (meta ? meta.filename : '')"></div>
-            <div class="ob-dim" x-show="meta && meta.saved && meta.saved.notes" x-text="meta && meta.saved ? meta.saved.notes : ''"
+            <div class="ob-dim" x-show="!notesEditing && meta && meta.saved && meta.saved.notes"
+                 x-text="meta && meta.saved ? meta.saved.notes : ''"
                  style="white-space:pre-wrap; margin-top:4px;"></div>
+            <!-- A loaded SAVED strategy's notes can be edited in place. -->
+            <div x-show="meta && meta.saved" style="margin-top:4px;">
+              <button class="btn" x-show="!notesEditing" @click="editNotes()"
+                      x-text="meta && meta.saved && meta.saved.notes ? 'Edit notes' : 'Add notes'"></button>
+              <div class="ob-notes-edit" x-show="notesEditing" x-cloak>
+                <textarea class="ob-input" rows="4" x-model="notesDraft" maxlength="4000"
+                          placeholder="Notes" aria-label="Notes for this saved strategy"
+                          @keydown.escape.stop="cancelNotes()"
+                          @keydown.ctrl.enter="commitNotes()"></textarea>
+                <div class="ob-row" style="margin-top:4px;">
+                  <button class="btn primary" @click="commitNotes()" :disabled="notesBusy"
+                          x-text="notesBusy ? 'Saving…' : 'Save notes'"></button>
+                  <button class="btn" @click="cancelNotes()" :disabled="notesBusy">Cancel</button>
+                  <span class="ob-dim" style="margin-left:auto;" x-text="notesDraft.length + ' / 4000'"></span>
+                </div>
+              </div>
+              <div class="ob-note" x-show="notesMsg" x-text="notesMsg" style="margin-top:4px;"></div>
+            </div>
             <template x-for="note in savedNotes().concat(parseNotes(), marketNotes())" :key="note.text">
               <div class="ob-parse-note" :class="{ warn: note.warn }" x-text="note.text"></div>
             </template>

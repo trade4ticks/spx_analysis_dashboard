@@ -34,6 +34,19 @@ $10/$25/$50/$100/$250 gives a bin count nearest 24 (tie → smaller step), outli
 metrics are excluded from the fixed pd.cut parity; `check_auto_bins` tests them against a
 numpy reference instead. Everything else stays `fixed`.
 
+**Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
+loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes
+`PUT /strategies/{id}/notes` (`store.set_notes`) — the notes only, trimmed,
+≤ 4,000 characters; no re-parse, and like the capital it leaves `updated_at`
+(the list order) alone. The page shows the notes the SERVER returned, in
+both places it shows them (the loaded strategy and the saved-list line); a
+refused save keeps the box and the draft. Esc cancels, Ctrl+Enter saves.
+Gates: `check_oo_market_sql` (store) and `check_oo_notes_ui` (clicked, Edge).
+**That gate maps `requestAnimationFrame` to `setTimeout`**: headless virtual
+time runs no frames, and Alpine SHOWS an x-show element from a frame (it
+hides synchronously), so without the shim every x-show stayed hidden while
+x-text updated, and the gate failed or passed by luck.
+
 **Export CSV** (status line, 2026-10-04) writes exactly the trades the page shows — the same
 `activeSpecs()` as `recompute()`. Columns: the log's own (`OB_EXPORT_BASE`, minus any empty in
 this log), then one per ACTIVE filter holding the column it read (the chosen ratio basis, a
