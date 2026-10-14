@@ -661,6 +661,67 @@ window.addEventListener('load', () => setTimeout(async () => {
   await wait(150);
   ok('and it comes back', visible('bp-overlap-chart', name0), true);
 
+  // COMPACT in the card: a swatch, the name on hover; TOTAL in words.
+  ok('a card legend entry is a swatch, no text',
+     perfBtns[0].innerText.trim(), '');
+  ok('its name is on hover', perfBtns[0].title.startsWith(name0), true);
+  ok('TOTAL keeps its word', /TOTAL/.test(perfBtns[perfBtns.length - 1].textContent), true);
+
+  // ── FULL SCREEN, CLICKED ──────────────────────────────────────────
+  const canvases = document.querySelectorAll('.ob-main canvas');
+  ok('every chart has an expand button',
+     [...canvases].every(cv => cv.closest('.bp-fig')
+       && cv.closest('.bp-fig').querySelector('.bp-expand')), true);
+  const ddFig = document.querySelector('.bp-fig[data-fig="dd"]');
+  const smallH = document.getElementById('bp-dd-chart').getBoundingClientRect().height;
+  ddFig.querySelector('.bp-expand').click();
+  await wait(250);
+  ok('expand opens that chart', cc.full, 'dd');
+  const fr = ddFig.getBoundingClientRect();
+  ok('it covers the window',
+     fr.left <= 1 && fr.top <= 1 && fr.width >= innerWidth - 2 && fr.height >= innerHeight - 2, true);
+  ok('and the chart grew',
+     document.getElementById('bp-dd-chart').getBoundingClientRect().height > smallH * 1.5, true);
+  ok('only one figure is full screen', document.querySelectorAll('.bp-full').length, 1);
+  const fullBtns = [...ddFig.querySelectorAll('.bp-legend[aria-label^="Full screen"] .bp-legbtn')];
+  ok('the full-screen legend is on screen', fullBtns.length > 0 && fullBtns[0].offsetHeight > 0, true);
+  ok('it carries full names', fullBtns[0].textContent.trim(), name0);
+  ok('and the shading key comes along',
+     !cc.liveKey() || !!ddFig.querySelector('.bp-liveleg'), true);
+  fullBtns[0].click();
+  await wait(150);
+  ok('hiding in full screen hides it on this chart', visible('bp-dd-chart', name0), false);
+  ok('and on its pair behind it', visible('bp-eq-chart', name0), false);
+  ok('the card legend agrees', perfBtns[0].classList.contains('off'), true);
+  ok('full screen moves no figure', rowText(), totalBefore);
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await wait(250);
+  ok('Esc closes it', cc.full, null);
+  ok('the figure is back in its card', document.querySelectorAll('.bp-full').length, 0);
+  ok('at its own size',
+     Math.abs(document.getElementById('bp-dd-chart').getBoundingClientRect().height - smallH) < 2, true);
+  perfBtns[0].click();
+  await wait(150);
+  ok('and the line comes back from the card', visible('bp-dd-chart', name0), true);
+
+  // The pair's legends differ in one respect: the distribution has no total.
+  const distFig = document.querySelector('.bp-fig[data-fig="dist"]');
+  distFig.querySelector('.bp-expand').click();
+  await wait(200);
+  ok('the distribution legend has no total line to toggle',
+     distFig.querySelectorAll('.bp-legend[aria-label^="Full screen"] .bp-legbtn').length,
+     cc.chosen.length);
+  distFig.querySelector('.bp-fig-close').click();
+  await wait(200);
+  ok('Close closes it', cc.full, null);
+  const ovFig = document.querySelector('.bp-fig[data-fig="overlap"]');
+  ovFig.querySelector('.bp-expand').click();
+  await wait(200);
+  ok('active per day names its total',
+     /Portfolio total/.test(ovFig.querySelector('.bp-legend[aria-label^="Full screen"]').textContent), true);
+  ovFig.querySelector('.bp-fig-close').click();
+  await wait(200);
+
   const risk = Chart.getChart('bp-risk-chart');
   ok('the risk chart drew', !!risk, true);
   ok('three series', risk && risk.data.datasets.length, 3);

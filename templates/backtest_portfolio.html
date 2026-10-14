@@ -154,6 +154,24 @@
     .bp-legbtn:hover { color:var(--text, #e8ecf1); }
     .bp-legbtn:focus-visible { outline:1px solid var(--dim); }
     .bp-legbtn.off { opacity:0.4; text-decoration:line-through; }
+    /* Compact: a swatch per strategy (its name is on hover, and in the
+       sidebar), TOTAL in words because it has no sidebar entry. */
+    .bp-legend-compact { gap:4px 6px; }
+    .bp-legend-compact .bp-swatch { width:12px; height:12px; }
+
+    /* ── full screen: the figure itself, promoted ──────────────────── */
+    .bp-fig { position:relative; }
+    .bp-expand { position:absolute; top:0; right:0; z-index:2;
+                 background:var(--raised); border:1px solid var(--border);
+                 color:var(--dim); font-size:12px; line-height:1;
+                 padding:2px 5px; border-radius:3px; cursor:pointer; opacity:0.6; }
+    .bp-expand:hover, .bp-expand:focus-visible { opacity:1; color:var(--text); }
+    .bp-full { position:fixed; inset:0; z-index:1000; background:var(--bg);
+               padding:14px 20px; display:flex; flex-direction:column; gap:8px; }
+    .bp-full .bp-chart { flex:1; height:auto !important; min-height:0; }
+    .bp-full .bp-legend { font-size:12px; gap:6px 16px; }
+    .bp-fig-bar { display:flex; align-items:center; gap:10px; }
+    .bp-fig-close { margin-left:auto; }
 
     /* ── the monthly grid ─────────────────────────────────────────────
        DOM, not canvas: twelve cells a year is nothing to lay out, and the
@@ -232,6 +250,78 @@
               border-radius:4px; color-scheme:dark; }
   </style>
 </head>
+{# ── FIGURES THAT GO FULL SCREEN ──────────────────────────────────────
+   Every chart is wrapped in `fig`: an expand button, and -- shown only while
+   it is full screen -- a title bar, the legend of its card's GROUP with full
+   names, and the shading keys. Full screen is the SAME chart enlarged in
+   place (the wrapper turns position:fixed), not a copy, so the two cannot
+   disagree; and the legend is the card's own `hidden[group]`, so a line
+   hidden here is hidden on the card's other chart too. #}
+{% macro legend(group, label, compact=True, total='TOTAL', with_total=True) -%}
+          <div class="bp-legend{{ ' bp-legend-compact' if compact }}" role="group" aria-label="{{ label }}">
+            <template x-for="r in legendRows({{ 'true' if with_total else 'false' }})" :key="'{{ group }}{{ 'c' if compact else 'f' }}' + r.key">
+              <button type="button" class="bp-leg bp-legbtn"
+                      :class="isShown('{{ group }}', r.key) ? '' : 'off'"
+                      :aria-pressed="isShown('{{ group }}', r.key) ? 'true' : 'false'"
+                      :aria-label="(r.key === 'total' ? '{{ total }}' : r.name) + ' - show or hide'"
+                      :title="(r.key === 'total' ? '{{ total }}' : r.name) + ' - click to show or hide (display only, no figure changes)'"
+                      @click="toggleSeries('{{ group }}', r.key)">
+                <span class="bp-swatch" :style="'background:' + r.color"></span>
+{%- if compact %}
+                <span x-show="r.key === 'total'">{{ total }}</span>
+{%- else %}
+                <span x-text="r.key === 'total' ? '{{ total }}' : r.name"></span>
+{%- endif %}
+              </button>
+            </template>
+          </div>
+{%- endmacro %}
+{% macro shade_keys() -%}
+              <template x-if="liveKey()">
+                <div class="bp-liveleg">
+                  <span class="bp-livesw" :style="'background:' + (liveKey() || {}).bg"></span>
+                  <span>fewer than all <span x-text="(liveKey() || {}).total"></span> strategies live</span>
+                </div>
+              </template>
+              <template x-if="unfilteredKey()">
+                <div class="bp-liveleg">
+                  <span class="bp-livesw" :style="'background:' + (unfilteredKey() || {}).bg"></span>
+                  <span><b>not filtered</b> — <span x-text="(unfilteredKey() || {}).label"></span>
+                    has no data before <span x-text="(unfilteredKey() || {}).from"></span>,
+                    so trades entered before that are drawn unfiltered</span>
+                </div>
+              </template>
+              <template x-if="bothKey()">
+                <div class="bp-liveleg">
+                  <span class="bp-livesw" :style="'background:' + (bothKey() || {}).bg"></span>
+                  <span>both at once — neither fully staffed nor filtered</span>
+                </div>
+              </template>
+{%- endmacro %}
+{% macro fig(key, title, group=None, label='', total='TOTAL', with_total=True, shade=False) -%}
+            <div class="bp-fig" data-fig="{{ key }}" :class="full === '{{ key }}' ? 'bp-full' : ''"
+                 @keydown.escape.window="full === '{{ key }}' && closeFull()">
+              <div class="bp-fig-bar" x-show="full === '{{ key }}'" x-cloak>
+                <span class="ob-card-title">{{ title }}</span>
+                <button type="button" class="bp-btn bp-fig-close" @click="closeFull()"
+                        aria-label="Close full screen">Close ✕</button>
+              </div>
+              <button type="button" class="bp-expand" x-show="full !== '{{ key }}'"
+                      @click="openFull('{{ key }}')" title="Full screen"
+                      aria-label="Show {{ title }} full screen">⤢</button>
+              {{ caller() }}
+{%- if group %}
+              <div x-show="full === '{{ key }}'" x-cloak>
+{{ legend(group, 'Full screen: ' ~ label, compact=False, total=total, with_total=with_total) }}
+              </div>
+{%- endif %}
+{%- if shade %}
+              <div x-show="full === '{{ key }}'" x-cloak>
+{{ shade_keys() }}
+              </div>
+{%- endif %}
+            </div>
+{%- endmacro %}
 <body class="page" x-data="backtestPortfolio">
   {% set nav_active = "/backtest-portfolio" %}{% include "_nav.html" %}
 
@@ -651,27 +741,20 @@
           <div class="bp-pair">
             <div>
               <div class="ob-lbl">Equity — cumulative P/L</div>
-              <div class="bp-chart"><canvas id="bp-eq-chart" role="img"
+              {% call fig('eq', 'Equity — cumulative P/L', group='perf', label='Lines shown on the equity and drawdown charts', shade=true) %}
+<div class="bp-chart"><canvas id="bp-eq-chart" role="img"
                    aria-label="Cumulative P/L per strategy and for the portfolio"></canvas></div>
+{% endcall %}
             </div>
             <div>
               <div class="ob-lbl">Drawdown — per strategy and the portfolio</div>
-              <div class="bp-chart"><canvas id="bp-dd-chart" role="img"
+              {% call fig('dd', 'Drawdown', group='perf', label='Lines shown on the equity and drawdown charts', shade=true) %}
+<div class="bp-chart"><canvas id="bp-dd-chart" role="img"
                    aria-label="Drawdown from the running peak, per strategy and for the portfolio"></canvas></div>
+{% endcall %}
             </div>
           </div>
-          <div class="bp-legend" role="group" aria-label="Lines shown on the equity and drawdown charts">
-            <template x-for="r in legendRows()" :key="'perf' + r.key">
-              <button type="button" class="bp-leg bp-legbtn"
-                      :class="isShown('perf', r.key) ? '' : 'off'"
-                      :aria-pressed="isShown('perf', r.key) ? 'true' : 'false'"
-                      title="Show or hide this line — display only, no figure changes"
-                      @click="toggleSeries('perf', r.key)">
-                <span class="bp-swatch" :style="'background:' + r.color"></span>
-                <span x-text="r.name"></span>
-              </button>
-            </template>
-          </div>
+{{ legend('perf', 'Lines shown on the equity and drawdown charts', total='TOTAL') }}
           {# THE TWO KEYS. Both shades are the same grey at two densities, so
              each says plainly what it means and the overlap is left to read
              as what it is: neither condition holds there. #}
@@ -757,22 +840,13 @@
           <span class="ob-card-sub" x-text="deploySub()"></span>
         </div>
         <div class="ob-card-body">
-          <div class="bp-chart" style="height:200px">
+          {% call fig('cap', 'Capital deployed', group='cap', label='Lines shown on the capital deployed chart', shade=true) %}
+<div class="bp-chart" style="height:200px">
             <canvas id="bp-cap-chart" role="img"
                     aria-label="Capital deployed per SPX session, per strategy and for the portfolio"></canvas>
           </div>
-          <div class="bp-legend" role="group" aria-label="Lines shown on the capital deployed chart">
-            <template x-for="r in legendRows()" :key="'cap' + r.key">
-              <button type="button" class="bp-leg bp-legbtn"
-                      :class="isShown('cap', r.key) ? '' : 'off'"
-                      :aria-pressed="isShown('cap', r.key) ? 'true' : 'false'"
-                      title="Show or hide this line — display only, no figure changes"
-                      @click="toggleSeries('cap', r.key)">
-                <span class="bp-swatch" :style="'background:' + r.color"></span>
-                <span x-text="r.name"></span>
-              </button>
-            </template>
-          </div>
+{% endcall %}
+{{ legend('cap', 'Lines shown on the capital deployed chart', total='TOTAL') }}
           <template x-if="liveKey()">
             <div class="bp-liveleg">
               <span class="bp-livesw" :style="'background:' + (liveKey() || {}).bg"></span>
@@ -878,10 +952,12 @@
           <div class="bp-pair">
             <div>
               <div class="ob-lbl">P/L distribution</div>
-              <div class="bp-chart" style="height:280px">
+              {% call fig('dist', 'P/L distribution', group='mix', label='Lines shown on the distribution and active-per-day charts', with_total=false) %}
+<div class="bp-chart" style="height:280px">
                 <canvas id="bp-dist-chart" role="img"
                         aria-label="Distribution of trade P/L per strategy"></canvas>
               </div>
+{% endcall %}
               <div class="ob-note" style="margin-top:4px">
                 One bar per $100 of P/L, overlaid per strategy, on the
                 filtered trades with qty applied.
@@ -889,10 +965,12 @@
             </div>
             <div>
               <div class="ob-lbl">Strategies active per day</div>
-              <div class="bp-chart" style="height:280px">
+              {% call fig('overlap', 'Strategies active per day', group='mix', label='Lines shown on the distribution and active-per-day charts', total='Portfolio total') %}
+<div class="bp-chart" style="height:280px">
                 <canvas id="bp-overlap-chart" role="img"
                         aria-label="Open positions per session, per strategy and in total"></canvas>
               </div>
+{% endcall %}
               <div class="ob-note" style="margin-top:4px">
                 Open positions per SPX session, with the portfolio total
                 dotted. Same <b>half-open</b> count as Capital deployed — the
@@ -902,18 +980,7 @@
               </div>
             </div>
           </div>
-          <div class="bp-legend" role="group" aria-label="Lines shown on the distribution and active-per-day charts">
-            <template x-for="r in legendRows()" :key="'mix' + r.key">
-              <button type="button" class="bp-leg bp-legbtn"
-                      :class="isShown('mix', r.key) ? '' : 'off'"
-                      :aria-pressed="isShown('mix', r.key) ? 'true' : 'false'"
-                      title="Show or hide this line — display only, no figure changes"
-                      @click="toggleSeries('mix', r.key)">
-                <span class="bp-swatch" :style="'background:' + r.color"></span>
-                <span x-text="r.key === 'total' ? 'Portfolio total' : r.name"></span>
-              </button>
-            </template>
-          </div>
+{{ legend('mix', 'Lines shown on the distribution and active-per-day charts', total='Portfolio total') }}
         </div>
       </div>
 
@@ -930,7 +997,8 @@
           </span>
         </div>
         <div class="ob-card-body">
-          <div class="bp-chart" style="height:300px">
+          {% call fig('risk', 'Rolling risk metrics') %}
+<div class="bp-chart" style="height:300px">
             <canvas id="bp-risk-chart" role="img"
                     aria-label="Rolling Sharpe, Sortino and win rate for the portfolio"></canvas>
           </div>
@@ -939,6 +1007,7 @@
             <span class="bp-leg"><span class="bp-swatch" style="background:#9b59b6"></span>Sortino</span>
             <span class="bp-leg"><span class="bp-swatch" style="background:#f39c12"></span>Win rate % (right)</span>
           </div>
+{% endcall %}
           <div class="ob-note" style="margin-top:6px">
             The old app's definitions, kept: P/L summed by close date,
             mean ÷ stdev × √252 for Sharpe and ÷ downside stdev for Sortino,
@@ -1025,10 +1094,12 @@
               </select>
               <span class="ob-note" x-text="pairSub()"></span>
             </div>
-            <div class="bp-chart" style="height:300px">
+            {% call fig('sc', 'Weekly P/L, one strategy against another') %}
+<div class="bp-chart" style="height:300px">
               <canvas id="bp-sc-chart" role="img"
                       aria-label="Weekly P/L of one strategy against another"></canvas>
             </div>
+{% endcall %}
           </div>
 
           <div class="ob-note" style="margin-top:6px">
@@ -1057,7 +1128,8 @@
           </span>
         </div>
         <div class="ob-card-body">
-          <div class="bp-chart" style="height:220px">
+          {% call fig('roll', 'Rolling correlation') %}
+<div class="bp-chart" style="height:220px">
             <canvas id="bp-roll-chart" role="img"
                     aria-label="Rolling correlation for every pair of strategies"></canvas>
           </div>
@@ -1066,6 +1138,7 @@
               <span class="bp-leg" x-text="pr.label"></span>
             </template>
           </div>
+{% endcall %}
           <div class="ob-note" style="margin-top:6px">
             Every pair, over a window of <b>weeks</b> — the same basis as the
             matrix, so the two cannot disagree about what a correlation is.

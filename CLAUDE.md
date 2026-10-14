@@ -337,7 +337,10 @@ drawdown: the worst trade-level point always falls on some day, so the
 chart's trough IS the table's Max DD rather than a shallower day-boundary
 reading of it (the gate asserts the two strings match). Capital deployed is
 the summed per-strategy series, stepped (it changes at a close), and its peak
-is the figure `ann ret %` divides by.
+is the figure `ann ret %` divides by. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
+nothing to lay out and the numbers want to be readable; shade is the month's
+size against the biggest month, the same opacity rule the bar charts use.
+Everything is dated by CLOSE.
 
 **Per-strategy lines and clickable legends (2026-10-14).** Drawdown and
 Capital deployed now draw each strategy's own line beside the portfolio's
@@ -348,10 +351,21 @@ distribution/active-per-day → both. `hidden` (`{group: {rowKey: true}}`) is
 **display only**: `toggleSeries` calls `renderCharts`, never `recompute`, so
 hiding a strategy moves no table figure and no TOTAL line — a hidden
 strategy is still in the sum. The UI gate clicks each legend and asserts
-exactly that. Monthly P/L is a DOM grid, not a canvas: twelve cells a year is
-nothing to lay out and the numbers want to be readable; shade is the month's
-size against the biggest month, the same opacity rule the bar charts use.
-Everything is dated by CLOSE.
+exactly that.
+
+**Full screen, and compact card legends (2026-10-14).** Every chart is
+wrapped in the `fig` Jinja macro: an expand button, and — only while full
+screen — a title bar, its card's legend with FULL names, and the shading
+keys. Full screen is the same Chart instance with its wrapper promoted to
+`position:fixed` by `.bp-full`, not a copy, so it cannot disagree with the
+card; Esc or Close returns it. Its legend reads the same `hidden[group]`, so
+hiding a strategy on a full-screen drawdown hides it on equity too. Card
+legends are swatches only (name on hover — and in the sidebar), with TOTAL
+in words because it has no sidebar entry; the distribution's full legend
+omits the total, which only the active-per-day chart draws. The tables
+(monthly grid, correlation) do not expand, by decision. The portfolio
+drawdown is drawn in `BP_TOTAL`, not pink: pink is in the strategy palette,
+and beside per-strategy lines the portfolio read as one of them.
 
 **The months and the annual bars are ONE grid** (2026-09-25). The bars were a
 Chart.js canvas beside the table, and two elements placed side by side keep

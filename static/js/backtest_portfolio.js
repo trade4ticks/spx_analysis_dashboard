@@ -423,6 +423,9 @@ document.addEventListener('alpine:init', () => {
     // Keys are the summary rows' (`k<id>`, `total`), so one map serves every
     // chart a legend controls.
     hidden: { perf: {}, cap: {}, mix: {} },
+    // The chart key (BP_CHARTS') shown full screen, or null. The figure is
+    // promoted in place by CSS, so it is the same Chart instance, resized.
+    full: null,
     risk: { days: 0, window: 90, fits: true },
     profiles: [],
     profilePick: 0,
@@ -1648,12 +1651,15 @@ document.addEventListener('alpine:init', () => {
       const ddData = { datasets: [
         { label: 'TOTAL', hidden: off('perf', 'total'),
           data: dd.map(p => ({ x: obDay(p.date), y: p.drawdown })),
-          borderColor: BP_PINK, backgroundColor: 'rgba(232,67,147,0.16)',
-          fill: 'origin', borderWidth: 1.4, pointRadius: 0, pointHitRadius: 5,
+          // The TOTAL's colour, as on equity and capital deployed. It was
+          // pink, and pink is in the STRATEGY palette: with per-strategy
+          // lines beside it the portfolio read as one of them.
+          borderColor: BP_TOTAL, backgroundColor: 'rgba(232,236,241,0.06)',
+          fill: 'origin', borderWidth: 1.8, pointRadius: 0, pointHitRadius: 5,
           tension: 0, order: 0 },
         { label: 'Deepest', hidden: off('perf', 'total'),
           data: mark, type: 'scatter', pointRadius: 5, pointHoverRadius: 6,
-          pointBackgroundColor: BP_PINK, pointBorderColor: '#2d2d2d',
+          pointBackgroundColor: BP_TOTAL, pointBorderColor: '#2d2d2d',
           pointBorderWidth: 2, showLine: false, order: -1 },
         ...c.eq.filter(sv => !sv.total).map(sv => ({
           label: sv.name, hidden: off('perf', sv.key),
@@ -1897,10 +1903,38 @@ document.addEventListener('alpine:init', () => {
      * equity AND drawdown, Capital deployed its own chart, and the
      * distribution/active-per-day card both of its charts. A click redraws;
      * it does not recompute -- `recompute` never reads `hidden`. */
-    legendRows() {
+    legendRows(withTotal = true) {
       void this.tick;
-      return this.rows.map(r => ({ key: r.key, name: r.name,
-                                   color: r.total ? BP_TOTAL : r.color }));
+      return this.rows.filter(r => withTotal || !r.total)
+        .map(r => ({ key: r.key, name: r.name,
+                     color: r.total ? BP_TOTAL : r.color }));
+    },
+
+    /* FULL SCREEN. The page behind stops scrolling, focus goes to Close and
+     * comes back to the expand button, and the chart is told to resize
+     * once the layout has moved (its ResizeObserver would get there, a
+     * frame later). */
+    openFull(key) {
+      this.full = key;
+      document.body.style.overflow = 'hidden';
+      this.$nextTick(() => {
+        const ch = BP_CHARTS[key];
+        if (ch) ch.resize();
+        const b = document.querySelector(`.bp-fig[data-fig="${key}"] .bp-fig-close`);
+        if (b) b.focus();
+      });
+    },
+    closeFull() {
+      const key = this.full;
+      if (!key) return;
+      this.full = null;
+      document.body.style.overflow = '';
+      this.$nextTick(() => {
+        const ch = BP_CHARTS[key];
+        if (ch) ch.resize();
+        const b = document.querySelector(`.bp-fig[data-fig="${key}"] .bp-expand`);
+        if (b) b.focus();
+      });
     },
     isShown(group, key) {
       return !(this.hidden[group] || {})[key];
