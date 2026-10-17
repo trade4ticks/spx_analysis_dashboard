@@ -10,9 +10,13 @@ last state when none does. A binary strategy is the same rule with one
 threshold. There is no nesting and no per-state logic: one relationship,
 one comparison per condition per level.
 
-THE WEEKDAY COMES FIRST. An entry day the strategy does not trade is its last
-state, whatever the market says:
-    weekday_is_eligible AND (condition_1 AND/OR condition_2 ...)
+THE SCHEDULE IS NOT A CONDITION (changed 2026-10-16). A strategy's
+scheduled entry days and times say when it is USUALLY considered; they never
+make it NO TRADE. A Wednesday strategy whose conditions fail on Wednesday and
+pass on Thursday reads TRADE on Thursday, because entering a day late on
+better conditions is a decision the trader makes, not the page. The weekday
+was once the first test here (`weekday AND conditions`); it is now reported
+as `scheduled_today`, information only, live and on a past date alike.
 
 MISSING IS NOT FALSE. A condition whose metric has no current value is
 unknown, and unknowns combine the three-valued way (an AND with a false is
@@ -57,14 +61,17 @@ def combine(results: list, logic: str) -> bool | None:
     return None if any(r is None for r in results) else False
 
 
-def decide(cfg: dict, values: dict, iso_weekday: int) -> dict:
-    """{state (index | None), reason, levels, conditions}.
+def decide(cfg: dict, values: dict, iso_weekday: int | None = None) -> dict:
+    """{state (index | None), reason, levels, conditions, scheduled_today}.
 
     `values` maps a metric id to its current value (None when missing).
-    reason: "weekday"       not an entry day -> the last state
-            "conditions"    decided by the conditions
-            "no_conditions" nothing to test -> the first state on an entry day
+    reason: "conditions"    decided by the conditions
+            "no_conditions" nothing to test -> the first state
             "no_data"       a level could not be answered -> state None
+    `iso_weekday` only answers `scheduled_today`; it never moves the state.
+    Every automatic requirement belongs in `conditions` -- a later kind of
+    condition (a priced structure, say) joins that list and the same
+    three-valued walk, so missing data stays NO DATA rather than TRADE.
     """
     states = cfg["states"]
     last = len(states) - 1
@@ -73,23 +80,20 @@ def decide(cfg: dict, values: dict, iso_weekday: int) -> dict:
               "passes": [compare(values.get(m["id"]), m["cmp"], t) for t in m["thresholds"]]}
              for m in signal]
     out = {"conditions": conds, "levels": [], "weekday": iso_weekday,
-           "weekday_ok": iso_weekday in cfg["weekdays"]}
-    # What the conditions ALONE say, worked out even on a day the weekday
-    # blocks -- so a Saturday reads "the market says TRADE, the day says no"
-    # rather than a bare NO TRADE nobody can see the reason for.
-    market, market_reason = 0, "no_conditions"
+           "scheduled_today": iso_weekday in (cfg.get("weekdays") or [])}
+    state, reason = 0, "no_conditions"
     if conds:
-        market, market_reason = last, "conditions"
+        state, reason = last, "conditions"
         for i in range(last):
             r = combine([c["passes"][i] for c in conds], cfg["logic"])
             out["levels"].append(r)
             if r is None:
-                market, market_reason = None, "no_data"
+                state, reason = None, "no_data"
                 break
             if r:
-                market = i
+                state = i
                 break
-    out.update(market_state=market, market_reason=market_reason)
-    if not out["weekday_ok"]:
-        return {**out, "state": last, "reason": "weekday"}
-    return {**out, "state": market, "reason": market_reason}
+    # market_state/market_reason were "what the conditions alone say" while
+    # the weekday could override them; they are now the decision itself,
+    # kept so an older page reading them still reads the right thing.
+    return {**out, "state": state, "reason": reason, "market_state": state, "market_reason": reason}

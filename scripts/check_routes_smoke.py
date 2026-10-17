@@ -396,7 +396,17 @@ def _check_alpine_templates() -> int:
     bad = 0
     for tpl in sorted((ROOT / "templates").glob("*.html")):
         p = P()
-        p.feed(tpl.read_text(encoding="utf-8"))
+        # An include is the partial's markup in place: a partial that is an
+        # x-for's one root (strategy_signal's mini card) must count as one.
+        # Joined onto one line so the page's line numbers stay right.
+        def _inc(m):
+            f = ROOT / "templates" / m.group(1)
+            if not f.is_file():
+                return ""
+            body = re.sub(r"{#.*?#}", "", f.read_text(encoding="utf-8"), flags=re.S)
+            return " ".join(body.split())
+        p.feed(re.sub(r"""{%-?\s*include\s+["']([^"']+)["']\s*-?%}""", _inc,
+                      tpl.read_text(encoding="utf-8")))
         for line, d, expr, n, kids in p.bad:
             print(f"  {tpl.name}:{line}  {d}=\"{expr[:44]}\" has {n} element "
                   f"children {kids} — Alpine renders nothing")

@@ -34,9 +34,48 @@
     .ss-err { font-size:12px; color:#e84393; white-space:pre-wrap; margin:6px 0; }
     .ss-empty { color:var(--muted); font-size:13px; padding:30px 0; text-align:center; }
 
-    /* ── summary cards ── */
-    .ss-cards { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));
-                margin-bottom:22px; }
+    /* ── the top: weekly calendar + standalone cards ──
+       The calendar is a SCHEDULE (when a strategy is usually considered);
+       the state on each mini card is the same decision as its section's.
+       Rows grow with their cards rather than clip them. */
+    .ss-top { display:grid; gap:14px; grid-template-columns:minmax(0, 1fr); margin-bottom:22px; align-items:start; }
+    .ss-top.with-side { grid-template-columns:minmax(0, 1fr) clamp(210px, 18%, 300px); }
+    @media (max-width: 1100px) { .ss-top.with-side { grid-template-columns:minmax(0, 1fr); } }
+    .ss-cal { position:relative; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+              padding:6px 8px 8px; overflow-x:auto; }
+    .ss-cal-grid { position:relative; display:grid; min-width:620px;
+                   grid-template-columns:42px repeat(5, minmax(0, 1fr)); }
+    .ss-cal-corner, .ss-cal-time { font-size:10px; color:var(--dim); font-variant-numeric:tabular-nums;
+                                   padding:3px 6px 0 0; text-align:right; }
+    .ss-cal-day { font-size:11px; font-weight:700; color:var(--muted); padding:3px 6px 5px;
+                  border-bottom:1px solid var(--border); }
+    .ss-cal-cell { min-height:24px; padding:2px 3px; border-top:1px solid rgba(255,255,255,0.04);
+                   border-left:1px solid rgba(255,255,255,0.05); display:flex; flex-wrap:wrap; gap:4px;
+                   align-content:flex-start; min-width:0; }
+    .ss-cal-time { border-top:1px solid rgba(255,255,255,0.04); }
+    .ss-cal-untimed .ss-cal-cell, .ss-cal-untimed .ss-cal-time { border-bottom:1px solid var(--border); }
+    .ss-cal .today { background:rgba(52, 152, 219, 0.07); }
+    .ss-cal .ss-cal-day.today { color:var(--accent); }
+    .ss-cal .ss-cal-day.evald { color:var(--text); text-decoration:underline dotted; text-underline-offset:3px; }
+    .ss-now { position:absolute; height:0; border-top:1.5px solid var(--accent); pointer-events:none; display:none;
+              box-shadow:0 0 4px rgba(52, 152, 219, 0.6); z-index:2; }
+    .ss-cal-note { font-size:10px; color:var(--dim); padding:4px 0 0 46px; }
+    .ss-mini { flex:1 1 0; min-width:74px; max-width:150px; background:#262626; border:1px solid var(--border); border-radius:5px;
+               padding:3px; display:flex; flex-direction:column; gap:2px; cursor:pointer; color:var(--text);
+               font-family:inherit; text-align:left; }
+    .ss-mini:hover { border-color:var(--dim); }
+    .ss-mini img { width:100%; height:44px; object-fit:contain; display:block; border-radius:3px; background:#1f1f1f; }
+    .ss-mini-name { font-size:10.5px; font-weight:700; line-height:1.2; padding:0 2px; overflow:hidden;
+                    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow-wrap:anywhere; }
+    .ss-mini-state { border-radius:3px; text-align:center; font-weight:800; letter-spacing:.4px; color:#fff;
+                     font-size:10px; padding:2px 4px; line-height:1.2; }
+    .ss-mini-state.nodata { background:transparent !important; color:var(--dim); border:1px dashed var(--border); }
+    .ss-side { display:flex; flex-direction:column; gap:10px; min-width:0; }
+    .ss-side .ss-card img { width:100%; max-height:150px; object-fit:contain; display:block; border-radius:4px;
+                            background:#1f1f1f; }
+    .ss-unsched { font-size:10px; color:var(--dim); }
+
+    /* ── summary cards (standalone) ── */
     .ss-card { background:var(--surface); border:1px solid var(--border); border-radius:8px;
                padding:12px 12px 12px; cursor:pointer; display:flex; flex-direction:column; gap:8px; }
     .ss-card:hover { border-color:var(--dim); }
@@ -59,6 +98,17 @@
                   border-top-left-radius:8px; border-top-right-radius:8px; }
     .ss-sec-name { font-size:14px; font-weight:700; }
     .ss-sec-body { padding:12px; }
+    .ss-sec.closed .ss-sec-hdr { border-bottom:0; border-radius:8px; }
+    .ss-fold { width:18px; text-align:center; }
+    .ss-sec-img { height:28px; max-width:90px; object-fit:contain; border-radius:3px; background:#1f1f1f; }
+    .ss-sched { font-size:10.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+    /* Two columns: row-major in strategy order; one column below 1300px.
+       Charts take a narrower minimum so a half-width section keeps two. */
+    .ss-secs.two { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:0 16px; align-items:start; }
+    @media (max-width: 1300px) { .ss-secs.two { grid-template-columns:minmax(0, 1fr); } }
+    .ss-secs.two .ss-charts { grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); }
+    .ss-secs.two .ss-sec-hdr { flex-wrap:wrap; row-gap:4px; }
+    .ss-sec { min-width:0; }
     .ss-reason { font-size:11px; color:var(--muted); }
     .ss-charts { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(420px, 1fr)); }
     .ss-chart { border:1px solid var(--border); border-radius:6px; padding:8px 8px 4px; background:#262626; min-width:0; }
@@ -122,6 +172,15 @@
     .ss-seg button { background:var(--raised); color:var(--muted); border:0; padding:3px 10px; font-size:11px;
                      cursor:pointer; font-family:inherit; font-weight:700; }
     .ss-seg button.on { background:var(--accent); color:#fff; }
+    .ss-days { display:grid; gap:4px; }
+    .ss-dayrow { display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-height:24px; }
+    .ss-dayrow .ss-chk { width:52px; }
+    input[type=time].ss-in { width:92px; }
+    .ss-imgprev { width:160px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:4px;
+                  background:#1f1f1f; display:block; }
+    .ss-imgnone { width:160px; height:90px; border:1px dashed var(--border); border-radius:4px; color:var(--dim);
+                  font-size:11px; display:flex; align-items:center; justify-content:center; }
+    .ss-file { display:none; }
   </style>
 </head>
 <body class="page" x-data="strategySignal">
@@ -140,6 +199,11 @@
     <div class="ss-bar">
       <span class="ss-title">Strategy Signal</span>
       <span class="ss-grow"></span>
+      <div class="ss-seg" title="Strategy sections: one per row, or two side by side on a wide screen">
+        <button :class="layout === 'full' && 'on'" @click="setLayout('full')">Full width</button>
+        <button :class="layout === 'two' && 'on'" @click="setLayout('two')">Two columns</button>
+      </div>
+      <span class="ss-sep"></span>
       <span class="ss-lbl">Evaluate at</span>
       <input class="ss-in" type="date" :max="todayIso()" :value="evalDate || todayIso()"
              @change="pickDate($event.target.value)" title="Re-run every strategy at the close of a past session">
@@ -171,14 +235,54 @@
             <input class="ss-in" x-model="draft.name" maxlength="80" placeholder="e.g. Short-term put spread">
           </div>
           <div class="ss-f">
-            <span class="ss-lbl">Eligible entry days</span>
-            <div class="ss-row">
+            <span class="ss-lbl">Scheduled entry days and times (ET) — informational, never block the signal</span>
+            <div class="ss-days">
               <template x-for="d in weekdays" :key="d.n">
-                <label class="ss-chk">
-                  <input type="checkbox" :checked="draft.weekdays.includes(d.n)" @change="toggleDay(d.n)">
-                  <span x-text="d.label"></span>
-                </label>
+                <div class="ss-dayrow">
+                  <label class="ss-chk">
+                    <input type="checkbox" :checked="draft.weekdays.includes(d.n)" @change="toggleDay(d.n)">
+                    <span x-text="d.label"></span>
+                  </label>
+                  <template x-for="(t, ti) in draft.times[d.n]" :key="ti">
+                    <span class="ss-row" style="gap:2px">
+                      <input class="ss-in" type="time" min="09:30" max="16:00" step="300" :value="t"
+                             :title="d.label + ' entry time, Eastern'"
+                             @input="draft.times[d.n][ti] = $event.target.value">
+                      <button class="ss-x" title="Remove this time" @click="removeTime(d.n, ti)">✕</button>
+                    </span>
+                  </template>
+                  <button class="ss-btn sm" @click="addTime(d.n)" :title="'Add an entry time on ' + d.label">+ time</button>
+                  <span class="ss-hint" x-show="draft.weekdays.includes(d.n) && !draft.times[d.n].length">no time set</span>
+                </div>
               </template>
+            </div>
+          </div>
+
+          <div class="ss-f">
+            <span class="ss-lbl">Summary display</span>
+            <div class="ss-row">
+              <div class="ss-seg">
+                <button :class="draft.display === 'calendar' && 'on'" @click="draft.display = 'calendar'">Weekly calendar</button>
+                <button :class="draft.display === 'card' && 'on'" @click="draft.display = 'card'">Standalone card</button>
+              </div>
+            </div>
+            <span class="ss-hint" x-text="draft.display === 'card'
+              ? 'A card beside the calendar — for a strategy watched for weeks rather than entered on a day.'
+              : 'One mini card per scheduled time; a scheduled day with no time goes in the calendar\'s top row.'"></span>
+            <span class="ss-lbl" style="margin-top:10px">Risk graph</span>
+            <div class="ss-row" style="align-items:flex-start">
+              <template x-if="draftImageSrc()"><img class="ss-imgprev" :src="draftImageSrc()" alt="risk graph"></template>
+              <template x-if="!draftImageSrc()"><div class="ss-imgnone">no image</div></template>
+              <div class="ss-f">
+                <div class="ss-row">
+                  <button class="ss-btn sm" @click="$refs.imgFile.click()"
+                          x-text="(draft.image && draft.imageAction !== 'remove') || draft.imageAction === 'set' ? 'Replace…' : 'Upload…'"></button>
+                  <button class="ss-btn sm danger" @click="dropImage()" x-show="draftImageSrc()">Remove</button>
+                </div>
+                <span class="ss-hint" x-text="imageHint()"></span>
+                <input class="ss-file" type="file" x-ref="imgFile" accept="image/png,image/jpeg,image/webp,image/gif"
+                       @change="pickImage($event)">
+              </div>
             </div>
           </div>
 
@@ -325,13 +429,58 @@
     </template>
     <template x-if="!board && loading"><div class="ss-empty">Loading…</div></template>
 
-    <!-- ── A. summary: one glance per strategy ────────────────────────── -->
-    <div class="ss-cards">
-      <template x-for="e in entries()" :key="e.strategy.id">
+    <!-- ── A. the week, and the strategies that are not on it ──────────────
+         Every mini card and side card reads e.decision -- the same object
+         the section below reads. There is no second decision here. -->
+    <div class="ss-top" :class="sideItems().length && 'with-side'" x-show="board && entries().length">
+      <div class="ss-cal" x-ref="cal">
+        <div class="ss-cal-grid" x-ref="calGrid">
+          <div class="ss-cal-corner" x-text="calCorner()" title="Eastern time"></div>
+          <template x-for="d in weekdays" :key="d.n">
+            <div class="ss-cal-day" :class="{ today: isTodayCol(d.n), evald: isEvalCol(d.n) }"
+                 :title="isEvalCol(d.n) ? 'The evaluated day' : ''" x-text="d.full"></div>
+          </template>
+          <template x-if="hasUntimed()">
+            <div style="display:contents" class="ss-cal-untimed">
+              <div class="ss-cal-time" title="Scheduled on this day, no time set">no time</div>
+              <template x-for="d in weekdays" :key="d.n">
+                <div class="ss-cal-cell" :class="isTodayCol(d.n) && 'today'">
+                  <template x-for="c in calUntimed(d.n)" :key="c.e.strategy.id">
+                    {% include "_strategy_signal_mini.html" %}
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+          <template x-for="row in calSlots()" :key="row.i">
+            <div style="display:contents">
+              <div class="ss-cal-time" :data-slot="row.i" x-text="row.label"></div>
+              <template x-for="d in weekdays" :key="d.n">
+                <div class="ss-cal-cell" :class="isTodayCol(d.n) && 'today'" :data-day="d.n" :data-slot="row.i">
+                  <template x-for="c in calCell(d.n, row.i)" :key="c.e.strategy.id + '@' + c.time">
+                    {% include "_strategy_signal_mini.html" %}
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+        <div class="ss-now" x-ref="nowLine"></div>
+        <template x-if="calNote()"><div class="ss-cal-note" x-text="calNote()"></div></template>
+      </div>
+
+      <div class="ss-side" x-show="sideItems().length">
+      <template x-for="e in sideEntries()" :key="e.strategy.id">
         <div class="ss-card" @click="scrollTo(e)" :title="'Go to ' + e.strategy.name">
+          <template x-if="e.strategy.image">
+            <img :src="imageUrl(e.strategy, 'thumb')" loading="lazy" alt="">
+          </template>
           <div>
             <div class="ss-cname" x-text="e.strategy.name"></div>
             <div class="ss-cid" x-text="idLine(e)"></div>
+            <template x-if="unscheduled(e)">
+              <div class="ss-unsched">calendar strategy with no scheduled day — shown here until it has one</div>
+            </template>
           </div>
           <div class="ss-pill" :class="stateIndex(e) === null && 'nodata'"
                :style="'background:' + color(e)" x-text="stateLabel(e)"></div>
@@ -345,23 +494,33 @@
           <template x-if="e.stale"><div class="ss-stale">⚠ data not current</div></template>
         </div>
       </template>
+      </div>
     </div>
 
-    <!-- ── B. one section per strategy ────────────────────────────────── -->
+    <!-- ── B. one section per strategy, in the saved order (▲ ▼) ───────── -->
+    <div class="ss-secs" :class="layout === 'two' && 'two'">
     <template x-for="(e, ei) in entries()" :key="e.strategy.id">
-      <section class="ss-sec" :id="'ss-sec-' + e.strategy.id">
+      <section class="ss-sec" :class="isCollapsed(e) && 'closed'" :id="'ss-sec-' + e.strategy.id">
         <div class="ss-sec-hdr">
+          <button class="ss-x ss-fold" @click="toggleCollapse(e)" :title="isCollapsed(e) ? 'Expand' : 'Collapse'"
+                  x-text="isCollapsed(e) ? '▸' : '▾'"></button>
           <span class="ss-sec-name" x-text="e.strategy.name"></span>
+          <template x-if="e.strategy.image">
+            <a :href="imageUrl(e.strategy, 'full')" target="_blank" rel="noopener" title="Risk graph — open full size">
+              <img class="ss-sec-img" :src="imageUrl(e.strategy, 'thumb')" loading="lazy" alt="risk graph"></a>
+          </template>
           <span class="ss-pill small" :class="stateIndex(e) === null && 'nodata'"
                 :style="'background:' + color(e)" x-text="stateLabel(e)"></span>
           <span class="ss-reason" x-text="reason(e)"></span>
           <span class="ss-grow"></span>
+          <span class="ss-sched" :title="'Scheduled entries (ET) — informational'"
+                x-text="e.strategy.display === 'card' && !e.strategy.weekdays.length ? '' : scheduleText(e.strategy)"></span>
           <span class="ss-sub" x-text="asOf(e)"></span>
           <button class="ss-x" title="Move up" @click="move(e, -1)" :disabled="ei === 0">▲</button>
           <button class="ss-x" title="Move down" @click="move(e, 1)" :disabled="ei === entries().length - 1">▼</button>
           <button class="ss-btn sm" @click="editStrategy(e)" :disabled="editing">Edit</button>
         </div>
-        <div class="ss-sec-body">
+        <div class="ss-sec-body" x-show="!isCollapsed(e)">
           <!-- WHY: every input to the decision, its value, what it needs,
                and whether it passed. The verdict alone cannot be checked. -->
           <div class="ss-why">
@@ -413,6 +572,7 @@
         </div>
       </section>
     </template>
+    </div>
   </div>
 
   {#- NOT `defer` — Alpine is deferred in the head, so a deferred bundle here

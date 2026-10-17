@@ -186,7 +186,9 @@ GATES = [
     _s("check_strategy_signal.py",
        note="decision, percentile, one clock, one fetch per source, store"),
     _s("check_strategy_signal_ui.py", can_skip=True,
-       note="cards, charts, Add/Save/Edit clicked; console clean"),
+       note="calendar, side cards, time line, layout, images, Add/Save/Edit clicked; console clean"),
+    _s("check_strategy_signal_sql.py", can_skip=True,
+       note="legacy rows read with defaults, order persists, risk-graph images (needs initdb)"),
 
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",

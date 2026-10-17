@@ -3,22 +3,31 @@
 No database and no network: the board's fetch is replaced with fabricated
 bars, so this runs anywhere (the VPS included). What it pins:
 
-  decide      weekday first; AND/OR; one threshold per level, first level
-              that holds wins; a MISSING value is unknown, not false, and
-              an unknown level reads NO DATA instead of falling through.
+  decide      the SCHEDULE NEVER DECIDES (2026-10-16): a Wednesday strategy
+              reads TRADE on a Thursday or a Saturday when its conditions
+              pass; AND/OR; one threshold per level, first level that holds
+              wins; a MISSING value is unknown, not false, and an unknown
+              level reads NO DATA instead of falling through.
   pctile      strictly-prior window, ties counted half, no partial window.
   the clock   an index bar is stamped at its END, so VIX / surface divides
               values from the same instant; A op B is an inner join.
   daily       last observation per session; a short PAST index session is
               dropped, the last session is kept (it may be in progress).
   Board       each source fetched ONCE for its deepest need.
-  store       clean_config refuses what the page could not use.
+  store       clean_config refuses what the page could not use; entry
+              times and display are validated; a row saved before they
+              existed reads back with its days and the defaults.
+  images      prepare() keeps the aspect ratio, never enlarges, refuses a
+              file that is not an image whatever its name says.
 """
 from __future__ import annotations
 
 import asyncio
+import copy
+import io
+import json
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +36,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.strategy_signal import evaluate as ev, library as lib, store  # noqa: E402
+from app.strategy_signal import evaluate as ev, images, library as lib, store  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -56,11 +65,24 @@ def check_decide():
     d = ev.decide(b, {"r": 1.0, "t": None}, 2)
     check(d["state"] is None and d["reason"] == "no_data", "AND: a pass beside a missing is NO DATA")
 
-    fri = cfg(["TRADE", "NO TRADE"], "and", [sig("r", "<", 1.14)], days=(5,))
-    d = ev.decide(fri, {"r": 1.0}, 2)
-    check(d["state"] == 1 and d["reason"] == "weekday", "Friday-only on a Tuesday -> NO TRADE though every condition passes")
-    check(ev.decide(fri, {"r": 1.0}, 5)["state"] == 0, "Friday-only on a Friday -> TRADE")
-    check(ev.decide(fri, {"r": None}, 6)["reason"] == "weekday", "a Saturday is not an entry day, data or not")
+    # The schedule is information. A Wednesday strategy whose conditions
+    # pass on Thursday reads TRADE on Thursday.
+    wed = cfg(["TRADE", "NO TRADE"], "and", [sig("r", "<", 1.14)], days=(3,))
+    d = ev.decide(wed, {"r": 1.2}, 3)
+    check(d["state"] == 1 and d["scheduled_today"] is True,
+          "Wednesday strategy on Wednesday, conditions fail -> NO TRADE (a scheduled day)")
+    d = ev.decide(wed, {"r": 1.0}, 4)
+    check(d["state"] == 0 and d["reason"] == "conditions" and d["scheduled_today"] is False,
+          "Wednesday strategy on Thursday, conditions pass -> TRADE (not scheduled, not blocked)")
+    check(ev.decide(wed, {"r": 1.0}, 5)["state"] == 0, "... and on Friday -> TRADE")
+    check(ev.decide(wed, {"r": 1.0}, 6)["state"] == 0, "... and on a Saturday -> TRADE: the weekday is never a condition")
+    check(ev.decide(wed, {"r": None}, 4)["reason"] == "no_data", "a missing value off-schedule is NO DATA, not NO TRADE")
+    d = ev.decide(wed, {"r": 1.0}, 4)
+    check(d["market_state"] == d["state"] and d["market_reason"] == d["reason"], "market_state is the decision itself")
+    nod = cfg(["TRADE", "NO TRADE"], "and", [sig("r", "<", 1.14)], days=())
+    d = ev.decide(nod, {"r": 1.0}, 2)
+    check(d["state"] == 0 and d["scheduled_today"] is False, "no scheduled days at all -> decided by the conditions")
+    check(ev.decide(wed, {"r": 1.0})["state"] == 0, "the weekday argument is optional")
 
     o = cfg(["TRADE", "NO TRADE"], "or", [sig("r", "<", 1.14), sig("t", ">", 0.8375)])
     check(ev.decide(o, {"r": 1.2, "t": 0.9}, 1)["state"] == 0, "OR: one passes -> TRADE")
@@ -73,7 +95,7 @@ def check_decide():
     check(got == [0, 1, 1, 2, 3, 3], f"tiers: pctl 10/30/45/69.9/70/95 -> FULL/RED/RED/MIN/NONE/NONE (got {got})")
     a2 = cfg(["FULL", "REDUCED", "NONE"], "and", [sig("p", "<", 30, 60), sig("q", ">", 1.0, 0.9)])
     check(ev.decide(a2, {"p": 20, "q": 0.95}, 3)["state"] == 1, "tiers with AND: level 1 fails on q, level 2 holds")
-    check(ev.decide(cfg(["GO", "NO"], "and", []), {}, 3)["state"] == 0, "no conditions: an entry day is the first state")
+    check(ev.decide(cfg(["GO", "NO"], "and", []), {}, 3)["state"] == 0, "no conditions: the first state")
     check(ev.compare(0.1 + 0.2, "=", 0.3) is True, "= tolerates float noise")
 
 
@@ -121,15 +143,10 @@ def check_clock_and_daily():
     check(list(daily) == [77.0, 11.0], "daily = last observation per session")
 
 
-class FakeBoard(lib.Board):
-    calls: list = []
-
-
 def check_board():
     print("board")
     calls = []
     today = date(2026, 9, 25)
-    sessions = lib.recent_sessions(600, today)
 
     async def fake_fetch(pool, src, sess):
         calls.append((src, len(sess)))
@@ -164,6 +181,10 @@ def check_board():
         lib.fetch_bars = real
 
 
+class Rec(dict):
+    """An asyncpg Record's shape: [key] and .keys()."""
+
+
 def check_store():
     print("store")
     src = {"index:vix", "index:vix9d", "surface:term_ratio_7d_30d"}
@@ -179,9 +200,37 @@ def check_store():
     check(c["metrics"][1]["thresholds"] == [0.8375] and c["metrics"][1]["resolution"] == "daily",
           "thresholds become numbers; resolution defaults to daily")
     check(len({m["id"] for m in c["metrics"]}) == 2, "metrics get distinct ids")
+    check(c["entry_times"] == [] and c["display"] == "calendar", "no times and the calendar by default")
+
+    t = copy.deepcopy(ok)
+    t.update(weekdays=[5], display="card",
+             entry_times=[{"day": 5, "time": "11:30"}, {"day": 2, "time": "9:30"}, {"day": 2, "time": "10:00"},
+                          {"day": 2, "time": "10:00"}, {"day": 3, "time": "16:00"}])
+    c = store.clean_config(t, src)
+    check(c["entry_times"] == [{"day": 2, "time": "09:30"}, {"day": 2, "time": "10:00"},
+                               {"day": 3, "time": "16:00"}, {"day": 5, "time": "11:30"}],
+          "entry times: padded, deduplicated, sorted; several on one day; 09:30 and 16:00 allowed")
+    check(c["weekdays"] == [2, 3, 5], "a day with a time is a scheduled day")
+    check(c["display"] == "card", "standalone card kept")
+    none = copy.deepcopy(ok)
+    none["weekdays"] = []
+    check(store.clean_config(none, src)["weekdays"] == [], "no scheduled days is allowed (a standalone strategy)")
+
+    # A row saved BEFORE entry_times / display existed, as asyncpg returns it.
+    legacy = {"name": "Old", "notes": "", "weekdays": [3], "states": ["TRADE", "NO TRADE"], "logic": "and",
+              "metrics": [], "manual": []}
+    r = store._row(Rec(id=7, position=2, name="Old", config=json.dumps(legacy),
+                       updated_at=datetime(2026, 9, 26, tzinfo=timezone.utc)))
+    check(r["weekdays"] == [3] and r["entry_times"] == [] and r["display"] == "calendar" and r["image"] is None,
+          "a legacy row keeps its weekday as a scheduled day, gains no times, sits on the calendar")
+    check(store.clean_config(r, src)["weekdays"] == [3], "a legacy row re-saves with its day")
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    r = store._row(Rec(id=7, position=2, name="Old", config=legacy, updated_at=None, image_at=at,
+                       image_w=800, image_h=500, image_tw=480, image_th=300))
+    check(r["image"] == {"v": int(at.timestamp() * 1000), "w": 800, "h": 500, "tw": 480, "th": 300},
+          "an image's meta rides on the strategy, versioned by its upload time")
 
     def refused(mut, why):
-        import copy
         bad = copy.deepcopy(ok)
         mut(bad)
         try:
@@ -194,11 +243,52 @@ def check_store():
     refused(lambda x: x["metrics"][0].update(thresholds=[1, 2]), "the wrong number of thresholds")
     refused(lambda x: x["metrics"][0].update(lookback="1y"), "a 1-year INTRADAY chart")
     refused(lambda x: x["metrics"][0].update(chart=False, signal=False), "a metric that does nothing")
-    refused(lambda x: x.update(weekdays=[]), "no entry days")
-    refused(lambda x: x.update(weekdays=[6]), "a Saturday entry day")
+    refused(lambda x: x.update(weekdays=[6]), "a Saturday scheduled day")
+    refused(lambda x: x.update(entry_times=[{"day": 2, "time": "09:00"}]), "an entry time before the open")
+    refused(lambda x: x.update(entry_times=[{"day": 2, "time": "16:05"}]), "an entry time after the close")
+    refused(lambda x: x.update(entry_times=[{"day": 2, "time": "10:61"}]), "a time that is not a time")
+    refused(lambda x: x.update(entry_times=[{"day": 2, "time": "ten"}]), "a time that is a word")
+    refused(lambda x: x.update(entry_times=[{"day": 6, "time": "10:00"}]), "an entry time on a Saturday")
+    refused(lambda x: x.update(entry_times=[{"day": 1, "time": f"10:{i:02d}"} for i in range(21)]),
+            "more than 20 entry times")
+    refused(lambda x: x.update(display="sidebar"), "a display that is neither calendar nor card")
     refused(lambda x: x.update(states=["A"]), "a single state")
     refused(lambda x: x.update(states=["GO", "go"]), "two states with one name")
     refused(lambda x: x["metrics"][1].update(thresholds=["abc"]), "a threshold that is not a number")
+
+
+def check_images():
+    print("images")
+    try:
+        from PIL import Image
+    except ImportError:
+        check(False, "Pillow is importable (needed to test the risk-graph upload)")
+        return
+
+    def pic(w, h, fmt="PNG", mode="RGB"):
+        b = io.BytesIO()
+        Image.new(mode, (w, h), (52, 152, 219) if mode == "RGB" else (52, 152, 219, 128)).save(b, fmt)
+        return b.getvalue()
+    p = images.prepare(pic(1600, 600))
+    check(p["content_type"] == "image/png" and (p["width"], p["height"]) == (1600, 600), "the original is kept as uploaded")
+    check((p["thumb_width"], p["thumb_height"]) == (480, 180) and p["thumb_type"] == "image/webp",
+          "the thumbnail fits 480x300 and keeps the aspect ratio (1600x600 -> 480x180)")
+    check(Image.open(io.BytesIO(p["thumb"])).size == (480, 180), "the thumbnail bytes are that size")
+    p = images.prepare(pic(200, 100, "JPEG"))
+    check((p["thumb_width"], p["thumb_height"]) == (200, 100) and p["content_type"] == "image/jpeg",
+          "a small image is never enlarged")
+    p = images.prepare(pic(300, 900, "PNG", "RGBA"))
+    check((p["thumb_width"], p["thumb_height"]) == (100, 300), "a tall image fits by its height")
+    check(images.prepare(pic(10, 10, "GIF"))["content_type"] == "image/gif", "a GIF is accepted")
+    for bad, why in ((b"", "an empty file"), (b"not an image at all", "text named .png"),
+                     (b"\x89PNG\r\n\x1a\n" + b"0" * 40, "a truncated PNG"),
+                     (b"x" * (images.MAX_BYTES + 1), "a file over 8 MB"),
+                     (pic(4, 4, "BMP"), "a BMP (not on the list)")):
+        try:
+            images.prepare(bad)
+            check(False, f"refuses {why}")
+        except ValueError:
+            check(True, f"refuses {why}")
 
 
 def main() -> int:
@@ -207,11 +297,12 @@ def main() -> int:
     check_clock_and_daily()
     check_board()
     check_store()
+    check_images()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} strategy-signal check(s) failed")
         return 1
-    print("PASS: strategy signal — decision, percentile, clock, board fetch, config store")
+    print("PASS: strategy signal — decision, percentile, clock, board fetch, config store, schedule fields, images")
     return 0
 
 

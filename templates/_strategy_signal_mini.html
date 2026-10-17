@@ -1,0 +1,13 @@
+{#- One calendar mini card, for `c` = {e, day, time} from ssPlace. Included
+    in both the "no time" row and the timed rows of strategy_signal.html.
+    Picture, name and state only: no values, thresholds or notes -- those
+    are the section's, one click away. -#}
+<button class="ss-mini" @click="scrollTo(c.e)" :title="miniTitle(c)"
+        :style="'border-left:3px solid ' + (stateIndex(c.e) === null ? 'var(--border)' : color(c.e))">
+  <template x-if="c.e.strategy.image">
+    <img :src="imageUrl(c.e.strategy, 'thumb')" loading="lazy" alt="">
+  </template>
+  <span class="ss-mini-name" x-text="(c.e.stale ? '⚠ ' : '') + c.e.strategy.name"></span>
+  <span class="ss-mini-state" :class="stateIndex(c.e) === null && 'nodata'"
+        :style="'background:' + color(c.e)" x-text="stateLabel(c.e)"></span>
+</button>

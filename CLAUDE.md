@@ -713,8 +713,36 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
   (`market_calendar.is_complete`). `market.get_daily` is NOT reused: it omits
   the session in progress and rebuilds its whole-table rollup on every new
   bar, which on a 5-minute refresh is every refresh.
-- **The decision** (`evaluate.decide`): weekday first (not an entry day → the
-  last state); each signal condition has **one threshold per state but the
+- **The schedule is NOT the signal** (2026-10-16, reverses the weekday gate
+  below). `weekdays` (stored key unchanged, so no migration) is now the
+  SCHEDULED entry days, plus optional `entry_times` `[{day, time}]`
+  (09:30–16:00 ET, several per day). `decide` never reads them for the state;
+  it reports `scheduled_today` only. A Wednesday strategy whose conditions
+  pass on Thursday reads TRADE on Thursday, live and on a past date.
+  `market_state` now equals `state` (kept for older readers). A strategy with
+  no conditions reads its first state every day.
+- **The top of the page is a weekly calendar + standalone cards.** `display`
+  is `calendar` | `card` (mutually exclusive). Rows saved before these fields
+  read back with defaults in `store.with_defaults` (calendar, no times) — the
+  JSONB is never rewritten. A calendar strategy: one mini card per (day,
+  time) in its 30-min row; a day with no time in a top "no time" row; NO day
+  at all → shown beside the calendar, never nowhere (`ssPlace`). Every
+  card reads `e.decision` — one decision, three places, gate-checked.
+  The time line and today's column use ET via `Intl` (`ssEt`), the line is
+  measured from the DOM (rows grow with cards), shown only live, on a session
+  day, inside that day's own hours (`board.session`, so an early close ends
+  it at 13:00); a past date shows no line and marks the evaluated weekday.
+- **Risk graph images**: `strategy_signal_images` (BYTEA, FK ON DELETE
+  CASCADE) — never in the JSONB. `images.prepare` decodes with Pillow (the
+  decoded format is trusted, not the name), keeps the original, makes one
+  ≤480×300 WebP thumb. URLs carry `?v=<upload ms>` and are served
+  `immutable`. The editor STAGES upload/remove and Save sends them after the
+  config; a failed image step keeps the panel open on the saved strategy.
+- **Layout (full/two columns) and collapsed sections are localStorage**
+  (`ss.layout`, `ss.collapsed`) — per screen, the Wall's convention. Order
+  is the server's `position` (▲ ▼, unchanged). Opening a section resizes its
+  charts explicitly: a chart drawn while hidden otherwise stays 0 px wide.
+- ~~**The decision** weekday first~~ (superseded above). Each signal condition has **one threshold per state but the
   last**; the first state whose conditions all (AND) / any (OR) pass wins, the
   last state is the fallback. **Missing is unknown, not false** (three-valued),
   and an unknown level reads **NO DATA** rather than falling through to a lower
@@ -724,14 +752,13 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
 - **`/board` is the one call**: each source fetched once for the deepest
   lookback any strategy asks of it; a failing metric is reported on that
   metric, never the page. Intraday charts are capped at 3 months.
-- **Every section shows WHY** (2026-09-26): a checklist row for the entry
-  day and for each condition — its value, what it needs, pass / fail /
-  no value, a multi-level condition listing every level — and a summary
-  naming the market verdict and whether the day blocked it.
-  `decide` returns `market_state`, what the conditions alone say, even on a
-  blocked day, so a Saturday reads "conditions → TRADE, blocked by the day".
-  A card carries one phrase only when the state did not come from the market
-  ("not an entry day", "a signal value is missing"); still no values.
+- **Every section shows WHY** (2026-09-26): a checklist row for each
+  condition — its value, what it needs, pass / fail / no value, a
+  multi-level condition listing every level — and a summary naming the
+  verdict, then whether today is a scheduled day, stated as information
+  (the entry-day row and "blocked by the day" went with the weekday gate,
+  2026-10-16). A card carries one phrase only when the state did not come
+  from the market ("a signal value is missing"); still no values.
 - **Charts shade the decision zones** of that one condition (the state each
   value range leads to, at alpha 0.13), not the combined decision; with
   several conditions the chart says so. `=` shades nothing.
@@ -748,9 +775,12 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
   teardown trap again (found by the browser gate: 13 TypeErrors on close).
   Selects whose options arrive by `x-for` after the model need `:selected`.
 
-Gates: `check_strategy_signal.py` (offline, VPS-safe) and
+Gates: `check_strategy_signal.py` (offline, VPS-safe),
 `check_strategy_signal_ui.py` (Edge, clicks, the real router's board over
-fabricated bars; `can_skip`). **The SQL has not run against a real
+fabricated bars; `can_skip`; maps `requestAnimationFrame` to `setTimeout`
+like `check_oo_notes_ui`) and `check_strategy_signal_sql.py` (store +
+image handlers on a temporary Postgres; `can_skip` without initdb — set
+`PG_BIN`). **The SQL has not run against a real
 index_ohlc/surface table** — no Postgres here; the first VPS load is its test.
 
 ## Factor Trades: metric filters (2026-09-26)

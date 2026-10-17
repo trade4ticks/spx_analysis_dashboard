@@ -93,6 +93,11 @@ def check(tpl: Path) -> tuple[int, list[str]]:
     # a call from it, and counting it would let a commented-out panel keep its
     # handlers alive.
     markup = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    # An included partial is this page's markup too (strategy_signal's
+    # calendar mini card is one, drawn in two rows).
+    markup = re.sub(r"""{%-?\s*include\s+["']([^"']+)["']\s*-?%}""",
+                    lambda m: (TEMPLATES / m.group(1)).read_text(encoding="utf-8")
+                    if (TEMPLATES / m.group(1)).is_file() else "", markup)
 
     orphans = []
     for name in members(js):

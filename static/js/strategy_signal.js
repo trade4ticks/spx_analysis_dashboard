@@ -13,9 +13,94 @@ const SS_BLUE = [0x34, 0x98, 0xdb];     // #3498db — favourable
 const SS_PINK = [0xe8, 0x43, 0x93];     // #e84393 — unfavourable
 const SS_LINE = '#d6d9dc';
 const SS_REFRESH_MS = 5 * 60 * 1000;
-const SS_WEEKDAYS = [{ n: 1, label: 'Mon' }, { n: 2, label: 'Tue' }, { n: 3, label: 'Wed' },
-                     { n: 4, label: 'Thu' }, { n: 5, label: 'Fri' }];
+const SS_WEEKDAYS = [{ n: 1, label: 'Mon', full: 'Monday' }, { n: 2, label: 'Tue', full: 'Tuesday' },
+                     { n: 3, label: 'Wed', full: 'Wednesday' }, { n: 4, label: 'Thu', full: 'Thursday' },
+                     { n: 5, label: 'Fri', full: 'Friday' }];
 const SS_CHARTS = {};
+
+/* The weekly calendar: 30-minute rows over the regular session, in Eastern
+ * time. An entry time is placed in the row it falls in (10:15 -> the 10:00
+ * row); 16:00 belongs to the last row. The calendar is a SCHEDULE: where a
+ * card sits says when the strategy is usually considered, never whether it
+ * trades -- the state on the card is the same decision as its section's. */
+const SS_CAL_OPEN = 9 * 60 + 30;
+const SS_CAL_CLOSE = 16 * 60;
+const SS_CAL_STEP = 30;
+const SS_CAL_SLOTS = (SS_CAL_CLOSE - SS_CAL_OPEN) / SS_CAL_STEP;   // 13
+const SS_CLOCK_MS = 30 * 1000;
+const SS_TZ = 'America/New_York';
+const SS_PREF_LAYOUT = 'ss.layout';
+const SS_PREF_COLLAPSED = 'ss.collapsed';
+const SS_WD = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+
+function ssMinutes(hhmm) {
+  const [h, m] = String(hhmm || '').split(':').map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+}
+
+function ssHhmm(min) {
+  return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+}
+
+/* "10:00" -> 1 (the 10:00 row); 16:00 is the last row's end, so row 12. */
+function ssSlotOf(hhmm) {
+  const m = ssMinutes(hhmm);
+  if (m === null) return null;
+  return Math.max(0, Math.min(SS_CAL_SLOTS - 1, Math.floor((m - SS_CAL_OPEN) / SS_CAL_STEP)));
+}
+
+/* A moment as Eastern wall time -- by the zone's own rules, so the
+ * daylight-saving change is the browser's tz database, not arithmetic here. */
+const SS_ET_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: SS_TZ, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+function ssEt(d) {
+  const p = {};
+  for (const x of SS_ET_FMT.formatToParts(d)) p[x.type] = x.value;
+  const h = Number(p.hour) % 24;
+  return { iso: `${p.year}-${p.month}-${p.day}`, wd: SS_WD[p.weekday],
+           min: h * 60 + Number(p.minute) + Number(p.second) / 60 };
+}
+
+/* Strategy order, then time: the one order every list on the page uses. */
+function ssByPosition(a, b) {
+  return (a.strategy.position - b.strategy.position) || (a.strategy.id - b.strategy.id);
+}
+
+/* Where each strategy goes at the top of the page. A calendar strategy has
+ * one card per scheduled (day, time); a scheduled day with no time yet sits
+ * in the "no time" row for that day. A calendar strategy with no scheduled
+ * day at all would be on no row, so it is shown beside the calendar instead
+ * -- a strategy is never on neither. Card strategies are never on the
+ * calendar. */
+function ssPlace(entries) {
+  const slots = {}, untimed = {}, side = [];
+  const put = (map, key, item) => { (map[key] = map[key] || []).push(item); };
+  for (const e of [...entries].sort(ssByPosition)) {
+    const s = e.strategy;
+    if (s.display === 'card') { side.push({ e, unscheduled: false }); continue; }
+    const days = s.weekdays || [];
+    if (!days.length) { side.push({ e, unscheduled: true }); continue; }
+    const times = s.entry_times || [];
+    for (const d of days) {
+      const mine = times.filter(t => t.day === d);
+      if (!mine.length) put(untimed, d, { e, day: d, time: null });
+      for (const t of mine) put(slots, `${d}|${ssSlotOf(t.time)}`, { e, day: d, time: t.time });
+    }
+  }
+  for (const k of Object.keys(slots)) {
+    slots[k].sort((a, b) => (ssMinutes(a.time) - ssMinutes(b.time)) || ssByPosition(a.e, b.e));
+  }
+  return { slots, untimed, side };
+}
+
+function ssLoad(key, fallback) {
+  try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); }
+  catch (e) { return fallback; }
+}
+function ssStore(key, v) {
+  try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) { /* private window: per-visit only */ }
+}
 
 /* State i of n on the blue→pink scale. Two states are exactly the theme's
  * blue and pink; more are evenly spaced between them (through purple, never
@@ -93,6 +178,7 @@ const ssZonePlugin = {
 
 /* [1,2,3,4] -> "Mon–Thu"; [1,3,5] -> "Mon, Wed, Fri". */
 function ssDaysText(days) {
+  if (!days.length) return 'none';
   const d = [...days].sort((a, b) => a - b);
   const runs = [];
   for (const x of d) {
@@ -102,6 +188,10 @@ function ssDaysText(days) {
   const nm = i => SS_WEEKDAYS[i - 1].label;
   return runs.map(([a, b]) => (a === b ? nm(a) : b === a + 1 ? `${nm(a)}, ${nm(b)}` : `${nm(a)}–${nm(b)}`)).join(', ');
 }
+
+/* The staged image File, outside the Alpine proxy like SS_CHARTS: it is
+ * only ever handed to FormData, never rendered. */
+const SS_STAGED = { file: null };
 
 function ssUid() { return 'm' + Math.random().toString(36).slice(2, 8); }
 
@@ -119,10 +209,23 @@ document.addEventListener('alpine:init', () => {
     saveError: '',
     weekdays: SS_WEEKDAYS,
     cmps: ['<', '<=', '>', '>=', '='],
+    clock: new Date(),    // ticks every SS_CLOCK_MS; the calendar's time line reads it
+    // Per-screen preferences, local storage like the Wall's pane width: how
+    // this monitor lays the page out is not a fact about the strategies.
+    layout: ssLoad(SS_PREF_LAYOUT, 'full') === 'two' ? 'two' : 'full',
+    collapsed: ssLoad(SS_PREF_COLLAPSED, {}) || {},
 
     init() {
       this.loadBoard();
       setInterval(() => { if (!this.editing && !this.evalDate) this.loadBoard(); }, SS_REFRESH_MS);
+      setInterval(() => { this.clock = new Date(); this.placeNowLine(); }, SS_CLOCK_MS);
+      // Rows grow with their cards, so the line's height is measured, not
+      // computed -- again whenever the calendar changes size.
+      this.$nextTick(() => {
+        if (window.ResizeObserver && this.$refs.cal) {
+          new ResizeObserver(() => this.placeNowLine()).observe(this.$refs.cal);
+        }
+      });
     },
 
     // ── the board ────────────────────────────────────────────────────────
@@ -140,10 +243,120 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.loading = false;
       }
-      this.$nextTick(() => this.drawAll());
+      this.$nextTick(() => { this.drawAll(); this.placeNowLine(); });
     },
 
     entries() { return this.board ? this.board.strategies : []; },
+
+    // ── the weekly calendar and the standalone cards ─────────────────────
+    placement() { return ssPlace(this.entries()); },
+    sideItems() { return this.placement().side; },
+    sideEntries() { return this.sideItems().map(x => x.e); },
+    unscheduled(e) { return e.strategy.display !== 'card' && !(e.strategy.weekdays || []).length; },
+    calSlots() {
+      return Array.from({ length: SS_CAL_SLOTS }, (_, i) => ({ i, label: ssHhmm(SS_CAL_OPEN + i * SS_CAL_STEP) }));
+    },
+    calCell(day, slot) { return this.placement().slots[`${day}|${slot}`] || []; },
+    calUntimed(day) { return this.placement().untimed[day] || []; },
+    hasUntimed() { return Object.keys(this.placement().untimed).length > 0; },
+
+    /* The live moment in Eastern time, or null on a past date: a past
+     * evaluation is at that day's close, and a "now" line over it would
+     * describe a different day than everything else on the page. */
+    liveEt() { return this.board && this.board.live ? ssEt(this.clock) : null; },
+    isTodayCol(n) { const et = this.liveEt(); return !!et && et.wd === n; },
+    isEvalCol(n) { return !!this.board && !this.board.live && this.board.iso_weekday === n; },
+
+    /* Minutes past midnight ET for the time line, or null when it would
+     * mislead: not live, not a session (weekend, holiday), the board is for
+     * another day, or outside the session's own hours (an early close ends
+     * at 13:00). */
+    nowMinutes() {
+      const et = this.liveEt(), b = this.board;
+      if (!et || !b.is_session || !b.session || et.iso !== b.date) return null;
+      const open = ssMinutes(b.session.open), close = ssMinutes(b.session.close);
+      return et.min >= open && et.min <= close ? et.min : null;
+    },
+
+    calCorner() {
+      const b = this.board;
+      if (!b) return '';
+      if (!b.live) return 'past';
+      const et = this.liveEt();
+      return et ? ssHhmm(Math.floor(et.min)) : '';
+    },
+
+    calNote() {
+      const b = this.board;
+      if (!b) return '';
+      if (!b.live) return `Schedule only — the states are at the close of ${b.weekday} ${b.date}, not live`;
+      if (this.nowMinutes() !== null) return '';
+      const et = this.liveEt();
+      if (!b.is_session || (et && et.iso !== b.date)) return 'Market closed today';
+      const close = b.session ? b.session.close : '16:00';
+      return et && et.min < ssMinutes(b.session ? b.session.open : '09:30') ? 'Before the open' : `After the close (${close} ET)`;
+    },
+
+    placeNowLine() {
+      const line = this.$refs.nowLine, grid = this.$refs.calGrid;
+      if (!line || !grid) return;
+      const m = this.nowMinutes();
+      const slot = m === null ? null : Math.min(SS_CAL_SLOTS - 1, Math.floor((m - SS_CAL_OPEN) / SS_CAL_STEP));
+      const cell = slot === null ? null : grid.querySelector(`.ss-cal-time[data-slot="${slot}"]`);
+      const first = grid.querySelector('.ss-cal-day');
+      if (!cell || !first) { line.style.display = 'none'; return; }
+      const frac = (m - SS_CAL_OPEN - slot * SS_CAL_STEP) / SS_CAL_STEP;
+      line.style.display = 'block';
+      line.style.top = `${grid.offsetTop + cell.offsetTop + frac * cell.offsetHeight}px`;
+      line.style.left = `${grid.offsetLeft + first.offsetLeft}px`;
+      line.style.width = `${grid.offsetWidth - first.offsetLeft}px`;
+      line.title = `${ssHhmm(Math.floor(m))} ET`;
+    },
+
+    miniTitle(c) {
+      const s = c.e.strategy, d = SS_WEEKDAYS[c.day - 1].label;
+      const when = c.time ? `${d} ${c.time} ET` : `${d}, no time set`;
+      return `${s.name} — scheduled ${when} — ${this.stateLabel(c.e)}${c.e.stale ? ' (data not current)' : ''}`;
+    },
+
+    /* "Tue 10:00 · Fri 11:30", with untimed days by name: "Mon (no time)". */
+    scheduleText(s) {
+      const days = s.weekdays || [], times = s.entry_times || [];
+      if (!days.length) return 'no scheduled days';
+      const parts = [];
+      const untimed = days.filter(d => !times.some(t => t.day === d));
+      for (const d of days) {
+        for (const t of times.filter(x => x.day === d)) parts.push(`${SS_WEEKDAYS[d - 1].label} ${t.time}`);
+      }
+      if (untimed.length) parts.push(`${ssDaysText(untimed)} (no time)`);
+      return parts.join(' · ');
+    },
+
+    imageUrl(s, size) {
+      return s.image ? `/api/strategy-signal/strategies/${s.id}/image?size=${size}&v=${s.image.v}` : '';
+    },
+
+    // ── layout and collapsing ───────────────────────────────────────────
+    setLayout(v) {
+      this.layout = v;
+      ssStore(SS_PREF_LAYOUT, v);
+    },
+    isCollapsed(e) { return !!this.collapsed[e.strategy.id]; },
+    toggleCollapse(e) {
+      const c = { ...this.collapsed };
+      const opening = !!c[e.strategy.id];
+      if (opening) delete c[e.strategy.id]; else c[e.strategy.id] = true;
+      this.collapsed = c;
+      ssStore(SS_PREF_COLLAPSED, c);
+      // A chart drawn while its section was hidden measured nothing; it is
+      // given its size once the section is shown again, not left at zero.
+      if (opening) {
+        this.$nextTick(() => {
+          const pre = `ss-c-${e.strategy.id}-`;
+          for (const id of Object.keys(SS_CHARTS)) if (id.startsWith(pre)) SS_CHARTS[id].resize();
+        });
+      }
+    },
 
     boardSub() {
       if (!this.board) return this.loading ? 'loading…' : '';
@@ -151,10 +364,7 @@ document.addEventListener('alpine:init', () => {
       return `${this.board.weekday} ${this.board.now} ET · refreshes every 5 min`;
     },
 
-    todayIso() {
-      const d = new Date();
-      return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-    },
+    todayIso() { return ssEt(new Date()).iso; },     // the exchange's today, not the laptop's
 
     pickDate(v) {
       this.evalDate = v && v !== this.todayIso() ? v : '';
@@ -170,17 +380,14 @@ document.addEventListener('alpine:init', () => {
 
     markText(m) { return m === 'pass' ? 'pass' : m === 'fail' ? 'fail' : 'no value'; },
 
-    /* Every input to the decision as a row: the entry day first, then each
-     * signal condition with its current value and what it needs. A
-     * multi-level condition lists each level's threshold with its own
-     * pass/fail, because "which level did this reach" is the question. */
+    /* Every input to the decision as a row: each signal condition with its
+     * current value and what it needs. A multi-level condition lists each
+     * level's threshold with its own pass/fail, because "which level did
+     * this reach" is the question. The schedule is not an input and has no
+     * row; it is stated under the checklist. */
     whyRows(e) {
-      const b = this.board, s = e.strategy, d = e.decision, n = s.states.length;
-      const shut = !b.is_session && d.weekday <= 5 ? ' (market closed)' : '';
-      const rows = [{
-        name: 'Entry day', value: b.weekday_full + shut, mark: d.weekday_ok ? 'pass' : 'fail',
-        needs: [{ text: 'needs ' + ssDaysText(s.weekdays), mark: d.weekday_ok ? 'pass' : 'fail' }],
-      }];
+      const s = e.strategy, d = e.decision, n = s.states.length;
+      const rows = [];
       for (const c of d.conditions) {
         const m = s.metrics.find(x => x.id === c.metric) || { thresholds: [] };
         const needs = c.passes.map((p, i) => ({
@@ -193,25 +400,23 @@ document.addEventListener('alpine:init', () => {
       return rows;
     },
 
-    /* The verdict in words, naming what decided it. */
+    /* The verdict in words, naming what decided it, then the schedule --
+     * stated, never applied. */
     summaryLine(e) {
       const s = e.strategy, d = e.decision, logic = s.logic.toUpperCase();
-      const st = i => (i === null ? 'NO DATA' : s.states[i]);
-      const market = d.market_reason === 'no_conditions'
-        ? 'No signal conditions'
-        : d.market_state === null
-          ? `Conditions (${logic}) cannot be decided — a value is missing`
-          : `Conditions (${logic}) alone → ${st(d.market_state)}`;
-      if (d.reason === 'weekday') {
-        return `${market} · blocked: ${this.board.weekday_full} is not an entry day → ${st(d.state)}`;
-      }
-      return `${market} · entry day ok → ${st(d.state)}`;
+      const verdict = d.reason === 'no_conditions'
+        ? `No signal conditions → ${s.states[d.state]}`
+        : d.state === null
+          ? `Conditions (${logic}) cannot be decided — a value is missing → NO DATA`
+          : `Conditions (${logic}) → ${s.states[d.state]}`;
+      if (!(s.weekdays || []).length) return verdict;
+      const day = this.board.weekday;
+      return `${verdict} · ${day} is ${d.scheduled_today ? '' : 'not '}a scheduled day (the schedule does not change the signal)`;
     },
 
     /* The one phrase a card carries, and only when the state did not come
-     * from the market: a blocked day, or missing data. No values. */
+     * from the market: missing data. No values. */
     cardNote(e) {
-      if (e.decision.reason === 'weekday') return `not an entry day (${this.board.weekday})`;
       if (e.decision.reason === 'no_data') return 'a signal value is missing';
       return '';
     },
@@ -234,31 +439,23 @@ document.addEventListener('alpine:init', () => {
       return e.strategy.manual.length > 0 && i !== null && i < e.strategy.states.length - 1;
     },
 
-    dayTag(s) {
-      if (s.weekdays.length === 5) return '';
-      return s.weekdays.map(d => SS_WEEKDAYS[d - 1].label).join('/');
-    },
-
-    /* The card's one line of identification: the entry days if restricted,
-     * then the metrics that decide (or, with none, the ones charted). */
+    /* The card's one line of identification: the metrics that decide (or,
+     * with none, the ones charted). */
     idLine(e) {
       const s = e.strategy;
       const sig = s.metrics.filter(m => m.signal);
       const ms = (sig.length ? sig : s.metrics).map(m => this.metricInfo(e, m.id).label);
-      return [this.dayTag(s), ms.join(' · ')].filter(Boolean).join(' · ') || 'entry days only';
+      return ms.join(' · ') || 'no signal conditions';
     },
 
     reason(e) {
       const d = e.decision;
-      if (d.reason === 'weekday') {
-        return `Not an entry day — ${this.dayTag(e.strategy)} only`;
-      }
       if (d.reason === 'no_data') {
         const miss = d.conditions.filter(c => c.value === null)
           .map(c => this.metricInfo(e, c.metric).label);
         return `No current value for ${miss.join(', ')}`;
       }
-      if (d.reason === 'no_conditions') return 'No signal conditions — entry day only';
+      if (d.reason === 'no_conditions') return 'No signal conditions';
       return '';
     },
 
@@ -285,9 +482,14 @@ document.addEventListener('alpine:init', () => {
 
     canvasId(e, m) { return `ss-c-${e.strategy.id}-${m.id}`; },
 
+    /* From a calendar or side card to the strategy's section, opening it
+     * first if it was collapsed. */
     scrollTo(e) {
-      const el = document.getElementById('ss-sec-' + e.strategy.id);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (this.isCollapsed(e)) this.toggleCollapse(e);
+      this.$nextTick(() => {
+        const el = document.getElementById('ss-sec-' + e.strategy.id);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     },
 
     async move(e, dir) {
@@ -454,10 +656,9 @@ document.addEventListener('alpine:init', () => {
 
     logicHint() {
       if (!this.draft) return '';
-      const days = this.draft.weekdays.length === 5 ? 'an entry day' : 'one of the ticked days';
       return this.draft.logic === 'and'
-        ? `Trade needs ${days} AND every signal condition passing.`
-        : `Trade needs ${days} AND at least one signal condition passing.`;
+        ? 'A state needs every signal condition passing. The schedule never enters it.'
+        : 'A state needs at least one signal condition passing. The schedule never enters it.';
     },
 
     lookbacksFor(m) {
@@ -476,8 +677,19 @@ document.addEventListener('alpine:init', () => {
                thresholds: Array(this.draft.states.length - 1).fill('') };
     },
 
+    /* The editor holds times per day ({1: ['10:00'], ...}); the store holds
+     * [{day, time}]. A day's times are kept only while the day is ticked. */
+    timesByDay(list) {
+      const t = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+      for (const x of list || []) if (t[x.day]) t[x.day].push(x.time);
+      return t;
+    },
+
     newStrategy() {
-      this.draft = { id: null, name: '', notes: '', weekdays: [1, 2, 3, 4, 5],
+      // No days and no times: a schedule is something the user states, so
+      // nothing is pre-ticked.
+      this.draft = { id: null, name: '', notes: '', weekdays: [], times: this.timesByDay([]),
+                     display: 'calendar', image: null, imageAction: null, imagePreview: '',
                      states: ['TRADE', 'NO TRADE'], logic: 'and', metrics: [], manual: [] };
       this.draft.metrics.push(this.blankMetric());
       this.openPanel();
@@ -489,8 +701,50 @@ document.addEventListener('alpine:init', () => {
         m.op = m.op || ''; m.b = m.b || ''; m.transform = m.transform || ''; m.cmp = m.cmp || '<';
         if (!m.signal) m.thresholds = Array(s.states.length - 1).fill('');
       });
+      s.weekdays = s.weekdays || [];
+      s.times = this.timesByDay(s.entry_times);
+      s.display = s.display || 'calendar';
+      s.imageAction = null;     // null | 'set' | 'remove' -- applied by Save, after the config
+      s.imagePreview = '';
       this.draft = s;
       this.openPanel();
+    },
+
+    addTime(n) {
+      this.draft.times[n].push('10:00');
+      if (!this.draft.weekdays.includes(n)) this.draft.weekdays = [...this.draft.weekdays, n].sort();
+    },
+    removeTime(n, i) { this.draft.times[n].splice(i, 1); },
+
+    // ── the risk graph, staged until Save ───────────────────────────────
+    pickImage(ev) {
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!f) return;
+      if (this.draft.imagePreview) URL.revokeObjectURL(this.draft.imagePreview);
+      SS_STAGED.file = f;
+      this.draft.imageAction = 'set';
+      this.draft.imagePreview = URL.createObjectURL(f);
+      this.draft.imageName = f.name;
+    },
+    dropImage() {
+      if (this.draft.imagePreview) URL.revokeObjectURL(this.draft.imagePreview);
+      SS_STAGED.file = null;
+      this.draft.imagePreview = '';
+      this.draft.imageAction = this.draft.image ? 'remove' : null;
+    },
+    draftImageSrc() {
+      const d = this.draft;
+      if (d.imageAction === 'set') return d.imagePreview;
+      if (d.imageAction === 'remove' || !d.image) return '';
+      return this.imageUrl(d, 'thumb');
+    },
+    imageHint() {
+      const d = this.draft;
+      if (d.imageAction === 'set') return `${d.imageName || 'new image'} — uploaded when you Save`;
+      if (d.imageAction === 'remove') return 'removed when you Save';
+      if (d.image) return `${d.image.w} × ${d.image.h} px`;
+      return 'PNG, JPEG, WebP or GIF, up to 8 MB — scaled to fit, never stretched';
     },
 
     openPanel() {
@@ -500,10 +754,15 @@ document.addEventListener('alpine:init', () => {
       this.$nextTick(() => { if (this.$refs.cfg) this.$refs.cfg.scrollIntoView({ behavior: 'smooth' }); });
     },
 
-    cancelEdit() { this.editing = false; this.saveError = ''; this.$nextTick(() => this.drawAll()); },
+    cancelEdit() {
+      if (this.draft && this.draft.imagePreview) URL.revokeObjectURL(this.draft.imagePreview);
+      SS_STAGED.file = null;
+      this.editing = false; this.saveError = ''; this.$nextTick(() => this.drawAll());
+    },
 
     toggleDay(n) {
       const w = this.draft.weekdays;
+      if (w.includes(n)) this.draft.times[n] = [];
       this.draft.weekdays = w.includes(n) ? w.filter(d => d !== n) : [...w, n].sort();
     },
 
@@ -541,8 +800,13 @@ document.addEventListener('alpine:init', () => {
 
     payload() {
       const d = this.draft;
+      const entry_times = [];
+      for (const n of d.weekdays) {
+        for (const t of d.times[n] || []) if (String(t).trim()) entry_times.push({ day: n, time: String(t).trim() });
+      }
       return {
-        name: d.name, notes: d.notes, weekdays: d.weekdays, states: d.states, logic: d.logic,
+        name: d.name, notes: d.notes, weekdays: d.weekdays, entry_times, display: d.display,
+        states: d.states, logic: d.logic,
         manual: d.manual,
         metrics: d.metrics.map(m => ({
           id: m.id, label: m.label, a: (m.a || '').trim(), op: m.op || null,
@@ -566,13 +830,38 @@ document.addEventListener('alpine:init', () => {
           const body = await r.json().catch(() => ({}));
           throw new Error(body.detail || `HTTP ${r.status}`);
         }
+        const saved = ((await r.json().catch(() => ({}))).strategy) || {};
+        // From here the strategy exists: a failed image step leaves the
+        // panel open on it (an edit, not a second create) with the image
+        // still staged, so Save again retries only what did not land.
+        if (saved.id) this.draft.id = saved.id;
+        await this.saveImage(this.draft.id);
         this.editing = false;
+        SS_STAGED.file = null;
         await this.loadBoard();
       } catch (e) {
         this.saveError = String(e.message || e);
       } finally {
         this.saving = false;
       }
+    },
+
+    async saveImage(id) {
+      const act = this.draft.imageAction;
+      if (!act || !id) return;
+      let r;
+      if (act === 'set') {
+        const fd = new FormData();
+        fd.append('file', SS_STAGED.file);
+        r = await fetch(`/api/strategy-signal/strategies/${id}/image`, { method: 'PUT', body: fd });
+      } else {
+        r = await fetch(`/api/strategy-signal/strategies/${id}/image`, { method: 'DELETE' });
+      }
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(`The strategy was saved, but the image was not: ${body.detail || 'HTTP ' + r.status}`);
+      }
+      this.draft.imageAction = null;
     },
 
     async remove() {

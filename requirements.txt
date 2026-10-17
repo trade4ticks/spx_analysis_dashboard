@@ -27,6 +27,10 @@ anthropic>=0.40.0
 numpy>=1.26.0
 scipy>=1.13.0
 matplotlib>=3.9.0
+# Strategy Signal's risk-graph upload: checks the image and makes its
+# thumbnail. matplotlib already depends on it; listed because the app now
+# imports it directly (lazily -- without it only the upload is refused).
+Pillow>=10.0
 reportlab>=4.2.0
 pyyaml>=6.0.2
 

@@ -9,6 +9,13 @@ GET  /board[?as_of=DATE]    every strategy, its decision and its charts --
                             observations, charts ending there.
 POST /strategies            create; PUT /strategies/{id} replace;
 DELETE /strategies/{id};    POST /strategies/{id}/move {"direction": -1|1}
+PUT    /strategies/{id}/image          multipart `file`: set or replace the risk graph
+GET    /strategies/{id}/image?size=thumb|full
+DELETE /strategies/{id}/image
+
+THE SCHEDULE IS NOT THE SIGNAL. The weekday is passed to the decision only
+so it can say whether today is a scheduled day; the state comes from the
+conditions alone, live and on a past date (evaluate.py).
 
 The board fetches each source ONCE for the deepest lookback any strategy
 asks of it (library.Board), so ten strategies reading VIX cost one query.
@@ -23,11 +30,11 @@ from datetime import date
 
 import pandas as pd
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
 
 from app.db import get_pool
 from app.oo_backtest import market_calendar as cal
-from app.strategy_signal import evaluate as ev, library as lib, store
+from app.strategy_signal import evaluate as ev, images, library as lib, store
 
 log = logging.getLogger(__name__)
 
@@ -108,9 +115,14 @@ async def board(as_of: str | None = None, pool=Depends(get_pool)):
         used = {m["id"] for m in s["metrics"] if m.get("signal")}
         out.append({"strategy": s, "decision": decision, "metrics": metrics, "charts": charts,
                     "stale": any(x["stale"] for x in metrics if x["id"] in used)})
+    day = cal.day_table(now.date(), now.date()).get(now.date().isoformat())
     return {"now": now.strftime("%Y-%m-%d %H:%M"), "date": now.date().isoformat(), "live": live,
             "weekday": ev.WEEKDAY_NAMES[now.isoweekday()], "weekday_full": WEEKDAY_FULL[now.isoweekday()],
+            "iso_weekday": now.isoweekday(),
             "weekday_names": WEEKDAY_FULL, "is_session": cal.is_session(now.date()),
+            # the evaluated day's own hours, so the calendar's time line
+            # stops at a 13:00 early close rather than at 16:00
+            "session": {"open": day["open"], "close": day["close"], "early": day["early"]} if day else None,
             "expected_session": expected, "strategies": out}
 
 
@@ -154,4 +166,39 @@ async def move(sid: int, body: dict = Body(...), pool=Depends(get_pool)):
 async def delete(sid: int, pool=Depends(get_pool)):
     if not await store.delete(pool, sid):
         raise HTTPException(404, f"No strategy with id {sid}.")
+    return {"deleted": sid}
+
+
+# ── the risk graph ──────────────────────────────────────────────────────────
+
+@router.put("/strategies/{sid}/image")
+async def put_image(sid: int, file: UploadFile = File(...), pool=Depends(get_pool)):
+    data = await file.read(images.MAX_BYTES + 1)
+    try:
+        img = images.prepare(data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    meta = await store.set_image(pool, sid, img)
+    if meta is None:
+        raise HTTPException(404, f"No strategy with id {sid}.")
+    return {"image": meta}
+
+
+@router.get("/strategies/{sid}/image")
+async def get_image(sid: int, size: str = "thumb", pool=Depends(get_pool)):
+    if size not in ("thumb", "full"):
+        raise HTTPException(400, "size is thumb or full.")
+    got = await store.get_image(pool, sid, size)
+    if got is None:
+        raise HTTPException(404, f"Strategy {sid} has no image.")
+    # The page asks with ?v=<upload time>, so a replaced image is a new URL
+    # and an unchanged one can be cached for as long as the browser likes.
+    return Response(got[1], media_type=got[0], headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
+@router.delete("/strategies/{sid}/image")
+async def delete_image(sid: int, pool=Depends(get_pool)):
+    await store.delete_image(pool, sid)
     return {"deleted": sid}

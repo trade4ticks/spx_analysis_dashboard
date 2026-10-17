@@ -11,7 +11,22 @@ so a strategy can only name a metric that exists; one that later disappears
 from the table is reported by the board as an error on that metric, not
 dropped from the saved config.
 
-The table is created lazily and idempotently, like the other stores.
+THE SCHEDULE (2026-10-16). `weekdays` -- once "eligible entry days", a
+condition -- is now the SCHEDULED entry days, information only; the stored
+key is unchanged so every saved strategy keeps its days with no migration.
+`entry_times` adds optional times, [{day, time}], several per day allowed;
+a scheduled day with no time is still scheduled ("time not set"). `display`
+puts the strategy on the weekly calendar or on a standalone card. Rows saved
+before these existed read back with the defaults in `_row` (the calendar, no
+times) -- nothing is rewritten, nothing is invented.
+
+THE RISK GRAPH is an uploaded image in its own table, keyed by strategy and
+dropped with it, as BYTEA -- the convention of oo_backtest_strategies'
+uploaded file. Never in the JSONB: the config is read on every board call,
+the image only when a page shows it. A thumbnail is made once at upload
+(images.prepare) so the calendar never pulls the full file.
+
+The tables are created lazily and idempotently, like the other stores.
 """
 from __future__ import annotations
 
@@ -30,6 +45,12 @@ MAX_STATES = 6
 MAX_METRICS = 8
 MAX_MANUAL = 8
 MAX_STRATEGIES = 30
+MAX_ENTRY_TIMES = 20
+DISPLAYS = ("calendar", "card")
+DEFAULT_DISPLAY = "calendar"
+# Entry times the calendar can place: the regular session, 09:30-16:00 ET.
+FIRST_TIME, LAST_TIME = "09:30", "16:00"
+IMAGES = "strategy_signal_images"
 
 CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -39,6 +60,21 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     config      JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+"""
+
+CREATE_IMAGES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {IMAGES} (
+    strategy_id   INTEGER PRIMARY KEY REFERENCES {TABLE}(id) ON DELETE CASCADE,
+    content_type  TEXT NOT NULL,
+    image         BYTEA NOT NULL,
+    thumb         BYTEA NOT NULL,
+    thumb_type    TEXT NOT NULL,
+    width         INTEGER NOT NULL,
+    height        INTEGER NOT NULL,
+    thumb_width   INTEGER NOT NULL,
+    thumb_height  INTEGER NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 """
 
@@ -60,6 +96,35 @@ def _number(v, *, name) -> float:
     if not math.isfinite(f):
         raise ValueError(f"{name} must be a finite number.")
     return f
+
+
+def clean_time(v, *, where: str) -> str:
+    """'9:5' / '09:05' -> '09:05'; inside the session or refused."""
+    parts = str(v or "").strip().split(":")
+    if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+        raise ValueError(f"{where}: {v!r} is not a time (HH:MM).")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"{where}: {v!r} is not a time (HH:MM).")
+    t = f"{h:02d}:{m:02d}"
+    if not FIRST_TIME <= t <= LAST_TIME:
+        raise ValueError(f"{where}: {t} is outside the session ({FIRST_TIME}-{LAST_TIME} ET).")
+    return t
+
+
+def clean_entry_times(raw) -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("Entry times must be a list.")
+    out = set()
+    for i, e in enumerate(raw):
+        if not isinstance(e, dict) or e.get("day") not in ev.WEEKDAYS:
+            raise ValueError(f"Entry time {i + 1}: needs a weekday 1 (Mon) .. 5 (Fri).")
+        out.add((e["day"], clean_time(e.get("time"), where=f"Entry time {i + 1}")))
+    if len(out) > MAX_ENTRY_TIMES:
+        raise ValueError(f"At most {MAX_ENTRY_TIMES} scheduled entry times.")
+    return [{"day": d, "time": t} for d, t in sorted(out)]
 
 
 def clean_metric(raw, *, n_states: int, sources: set[str], seen: set[str], idx: int) -> dict:
@@ -131,12 +196,17 @@ def clean_config(raw, sources: set[str]) -> dict:
     if len({s.lower() for s in states}) != len(states):
         raise ValueError("Output states must be different from each other.")
 
-    days = raw.get("weekdays")
+    # Scheduled days are information, so none at all is allowed (a strategy
+    # watched for weeks at a time has no day). A day with an entry time is
+    # scheduled whether or not it was ticked.
+    days = raw.get("weekdays") or []
     if not isinstance(days, list) or any(d not in ev.WEEKDAYS for d in days):
-        raise ValueError("Entry days must be a list of weekdays 1 (Mon) .. 5 (Fri).")
-    days = sorted(set(days))
-    if not days:
-        raise ValueError("Tick at least one entry day.")
+        raise ValueError("Scheduled entry days must be a list of weekdays 1 (Mon) .. 5 (Fri).")
+    entry_times = clean_entry_times(raw.get("entry_times"))
+    days = sorted(set(days) | {e["day"] for e in entry_times})
+    display = raw.get("display") or DEFAULT_DISPLAY
+    if display not in DISPLAYS:
+        raise ValueError("Summary display is the weekly calendar or a standalone card.")
 
     logic = raw.get("logic", "and")
     if logic not in ev.LOGICS:
@@ -157,25 +227,49 @@ def clean_config(raw, sources: set[str]) -> dict:
     if len(manual) > MAX_MANUAL:
         raise ValueError(f"At most {MAX_MANUAL} manual requirements.")
 
-    return {"name": name, "notes": notes, "weekdays": days, "states": states,
+    return {"name": name, "notes": notes, "weekdays": days, "entry_times": entry_times,
+            "display": display, "states": states,
             "logic": logic, "metrics": metrics, "manual": manual}
 
 
 async def ensure_table(conn) -> None:
     await conn.execute(CREATE_SQL)
+    await conn.execute(CREATE_IMAGES_SQL)
+
+
+def _image_meta(r) -> dict | None:
+    if r is None or "image_at" not in r.keys() or r["image_at"] is None:
+        return None
+    return {"v": int(r["image_at"].timestamp() * 1000), "w": r["image_w"], "h": r["image_h"],
+            "tw": r["image_tw"], "th": r["image_th"]}
+
+
+def with_defaults(cfg: dict) -> dict:
+    """A saved config with every field the page reads. Defaults for rows
+    saved before a field existed -- read time only; the stored config is
+    never rewritten to add them."""
+    return {"weekdays": [], "entry_times": [], "display": DEFAULT_DISPLAY, **cfg}
 
 
 def _row(r) -> dict:
     cfg = r["config"]
     cfg = json.loads(cfg) if isinstance(cfg, str) else cfg
-    return {"id": r["id"], "position": r["position"], **cfg, "name": r["name"],
+    return {"id": r["id"], "position": r["position"], **with_defaults(cfg), "name": r["name"],
+            "image": _image_meta(r),
             "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None}
+
+
+LIST_SQL = f"""
+SELECT s.*, i.updated_at AS image_at, i.width AS image_w, i.height AS image_h,
+       i.thumb_width AS image_tw, i.thumb_height AS image_th
+FROM {TABLE} s LEFT JOIN {IMAGES} i ON i.strategy_id = s.id
+ORDER BY s.position, s.id"""
 
 
 async def list_strategies(pool) -> list[dict]:
     async with pool.acquire() as conn:
         await ensure_table(conn)
-        rows = await conn.fetch(f"SELECT * FROM {TABLE} ORDER BY position, id")
+        rows = await conn.fetch(LIST_SQL)
     return [_row(r) for r in rows]
 
 
@@ -227,4 +321,46 @@ async def delete(pool, sid: int) -> bool:
     async with pool.acquire() as conn:
         await ensure_table(conn)
         out = await conn.execute(f"DELETE FROM {TABLE} WHERE id = $1", sid)
+    return out.endswith("1")
+
+
+# ── the risk graph ──────────────────────────────────────────────────────────
+
+async def set_image(pool, sid: int, img: dict) -> dict | None:
+    """Store or replace a strategy's image (images.prepare's output). None
+    when there is no such strategy."""
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        if not await conn.fetchval(f"SELECT 1 FROM {TABLE} WHERE id = $1", sid):
+            return None
+        r = await conn.fetchrow(
+            f"""INSERT INTO {IMAGES} (strategy_id, content_type, image, thumb, thumb_type,
+                                      width, height, thumb_width, thumb_height, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())
+                ON CONFLICT (strategy_id) DO UPDATE SET
+                  content_type = EXCLUDED.content_type, image = EXCLUDED.image,
+                  thumb = EXCLUDED.thumb, thumb_type = EXCLUDED.thumb_type,
+                  width = EXCLUDED.width, height = EXCLUDED.height,
+                  thumb_width = EXCLUDED.thumb_width, thumb_height = EXCLUDED.thumb_height,
+                  updated_at = clock_timestamp()
+                RETURNING updated_at AS image_at, width AS image_w, height AS image_h,
+                          thumb_width AS image_tw, thumb_height AS image_th""",
+            sid, img["content_type"], img["data"], img["thumb"], img["thumb_type"],
+            img["width"], img["height"], img["thumb_width"], img["thumb_height"])
+    return _image_meta(r)
+
+
+async def get_image(pool, sid: int, size: str) -> tuple[str, bytes] | None:
+    """(content type, bytes) of the thumbnail or the uploaded file."""
+    col, typ = ("thumb", "thumb_type") if size == "thumb" else ("image", "content_type")
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        r = await conn.fetchrow(f"SELECT {typ} AS t, {col} AS b FROM {IMAGES} WHERE strategy_id = $1", sid)
+    return (r["t"], bytes(r["b"])) if r else None
+
+
+async def delete_image(pool, sid: int) -> bool:
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        out = await conn.execute(f"DELETE FROM {IMAGES} WHERE strategy_id = $1", sid)
     return out.endswith("1")
