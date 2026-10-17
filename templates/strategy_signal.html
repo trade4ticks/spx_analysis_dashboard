@@ -180,12 +180,49 @@
     .ss-days { display:grid; gap:4px; }
     .ss-dayrow { display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-height:24px; }
     .ss-dayrow .ss-chk { width:52px; }
-    input[type=time].ss-in { width:92px; }
+    input[type=time].ss-in { width:112px; }
     .ss-imgprev { width:160px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:4px;
                   background:#1f1f1f; display:block; }
     .ss-imgnone { width:160px; height:90px; border:1px dashed var(--border); border-radius:4px; color:var(--dim);
                   font-size:11px; display:flex; align-items:center; justify-content:center; }
     .ss-file { display:none; }
+
+    /* ── trade definition: popover, section panel, editor ──
+       Information only; nothing here reaches the signal. */
+    .ss-tip { position:fixed; z-index:50; width:340px; max-width:calc(100vw - 16px); max-height:calc(100vh - 16px);
+              overflow-y:auto; background:var(--raised); border:1px solid var(--border); border-radius:7px;
+              box-shadow:0 6px 24px rgba(0,0,0,0.5); padding:9px 11px 10px; font-size:11.5px; line-height:1.45; }
+    .ss-tip-name { font-size:12.5px; font-weight:800; margin-bottom:5px; }
+    .ss-td { display:grid; grid-template-columns:max-content minmax(0, 1fr); gap:3px 10px; }
+    .ss-td-k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.4px; padding-top:1px;
+               white-space:nowrap; }
+    .ss-td-v { color:var(--text); overflow-wrap:anywhere; }
+    .ss-td-t { white-space:pre-wrap; }      /* the user's own line breaks, not the template's */
+    .ss-td-v ol { margin:0; padding-left:16px; }
+    .ss-td-v li { font-variant-numeric:tabular-nums; }
+    /* The ⓘ that opens a definition where there is no hover. */
+    .ss-tdi { flex:none; cursor:pointer; color:var(--accent); font-size:11px; line-height:1; padding:1px 3px;
+              border-radius:3px; }
+    .ss-tdi:hover { background:rgba(52, 152, 219, 0.15); }
+    @media (hover: hover) { .ss-tdi { display:none; } }
+    .ss-mini-top { display:flex; align-items:flex-start; gap:2px; min-width:0; }
+    .ss-mini-top .ss-mini-name { flex:1; min-width:0; }
+    .ss-tdbox { border:1px solid var(--border); border-radius:6px; margin-bottom:12px; background:#262626; }
+    .ss-tdbox-hdr { display:flex; align-items:center; gap:8px; width:100%; background:none; border:0; color:var(--muted);
+                    font:inherit; font-size:11px; font-weight:700; padding:5px 10px; cursor:pointer; text-align:left; }
+    .ss-tdbox-hdr:hover { color:var(--text); }
+    .ss-tdbox-sum { font-weight:400; color:var(--dim); }
+    .ss-tdbox .ss-td { padding:4px 12px 9px; font-size:12px; }
+    .ss-tdcfg { margin-top:14px; border:1px solid var(--border); border-radius:6px; }
+    .ss-tdcfg > .ss-tdbox-hdr { font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:var(--dim); }
+    .ss-tdcfg-body { padding:4px 10px 10px; display:flex; flex-direction:column; gap:12px; }
+    .ss-leg { display:flex; align-items:center; gap:5px; flex-wrap:wrap; padding:4px 6px; border:1px solid var(--border);
+              border-radius:5px; background:#262626; }
+    .ss-leg.bad { border-color:#e84393; }
+    .ss-leg-n { font-size:10px; font-weight:800; color:var(--dim); width:38px; }
+    .ss-leg .ss-in.num { width:56px; }
+    .ss-legerr { font-size:10.5px; color:#e84393; }
+    textarea.ss-in.short { min-height:44px; }
   </style>
 </head>
 <body class="page" x-data="strategySignal">
@@ -199,7 +236,7 @@
     </div>
   </div>
 
-  <div class="ss-main">
+  <div class="ss-main" @scroll="tipScrolled()" @keydown.escape.window="closeTip()">
 
     <div class="ss-bar">
       <span class="ss-title">Strategy Signal</span>
@@ -411,6 +448,116 @@
                     placeholder="Why this signal, research findings, caveats, why these thresholds…"></textarea>
         </div>
 
+        <!-- Trade definition: how the trade is built, entered and managed.
+             Information only -- none of it reaches the signal. -->
+        <div class="ss-tdcfg">
+          <button class="ss-tdbox-hdr" @click="draft.tradeOpen = !draft.tradeOpen" :aria-expanded="draft.tradeOpen">
+            <span x-text="draft.tradeOpen ? '▾' : '▸'"></span> Trade Definition
+            <span class="ss-tdbox-sum" x-text="draftTradeSummary()"></span>
+          </button>
+          <div class="ss-tdcfg-body" x-show="draft.tradeOpen">
+            <span class="ss-hint">For reference only — never part of the TRADE / NO TRADE signal.</span>
+
+            <div class="ss-f">
+              <span class="ss-lbl">A · Entry instructions / exceptions</span>
+              <span class="ss-hint" x-text="'Schedule (from the entry days and times above): ' + (draftEntryText() || 'none set')"></span>
+              <textarea class="ss-in short" x-model="draft.trade.entry_notes" maxlength="2000"
+                        placeholder="e.g. No Monday entry — the 6-DTE expiration is not listed. Enter around 15:00 ET."></textarea>
+            </div>
+
+            <div class="ss-f">
+              <span class="ss-lbl">B · Option legs</span>
+              <template x-for="(leg, li) in draft.trade.legs" :key="leg.id">
+                <div>
+                  <div class="ss-leg" :class="brokenRef(leg) && 'bad'">
+                    <span class="ss-leg-n" x-text="'Leg ' + (li + 1)"></span>
+                    <select class="ss-sel" x-model="leg.side" title="Buy or sell">
+                      <option value="sell" :selected="leg.side === 'sell'">Sell</option>
+                      <option value="buy" :selected="leg.side === 'buy'">Buy</option>
+                    </select>
+                    <input class="ss-in num" inputmode="numeric" x-model="leg.qty" title="Quantity" placeholder="qty">
+                    <select class="ss-sel" x-model="leg.right" title="Call or put">
+                      <option value="call" :selected="leg.right === 'call'">Call</option>
+                      <option value="put" :selected="leg.right === 'put'">Put</option>
+                    </select>
+                    <input class="ss-in num" inputmode="numeric" x-model="leg.dte" title="Target DTE" placeholder="DTE">
+                    <span class="ss-hint">DTE</span>
+                    <select class="ss-sel" x-model="leg.method" title="Strike selection">
+                      <option value="delta" :selected="leg.method === 'delta'">Delta</option>
+                      <option value="atm" :selected="leg.method === 'atm'">ATM</option>
+                      <option value="offset" :selected="leg.method === 'offset'">Spot offset</option>
+                      <option value="same" :selected="leg.method === 'same'">Same strike as</option>
+                    </select>
+                    <template x-if="leg.method === 'delta'">
+                      <input class="ss-in num" inputmode="decimal" x-model="leg.value" title="Delta magnitude: 30 = 30 delta"
+                             placeholder="30">
+                    </template>
+                    <template x-if="leg.method === 'offset'">
+                      <input class="ss-in num" inputmode="decimal" x-model="leg.value"
+                             title="Points from SPX: negative below, positive above" placeholder="-50">
+                    </template>
+                    <template x-if="leg.method === 'same'">
+                      <select class="ss-sel" x-model="leg.ref" title="The leg whose strike this one shares">
+                        <option value="">— choose a leg —</option>
+                        <template x-for="o in refOptions(leg)" :key="o.id">
+                          <option :value="o.id" x-text="o.text" :selected="o.id === leg.ref"></option>
+                        </template>
+                      </select>
+                    </template>
+                    <input class="ss-in" style="width:170px" maxlength="160" x-model="leg.note" placeholder="note (optional)">
+                    <span class="ss-grow"></span>
+                    <button class="ss-x" title="Move up" @click="moveLeg(li, -1)" :disabled="li === 0">▲</button>
+                    <button class="ss-x" title="Move down" @click="moveLeg(li, 1)" :disabled="li === draft.trade.legs.length - 1">▼</button>
+                    <button class="ss-x" title="Remove leg" @click="removeLeg(li)">✕</button>
+                  </div>
+                  <template x-if="brokenRef(leg)">
+                    <div class="ss-legerr">This leg's strike points at a leg that no longer exists (or none is chosen) — choose a leg.</div>
+                  </template>
+                </div>
+              </template>
+              <div class="ss-row">
+                <button class="ss-btn sm" @click="addLeg()" :disabled="draft.trade.legs.length >= 8">+ Leg</button>
+                <span class="ss-hint">Delta is the magnitude (30 = 30Δ); call or put sets the side. Each leg keeps its own DTE.</span>
+              </div>
+            </div>
+
+            <div class="ss-grid2">
+              <template x-for="lv in [{ k: 'target', t: 'C · Profit target' }, { k: 'stop', t: 'C · Stop loss' }]" :key="lv.k">
+                <div class="ss-f">
+                  <span class="ss-lbl" x-text="lv.t"></span>
+                  <div class="ss-row">
+                    <input class="ss-in num" inputmode="decimal" x-model="draft.trade[lv.k].value" placeholder="value">
+                    <select class="ss-sel" x-model="draft.trade[lv.k].unit">
+                      <option value="pct" :selected="draft.trade[lv.k].unit === 'pct'">%</option>
+                      <option value="usd" :selected="draft.trade[lv.k].unit === 'usd'">$</option>
+                      <option value="pts" :selected="draft.trade[lv.k].unit === 'pts'">points</option>
+                    </select>
+                    <input class="ss-in" style="flex:1; min-width:140px" maxlength="200" x-model="draft.trade[lv.k].basis"
+                           placeholder="basis, in words (e.g. of the debit paid)">
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <div class="ss-f">
+              <span class="ss-lbl">D · Exit rules and other instructions</span>
+              <div class="ss-row">
+                <span class="ss-hint">Max DIT</span>
+                <input class="ss-in num" inputmode="numeric" x-model="draft.trade.exit.max_dit" placeholder="—">
+                <span class="ss-hint">Exit DTE</span>
+                <input class="ss-in num" inputmode="numeric" x-model="draft.trade.exit.exit_dte" placeholder="—">
+                <span class="ss-hint">Exit time (ET)</span>
+                <input class="ss-in" type="time" step="300" x-model="draft.trade.exit.exit_time" title="Eastern time">
+              </div>
+              <textarea class="ss-in short" x-model="draft.trade.exit.rules" maxlength="2000"
+                        placeholder="e.g. 10:00 ET the next trading morning, when the shorts are 0 DTE"></textarea>
+              <span class="ss-lbl" style="margin-top:6px">Trade management notes</span>
+              <textarea class="ss-in short" x-model="draft.trade.management" maxlength="4000"
+                        placeholder="Adjustments, rolls, anything else worth remembering"></textarea>
+            </div>
+          </div>
+        </div>
+
         <template x-if="saveError"><div class="ss-err" x-text="saveError"></div></template>
         <div class="ss-row" style="margin-top:12px">
           <button class="ss-btn pri" @click="save()" :disabled="saving">Save</button>
@@ -476,12 +623,19 @@
 
       <div class="ss-side" x-show="sideItems().length">
       <template x-for="e in sideEntries()" :key="e.strategy.id">
-        <div class="ss-card" @click="scrollTo(e)" :title="'Go to ' + e.strategy.name">
+        <div class="ss-card" @click="scrollTo(e)" :title="hasTrade(e) ? '' : 'Go to ' + e.strategy.name"
+             @mouseenter="tipEnter(e, $event)" @mouseleave="tipLeave()">
           <template x-if="e.strategy.image">
             <img :src="imageUrl(e.strategy, 'thumb')" loading="lazy" alt="">
           </template>
           <div>
-            <div class="ss-cname" x-text="e.strategy.name"></div>
+            <div class="ss-mini-top">
+              <div class="ss-cname" style="flex:1; min-width:0" x-text="e.strategy.name"></div>
+              <template x-if="hasTrade(e)">
+                <span class="ss-tdi" role="button" tabindex="0" title="Trade definition"
+                      @click="tipToggle(e, $event)" @keydown.enter.prevent="tipToggle(e, $event)">ⓘ</span>
+              </template>
+            </div>
             <div class="ss-cid" x-text="idLine(e)"></div>
             <template x-if="unscheduled(e)">
               <div class="ss-unsched">calendar strategy with no scheduled day — shown here until it has one</div>
@@ -559,6 +713,19 @@
               </template>
             </div>
           </template>
+          <template x-if="hasTrade(e)">
+            <div class="ss-tdbox">
+              <button class="ss-tdbox-hdr" @click="toggleTd(e)" :aria-expanded="isTdOpen(e)">
+                <span x-text="isTdOpen(e) ? '▾' : '▸'"></span> Trade Definition
+                <span class="ss-tdbox-sum" x-show="!isTdOpen(e)" x-text="tradeSummary(e.strategy)"></span>
+              </button>
+              <div class="ss-td" x-show="isTdOpen(e)">
+                <template x-for="row in tradeRows(e)" :key="row.k">
+                  {% include "_strategy_signal_trade_row.html" %}
+                </template>
+              </div>
+            </div>
+          </template>
           <div class="ss-charts">
             <template x-for="m in chartMetrics(e)" :key="m.id">
               <div class="ss-chart">
@@ -582,6 +749,19 @@
         </div>
       </section>
     </template>
+    </div>
+
+    <!-- The trade-definition popover: one for the page, filled from the
+         strategy it was opened for. The pointer may move into it to read;
+         it never navigates. -->
+    <div class="ss-tip" x-ref="tip" :style="tipStyle()" @mouseenter="tipHold()" @mouseleave="tipLeave()"
+         @click.outside="closeTip()" role="dialog" aria-label="Trade definition">
+      <div class="ss-tip-name" x-text="tipEntry() ? tipEntry().strategy.name : ''"></div>
+      <div class="ss-td">
+        <template x-for="row in tradeRows(tipEntry())" :key="row.k">
+          {% include "_strategy_signal_trade_row.html" %}
+        </template>
+      </div>
     </div>
   </div>
 

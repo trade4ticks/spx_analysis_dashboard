@@ -742,6 +742,36 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
   (`ss.layout`, `ss.collapsed`) — per screen, the Wall's convention. Order
   is the server's `position` (▲ ▼, unchanged). Opening a section resizes its
   charts explicitly: a chart drawn while hidden otherwise stays 0 px wide.
+- **Trade Definition** (Phase 1.5, 2026-10-17): an optional `trade` object
+  in the same JSONB (`v: 1`; `None` when empty, and on rows saved before it —
+  `with_defaults`). Entry notes, legs, profit target, stop, exit fields,
+  management notes. **Information only: `decide` never reads it** (gated:
+  identical decisions with and without, live and past). Entry REUSES the
+  schedule (`ssEntryText`), never a second copy. A leg is `{id, side, right,
+  qty, dte, strike: {method: delta|atm|offset|same, value, ref}, note}`:
+  delta is the MAGNITUDE, the chain side comes from `right`; "same strike as"
+  holds the other leg's STABLE id, so reordering cannot repoint it, and a
+  removed target is refused (server) and flagged (editor), never silently
+  repointed. Nothing is inferred between legs. Target/stop units are % / $ /
+  points with the basis in WORDS — never assumed. One formatter
+  (`ssTradeRows`, partial `_strategy_signal_trade_row.html`) feeds both the
+  hover popover and the section panel (collapsed by default).
+  The popover opens after 220 ms, closes 300 ms after leaving, and the
+  pointer may move into it; the card click still navigates; an ⓘ shown only
+  under `(hover: none)` toggles it without navigating. **Its visibility is
+  its `:style` object, not `x-show`**: `x-show` hides at once but shows a
+  frame later, so a close inside that frame left an EMPTY popover on screen
+  (intermittent — found by running the gate repeatedly); and a string
+  `:style` would replace the whole attribute. On scroll it follows its card
+  and closes once the card leaves the scrolling area (`.ss-main`, not the
+  window — under the top bar is off screen). The gate dispatches `scroll`
+  itself: headless virtual time does not reliably deliver the native one.
+  **Phase 2 will need** (deliberately not built): an expiration rule per leg
+  (nearest listed to the DTE, at-or-after, or exact; what 0 DTE means on a
+  day with none), a strike-rounding / delta-tolerance rule and which delta
+  (chain-reported vs model), price basis (mid / natural / mark) and quote
+  staleness limits, the contract multiplier, and a STRUCTURED basis for
+  % targets (credit, debit, max risk) before any of it can be computed.
 - ~~**The decision** weekday first~~ (superseded above). Each signal condition has **one threshold per state but the
   last**; the first state whose conditions all (AND) / any (OR) pass wins, the
   last state is the fallback. **Missing is unknown, not false** (three-valued),

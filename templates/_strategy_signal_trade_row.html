@@ -1,0 +1,12 @@
+{#- One row of a trade definition, `row` from ssTradeRows: a label and its
+    text, or the legs as a numbered list. Shared by the hover popover and
+    the section's Trade Definition panel, so both read the same. -#}
+<div style="display:contents">
+  <span class="ss-td-k" x-text="row.k"></span>
+  <span class="ss-td-v">
+    <template x-if="row.legs">
+      <ol><template x-for="(l, li) in row.legs" :key="li"><li x-text="l"></li></template></ol>
+    </template>
+    <template x-if="!row.legs"><span class="ss-td-t" x-text="row.v"></span></template>
+  </span>
+</div>

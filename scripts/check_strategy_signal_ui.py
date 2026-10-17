@@ -107,7 +107,17 @@ STRATEGIES = [
     {"id": 6, "position": 6, "name": "Day Trade 1:7 DTE Diagonal", "weekdays": [3], "display": "calendar",
      "entry_times": [{"day": 3, "time": "10:00"}], "image": None,
      "states": ["TRADE", "NO TRADE"], "logic": "and", "manual": [], "notes": "", "metrics": VIX_SIG("<", 40)},
+    # The brief's T-1 example, with a trade definition (Phase 1.5).
+    {"id": 7, "position": 7, "name": "T-1", "weekdays": [2, 3, 4], "display": "calendar",
+     "entry_times": [{"day": d, "time": "15:00"} for d in (2, 3, 4)], "image": None,
+     "states": ["TRADE", "NO TRADE"], "logic": "and", "manual": [], "notes": "", "metrics": VIX_SIG("<", 40)},
 ]
+
+SKEW_TRADE = {"entry_notes": "Any day skew is cheap; size from the state.",
+              "legs": [{"id": "a", "side": "buy", "right": "put", "qty": 5, "dte": 160,
+                        "strike": {"method": "delta", "value": 25}, "note": "the core"}],
+              "target": None, "stop": None,
+              "exit": {"max_dit": 60, "exit_dte": None, "exit_time": None, "rules": ""}, "management": ""}
 
 SOURCES = {
     "index": [{"id": "index:vix", "label": "VIX", "description": "CBOE 30-day volatility index"},
@@ -156,15 +166,40 @@ def board_json() -> str:
                 vals.append(wave(src, i, k))
         return pd.Series(vals, index=pd.DatetimeIndex(idx))
 
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from check_strategy_signal import T1_TRADE
+    # Definitions go through the store's own validation, so the page is
+    # driven with exactly what a save would have stored.
+    trades = {1: store.clean_trade(SKEW_TRADE), 7: store.clean_trade(T1_TRADE)}
+    with_trades = [True]
+
     async def listing(pool):
         # What store._row hands back: the read-time defaults applied, so the
         # legacy row (id 3) arrives exactly as a pre-schedule row would.
-        return [{**store.with_defaults(s), "image": s.get("image")} for s in json.loads(json.dumps(STRATEGIES))]
+        out = [{**store.with_defaults(s), "image": s.get("image")} for s in json.loads(json.dumps(STRATEGIES))]
+        if with_trades[0]:
+            for s in out:
+                s["trade"] = trades.get(s["id"])
+        return out
 
     lib.fetch_bars, store.list_strategies, lib.now_et = fetch, listing, (lambda: NOW)
     # Live (a Tuesday) and a past Friday, both from the real router.
-    return json.dumps({"live": asyncio.run(router.board(as_of=None, pool=None)),
-                       "past": asyncio.run(router.board(as_of=PAST, pool=None))})
+    live = asyncio.run(router.board(as_of=None, pool=None))
+    past = asyncio.run(router.board(as_of=PAST, pool=None))
+    # The definition is information: the same board without any definition
+    # must decide every strategy identically, live and on the past date.
+    with_trades[0] = False
+    same = all(a["decision"] == b["decision"]
+               for x, y in ((live, asyncio.run(router.board(as_of=None, pool=None))),
+                            (past, asyncio.run(router.board(as_of=PAST, pool=None))))
+               for a, b in zip(x["strategies"], y["strategies"]))
+    print(("  ok    " if same else "  FAIL  ") + "decisions are identical with and without trade definitions (live and past)")
+    if not same:
+        TRADE_DECISION_FAILS.append(1)
+    return json.dumps({"live": live, "past": past})
+
+
+TRADE_DECISION_FAILS: list = []
 
 
 DRIVER = r"""
@@ -213,7 +248,7 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
   const cell = (d, s) => $(`.ss-cal-cell[data-day="${d}"][data-slot="${s}"]`);
   const minis = el => (el ? [...el.querySelectorAll('.ss-mini')].map(m => txt(m.querySelector('.ss-mini-name'))) : null);
   const secOf = id => document.getElementById('ss-sec-' + id);
-  const visible = el => !!el && el.offsetParent !== null && getComputedStyle(el).display !== 'none';
+  const visible = el => !!el && getComputedStyle(el).display !== 'none' && el.getClientRects().length > 0;
 
   async function run() {
     for (let i = 0; i < 100 && !$$('.ss-sec').length; i++) await wait(50);
@@ -363,6 +398,100 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     await wait(100); app.placeNowLine();
     eq('Live returns: line and today back', [!!$('.ss-past'), visible(line), $$('.ss-cal-day.today').length], [false, true, 1]);
 
+    // ── trade definition: popover on hover, panel in the section ─────────
+    const tip = $('.ss-tip');
+    const hover = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: false }));
+    const tipRows = () => [...tip.querySelectorAll('.ss-td > div')].map(r => [txt(r.children[0]), txt(r.children[1])]);
+    const T1_ROWS = [
+      ['Entry', 'Tue / Wed / Thu 15:00 ET'],
+      ['Entry exceptions', 'No Monday entry: the 6-DTE expiration is not listed. No Friday entry: no 1-DTE.'],
+      ['Legs', 'SELL 1 × 30Δ Call, 1 DTE' + 'SELL 1 × 30Δ Put, 1 DTE' +
+               'BUY 1 × Call, same strike as leg 1 (short call), 6 DTE' + 'BUY 1 × Put, same strike as leg 2 (short put), 6 DTE'],
+      ['Profit target', '25%'], ['Stop loss', '10%'], ['Exit', '10:00 ET · 0 DTE'], ['Exit rules', 'the next trading morning']];
+    // Let any smooth scroll from earlier clicks finish, then start at the top.
+    const settle = async () => {
+      const m = $('.ss-main');
+      m.scrollTo({ top: 0, behavior: 'instant' });
+      for (let i = 0, last = -1; i < 40 && m.scrollTop !== last; i++) { last = m.scrollTop; await wait(60); }
+    };
+    await settle();
+    const t1Mini = cell(2, 11).querySelector('.ss-mini');
+    eq('T-1 sits in the Tuesday 15:00 row', minis(cell(2, 11)), ['T-1']);
+    eq('popover closed to begin with', visible(tip), false);
+    hover(t1Mini, 'mouseenter'); await wait(80);
+    eq('a brief pass-over opens nothing', visible(tip), false);
+    await wait(300);
+    eq('hovering a calendar card opens its definition', [visible(tip), txt(tip.querySelector('.ss-tip-name'))], [true, 'T-1']);
+    eq('popover: every filled field, nothing empty, in order', tipRows(), T1_ROWS);
+    eq('legs are a numbered list', tip.querySelectorAll('ol li').length, 4);
+    const tr = tip.getBoundingClientRect(), cr = t1Mini.getBoundingClientRect();
+    eq('popover is inside the window and beside the card, not over it',
+       [tr.left >= 0 && tr.right <= innerWidth && tr.top >= 0 && tr.bottom <= innerHeight,
+        tr.left >= cr.right || tr.right <= cr.left || tr.top >= cr.bottom], [true, true]);
+    hover(t1Mini, 'mouseleave'); await wait(120); hover(tip, 'mouseenter'); await wait(600);
+    eq('moving into the popover keeps it open', visible(tip), true);
+    hover(tip, 'mouseleave'); await wait(450);
+    eq('leaving it closes it', visible(tip), false);
+    const noDef = cell(2, 1).querySelector('.ss-mini');
+    hover(noDef, 'mouseenter'); await wait(450);
+    eq('a card without a definition opens no popover and keeps its tooltip',
+       [visible(tip), noDef.title.startsWith('Short-term put spread — scheduled Tue 10:00 ET')], [false, true]);
+    hover(noDef, 'mouseleave');
+    eq('no ⓘ on a card without a definition', noDef.querySelector('.ss-tdi'), null);
+    const skewCard = $$('.ss-side .ss-card')[0];
+    hover(skewCard, 'mouseenter'); await wait(350);
+    eq('standalone card popover', [visible(tip), txt(tip.querySelector('.ss-tip-name')), tipRows()],
+       [true, 'Skew allocation', [['Entry exceptions', 'Any day skew is cheap; size from the state.'],
+                                  ['Legs', 'BUY 5 × 25Δ Put, 160 DTE — the core'], ['Exit', 'max 60 DIT']]]);
+    hover(skewCard, 'mouseleave'); await wait(450);
+    eq('... no Entry row for a strategy with no schedule', visible(tip), false);
+    // Navigation still works: collapse T-1, click its card, it opens.
+    if (!app.isCollapsed(byName('T-1'))) secOf(7).querySelector('.ss-fold').click();
+    await wait(100);
+    t1Mini.click(); await wait(300);
+    eq('clicking a card with a definition still opens its section', visible(secOf(7).querySelector('.ss-sec-body')), true);
+    // The ⓘ (no-hover screens): opens the popover and does NOT navigate.
+    secOf(7).querySelector('.ss-fold').click(); await wait(100);
+    await settle();
+    eq('ⓘ hidden where hover exists', matchMedia('(hover: hover)').matches ? getComputedStyle(t1Mini.querySelector('.ss-tdi')).display : 'none', 'none');
+    t1Mini.querySelector('.ss-tdi').click(); await wait(150);
+    eq('ⓘ opens the definition without going to the section',
+       [visible(tip), txt(tip.querySelector('.ss-tip-name')), visible(secOf(7).querySelector('.ss-sec-body'))], [true, 'T-1', false]);
+    document.body.click(); await wait(100);
+    eq('a click elsewhere closes it', visible(tip), false);
+    t1Mini.querySelector('.ss-tdi').click(); await wait(100);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await wait(100);
+    eq('Esc closes it', visible(tip), false);
+    // Scrolling: the popover follows its card, and closes once the card is gone.
+    t1Mini.querySelector('.ss-tdi').click(); await wait(100);
+    const top0 = tip.getBoundingClientRect().top;
+    // Headless virtual time does not reliably deliver the browser's own
+    // scroll event (it fires from a rendering frame), so it is sent here.
+    const scrollMain = async dy => { const m = $('.ss-main'); m.scrollBy({ top: dy, behavior: 'instant' });
+                                     m.dispatchEvent(new Event('scroll')); await wait(100); };
+    await scrollMain(40);
+    eq('a small scroll moves the popover with its card', [visible(tip), Math.round(top0 - tip.getBoundingClientRect().top)], [true, 40]);
+    await scrollMain(2000);
+    eq('scrolling the card out of view closes it', visible(tip), false);
+    await settle();
+    secOf(7).querySelector('.ss-fold').click(); await wait(100);
+
+    // Section panel: collapsed by default, same rows as the popover.
+    const box = secOf(7).querySelector('.ss-tdbox');
+    eq('section panel present, collapsed, with a summary', [!!box, visible(box.querySelector('.ss-td')), txt(box.querySelector('.ss-tdbox-hdr'))],
+       [true, false, '▸ Trade Definition 4 legs · target 25% · stop 10%']);
+    box.querySelector('.ss-tdbox-hdr').click(); await wait(100);
+    eq('expanded: the same rows as the popover', [...box.querySelectorAll('.ss-td > div')].map(r => [txt(r.children[0]), txt(r.children[1])]), T1_ROWS);
+    eq('panel fits its section (two-column layout)', box.getBoundingClientRect().right <= secOf(7).getBoundingClientRect().right + 0.5, true);
+    $$('.ss-bar .ss-seg button').find(b => txt(b) === 'Two columns').click(); await wait(200);
+    eq('two columns: panel still inside its narrower section', [box.getBoundingClientRect().right <= secOf(7).getBoundingClientRect().right + 0.5,
+       secOf(7).getBoundingClientRect().width < innerWidth / 2, document.documentElement.scrollWidth <= document.documentElement.clientWidth], [true, true, true]);
+    $$('.ss-bar .ss-seg button').find(b => txt(b) === 'Full width').click(); await wait(200);
+    box.querySelector('.ss-tdbox-hdr').click(); await wait(100);
+    eq('and collapses again', visible(box.querySelector('.ss-td')), false);
+    eq('no panel on a strategy without a definition', secOf(2).querySelector('.ss-tdbox'), null);
+    eq('signal states unchanged by definitions', [stOf(byName('T-1')), txt(secOf(7).querySelector('.ss-sec-hdr .ss-pill'))], ['TRADE', 'TRADE']);
+
     // ── Add → schedule, display → Save ───────────────────────────────────
     $$('.ss-bar .ss-btn').find(b => txt(b) === '+ Add Strategy').click();
     await wait(300);
@@ -389,6 +518,69 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     eq('and back', $$('.ss-metric input.num').length, 1);
     $$('.ss-cfg button').find(b => txt(b) === '+ Requirement').click(); await wait(50);
     setVal($('.ss-cfg input[placeholder^="e.g. Premium"]'), 'Check theta');
+
+    // The trade definition: the T-1 legs, built and rearranged by clicking.
+    const tdc = $('.ss-tdcfg');
+    eq('Trade Definition section collapsed, says it is empty', [visible(tdc.querySelector('.ss-tdcfg-body')), txt(tdc.querySelector('.ss-tdbox-sum'))],
+       [false, 'none — optional, information only']);
+    tdc.querySelector('.ss-tdbox-hdr').click(); await wait(100);
+    eq('it opens', visible(tdc.querySelector('.ss-tdcfg-body')), true);
+    eq('entry reuses the schedule above', txt([...tdc.querySelectorAll('.ss-hint')].find(h => /^Schedule/.test(txt(h)))),
+       'Schedule (from the entry days and times above): Tue (no time) · Fri 11:30, 14:05 ET');
+    setVal(tdc.querySelector('textarea'), 'No Monday entry: no 6-DTE.');
+    const addLegBtn = $$('.ss-tdcfg button').find(b => txt(b) === '+ Leg');
+    const legsEl = () => $$('.ss-tdcfg .ss-leg');
+    const legAt = id => app.draft.trade.legs.findIndex(l => l.id === id);
+    const setLeg = async (i, side, right, dte, method, val) => {
+      const L = legsEl()[i], sel = L.querySelectorAll('select'), nums = L.querySelectorAll('input.num');
+      setVal(sel[0], side); setVal(sel[1], right); setVal(nums[1], String(dte)); setVal(sel[2], method);
+      await wait(50);
+      if (method === 'delta' || method === 'offset') setVal(legsEl()[i].querySelectorAll('input.num')[2], String(val));
+      if (method === 'same') setVal(legsEl()[i].querySelectorAll('select')[3], val);
+      await wait(30);
+    };
+    const moveTo = async (id, k) => {           // by clicking ▲ / ▼
+      while (legAt(id) > k) { legsEl()[legAt(id)].querySelector('button[title="Move up"]').click(); await wait(30); }
+      while (legAt(id) < k) { legsEl()[legAt(id)].querySelector('button[title="Move down"]').click(); await wait(30); }
+    };
+    for (let k = 0; k < 4; k++) { addLegBtn.click(); await wait(40); }
+    const ids = app.draft.trade.legs.map(l => l.id);
+    await setLeg(0, 'sell', 'call', 1, 'delta', 30);
+    await setLeg(1, 'sell', 'put', 1, 'delta', 30);
+    await setLeg(2, 'buy', 'call', 6, 'same', ids[0]);
+    await setLeg(3, 'buy', 'put', 6, 'same', ids[1]);
+    eq('same-strike choices are the other legs, by number', [...legsEl()[2].querySelectorAll('select')[3].options].map(o => txt(o)),
+       ['— choose a leg —', 'Leg 1 · SELL call 1 DTE', 'Leg 2 · SELL put 1 DTE', 'Leg 4 · BUY put 6 DTE']);
+    // Reorder: the long call to the top. It must still share the short call's strike.
+    await moveTo(ids[2], 0);
+    eq('reorder moves the leg with its reference', [app.draft.trade.legs.map(l => l.id), legsEl()[0].querySelectorAll('select')[3].value],
+       [[ids[2], ids[0], ids[1], ids[3]], ids[0]]);
+    eq('the reference now reads the short call as leg 2', txt(legsEl()[0].querySelectorAll('select')[3].selectedOptions[0]),
+       'Leg 2 · SELL call 1 DTE');
+    // Remove the short call: the long call is flagged and Save refuses.
+    legsEl()[1].querySelector('button[title="Remove leg"]').click(); await wait(80);
+    eq('removing a referenced leg flags the leg that pointed at it', [legsEl()[0].classList.contains('bad'), !!$('.ss-tdcfg .ss-legerr')], [true, true]);
+    sent.length = 0;
+    $$('.ss-cfg button').find(b => txt(b) === 'Save').click(); await wait(200);
+    eq('Save refuses a broken reference, sends nothing, names the leg',
+       [sent.length, txt($('.ss-cfg .ss-err'))], [0, 'Leg 1 is set to the same strike as a leg that no longer exists — choose another leg or another method.']);
+    // A new short call, put in order (sc, sp, lc, lp), and the long call repointed.
+    addLegBtn.click(); await wait(40);
+    await setLeg(3, 'sell', 'call', 1, 'delta', 30);
+    const sc = app.draft.trade.legs[3].id;
+    await moveTo(sc, 0); await moveTo(ids[1], 1); await moveTo(ids[2], 2);
+    setVal(legsEl()[2].querySelectorAll('select')[3], sc); await wait(50);
+    eq('the flag clears once repointed', !!$('.ss-tdcfg .ss-legerr'), false);
+    const tsel = $$('.ss-tdcfg .ss-grid2 .ss-f');
+    setVal(tsel[0].querySelector('input.num'), '25');
+    setVal(tsel[1].querySelector('input.num'), '10');
+    setVal(tsel[1].querySelector('input[maxlength="200"]'), 'of the debit paid');
+    const exitRow = $('.ss-tdcfg input[type=time]').closest('.ss-row');
+    setVal(exitRow.querySelectorAll('input.num')[1], '0');
+    setVal($('.ss-tdcfg input[type=time]'), '10:00');
+    setVal($$('.ss-tdcfg textarea')[1], 'the next trading morning');
+    await wait(50);
+    eq('section summary', txt(tdc.querySelector('.ss-tdbox-sum')), '4 legs · profit target · stop · notes');
     sent.length = 0;
     $$('.ss-cfg button').find(b => txt(b) === 'Save').click();
     await wait(400);
@@ -400,6 +592,14 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     eq('payload metric', body.metrics && [body.metrics[0].a, body.metrics[0].signal, body.metrics[0].cmp, body.metrics[0].thresholds],
        ['index:vix', true, '<', [22.5]]);
     eq('payload manual', body.manual, ['Check theta']);
+    const bt = body.trade || { legs: [] };
+    eq('payload trade legs', bt.legs.map(l => [l.side, l.right, l.qty, l.dte, l.strike.method, l.strike.value,
+                                                l.strike.ref === sc ? 'sc' : l.strike.ref === ids[1] ? 'sp' : l.strike.ref]),
+       [['sell', 'call', 1, 1, 'delta', 30, null], ['sell', 'put', 1, 1, 'delta', 30, null],
+        ['buy', 'call', 1, 6, 'same', null, 'sc'], ['buy', 'put', 1, 6, 'same', null, 'sp']]);
+    eq('payload target / stop / exit / entry notes', [bt.target, bt.stop, bt.exit, bt.entry_notes],
+       [{ value: 25, unit: 'pct', basis: '' }, { value: 10, unit: 'pct', basis: 'of the debit paid' },
+        { max_dit: null, exit_dte: 0, exit_time: '10:00', rules: 'the next trading morning' }, 'No Monday entry: no 6-DTE.']);
     eq('no image chosen → no image request', sent.filter(s => s.u.endsWith('/image')).length, 0);
     window.__payload = body;
     eq('panel collapses after save', !!$('.ss-cfg'), false);
@@ -410,7 +610,7 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     eq('Edit opens the panel filled', [!!$('.ss-cfg'), $('.ss-cfg input[placeholder^="e.g. Short"]').value,
        $$('.ss-metric').length, $$('.ss-metric input.num').map(i => i.value)],
        [true, 'Short-term put spread', 2, ['1.14', '0.8375']]);
-    eq('Edit shows the scheduled times', $$('.ss-cfg input[type=time]').map(i => i.value), ['10:00', '11:30']);
+    eq('Edit shows the scheduled times', $$('.ss-cfg .ss-dayrow input[type=time]').map(i => i.value), ['10:00', '11:30']);
     eq('Edit shows the display', txt($$('.ss-cfg .ss-seg button.on').find(x => /calendar|card/i.test(txt(x)))), 'Weekly calendar');
     eq('no image yet', [!!$('.ss-cfg .ss-imgnone'), txt($$('.ss-cfg button').find(b => /Upload|Replace/.test(txt(b))))], [true, 'Upload…']);
     const fileIn = $('.ss-cfg input[type=file]');
@@ -436,6 +636,22 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     eq('Save again uploads the staged file as multipart', !!up && up.m === 'PUT' && up.body instanceof FormData && up.body.get('file').name, 'risk.png');
     eq('panel closes once both landed', !!$('.ss-cfg'), false);
 
+    // Edit loads a saved definition into the editor.
+    secOf(7).querySelector('.ss-sec-hdr .ss-btn').click(); await wait(300);
+    $('.ss-tdcfg .ss-tdbox-hdr').click(); await wait(100);
+    eq('Edit loads the saved legs, references by leg', legsEl().map(L => [...L.querySelectorAll('select')].map(x => x.value).concat(
+       [...L.querySelectorAll('input.num')].map(x => x.value))),
+       [['sell', 'call', 'delta', '1', '1', '30'], ['sell', 'put', 'delta', '1', '1', '30'],
+        ['buy', 'call', 'same', 'sc', '1', '6'], ['buy', 'put', 'same', 'sp', '1', '6']]);
+    eq('Edit loads target, stop and exit', [$$('.ss-tdcfg .ss-grid2 input.num').map(i => i.value), $('.ss-tdcfg input[type=time]').value],
+       [['25', '10'], '10:00']);
+    sent.length = 0;
+    $$('.ss-cfg button').find(b => txt(b) === 'Save').click(); await wait(400);
+    const t1put = sent.find(s => s.m === 'PUT' && s.u.endsWith('/strategies/7'));
+    window.__payload2 = t1put ? JSON.parse(t1put.body) : {};
+    eq('re-saving unchanged sends the same definition back', t1put && JSON.parse(t1put.body).trade.legs.map(l => l.strike.ref),
+       [null, null, 'sc', 'sp']);
+
     // Replace / remove on a strategy that has one.
     secOf(1).querySelector('.ss-sec-hdr .ss-btn').click();
     await wait(300);
@@ -455,7 +671,8 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     const pre = document.createElement('pre');
     pre.id = 'report';
     pre.textContent = out.join('\n') + '\nerrs|' + (errs.length ? errs.join(' ;; ') : 'clean') +
-                      '\npayload|' + JSON.stringify(window.__payload || {});
+                      '\npayload|' + JSON.stringify(window.__payload || {}) +
+                      '\npayload|' + JSON.stringify(window.__payload2 || {});
     document.body.appendChild(pre);
   }
   // A throw inside the driver is reported, not swallowed into "never reported".
@@ -555,6 +772,7 @@ def main() -> int:
         print(("  ok    " if ok else "  FAIL  ") + parts[1] + ("" if ok else f": {parts[2]} (want {parts[3]})"))
         fails += not ok
     print(f"strategy signal UI: {n} assertions, failures: {fails}")
+    fails += len(TRADE_DECISION_FAILS)
     return 1 if fails else 0
 
 

@@ -110,6 +110,21 @@ async def run(dsn: str) -> None:
         up = await router.put_image(sid, UploadFile(file=io.BytesIO(png(300, 300)), filename="new.png"), pool)
         m2 = up["image"]
         check(m2["v"] > m1["v"] and (m2["w"], m2["tw"]) == (300, 300), "replace: a new version, new sizes")
+        print("trade definition")
+        from check_strategy_signal import T1_TRADE
+        before = next(r for r in await store.list_strategies(pool) if r["id"] == sid)
+        cfg_t = store.clean_config({**{k: before[k] for k in ("name", "notes", "weekdays", "entry_times", "display",
+                                                              "states", "logic", "metrics", "manual")},
+                                    "trade": T1_TRADE}, set())
+        await store.update(pool, sid, cfg_t)
+        after = next(r for r in await store.list_strategies(pool) if r["id"] == sid)
+        check(after["trade"] == cfg_t["trade"] and after["trade"]["legs"][2]["strike"]["ref"] == "sc",
+              "a trade definition saves and reloads, references intact")
+        check(after["image"] == m2 and after["manual"] == ["check"] and after["states"] == ["FULL", "MEH", "NONE"]
+              and after["weekdays"] == before["weekdays"],
+              "saving it keeps the image, manual checks, states and schedule")
+        check(next(r for r in await store.list_strategies(pool) if r["name"] == "CRD")["trade"] is None,
+              "a strategy without one still reads none")
         try:
             await router.put_image(sid, UploadFile(file=io.BytesIO(b"GIF89a not really"), filename="x.gif"), pool)
             check(False, "a broken file is refused with 400")

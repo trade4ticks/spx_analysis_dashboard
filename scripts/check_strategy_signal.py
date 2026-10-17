@@ -257,6 +257,109 @@ def check_store():
     refused(lambda x: x["metrics"][1].update(thresholds=["abc"]), "a threshold that is not a number")
 
 
+T1_TRADE = {
+    "v": 1, "entry_notes": "No Monday entry: the 6-DTE expiration is not listed.\nNo Friday entry: no 1-DTE.",
+    "legs": [
+        {"id": "sc", "side": "sell", "right": "call", "qty": 1, "dte": 1, "strike": {"method": "delta", "value": 30}},
+        {"id": "sp", "side": "sell", "right": "put", "qty": 1, "dte": 1, "strike": {"method": "delta", "value": 30}},
+        {"id": "lc", "side": "buy", "right": "call", "qty": 1, "dte": 6, "strike": {"method": "same", "ref": "sc"}},
+        {"id": "lp", "side": "buy", "right": "put", "qty": 1, "dte": 6, "strike": {"method": "same", "ref": "sp"}}],
+    "target": {"value": 25, "unit": "pct", "basis": ""},
+    "stop": {"value": 10, "unit": "pct", "basis": ""},
+    "exit": {"max_dit": None, "exit_dte": 0, "exit_time": "10:00", "rules": "the next trading morning"},
+    "management": ""}
+
+
+def check_trade():
+    print("trade definition")
+    src = {"index:vix"}
+    base = {"name": "T-1", "notes": "", "weekdays": [2, 3, 4], "states": ["TRADE", "NO TRADE"], "logic": "and",
+            "entry_times": [{"day": d, "time": "15:00"} for d in (2, 3, 4)],
+            "metrics": [{"a": "index:vix", "chart": True, "signal": True, "cmp": "<", "thresholds": [30]}],
+            "manual": ["Premium >= $2.00"]}
+    c = store.clean_config({**base, "trade": T1_TRADE}, src)
+    t = c["trade"]
+    check(t is not None and t["v"] == 1 and [lg["id"] for lg in t["legs"]] == ["sc", "sp", "lc", "lp"],
+          "the T-1 example saves: four legs, ids kept")
+    check(t["legs"][2]["strike"] == {"method": "same", "value": None, "ref": "sc"}
+          and t["legs"][0]["strike"] == {"method": "delta", "value": 30.0, "ref": None},
+          "same-strike holds the leg id; delta holds its magnitude")
+    check([lg["dte"] for lg in t["legs"]] == [1, 1, 6, 6], "each leg keeps its own DTE")
+    check(t["target"] == {"value": 25.0, "unit": "pct", "basis": ""} and t["exit"]["exit_dte"] == 0
+          and t["exit"]["exit_time"] == "10:00", "target, stop and exit kept; exit DTE 0 is a value, not empty")
+    check(c["metrics"][0]["thresholds"] == [30.0] and c["manual"] == ["Premium >= $2.00"]
+          and c["entry_times"][0] == {"day": 2, "time": "15:00"},
+          "the definition rides beside metrics, manual checks and schedule, changing none")
+    check(store.clean_config(json.loads(json.dumps(c)), src)["trade"] == t, "re-saving what was read gives the same definition")
+    check(store.clean_config({**base, "trade": None}, src)["trade"] is None
+          and store.clean_config(base, src)["trade"] is None, "no definition is valid")
+    blank = {"entry_notes": "  ", "legs": [], "target": {"value": None, "unit": "pct", "basis": ""},
+             "stop": {"value": "", "unit": "usd", "basis": ""},
+             "exit": {"max_dit": "", "exit_dte": None, "exit_time": "", "rules": ""}, "management": ""}
+    check(store.clean_config({**base, "trade": blank}, src)["trade"] is None, "an all-empty definition is stored as none")
+    only_basis = store.clean_trade({"stop": {"value": None, "unit": "pct", "basis": "close if the shorts are breached"}})
+    check(only_basis["stop"] == {"value": None, "unit": "pct", "basis": "close if the shorts are breached"},
+          "a stop described in words alone is kept")
+    check(store.clean_trade({"exit": {"exit_time": "17:30"}})["exit"]["exit_time"] == "17:30",
+          "an exit time is any ET time (not only the entry session)")
+    check(store.clean_trade({"legs": [{"side": "buy", "right": "put", "qty": "2", "dte": "0",
+                                       "strike": {"method": "offset", "value": "-50"}}]})["legs"][0]
+          == {"id": "L1", "side": "buy", "right": "put", "qty": 2, "dte": 0,
+              "strike": {"method": "offset", "value": -50.0, "ref": None}, "note": ""},
+          "numbers typed as text are accepted; a leg without an id gets one; 0 DTE allowed")
+    atm = store.clean_trade({"legs": [{"id": "a", "side": "sell", "right": "call", "qty": 1, "dte": 7,
+                                       "strike": {"method": "atm", "value": 99}}]})
+    check(atm["legs"][0]["strike"] == {"method": "atm", "value": None, "ref": None}, "ATM keeps no stray value")
+    r = store._row(Rec(id=1, position=1, name="Old", config={"name": "Old", "weekdays": [], "states": ["A", "B"],
+                                                             "logic": "and", "metrics": [], "manual": []}, updated_at=None))
+    check(r["trade"] is None, "a row saved before trade definitions reads back with none")
+
+    def legs_with(mut):
+        tr = copy.deepcopy(T1_TRADE)
+        mut(tr["legs"])
+        return tr
+
+    def refused(tr, why):
+        try:
+            store.clean_trade(tr)
+            check(False, f"refuses {why}")
+        except ValueError:
+            check(True, f"refuses {why}")
+    refused(legs_with(lambda L: L[0].update(qty=0)), "a zero quantity")
+    refused(legs_with(lambda L: L[0].update(qty=1.5)), "a fractional quantity")
+    refused(legs_with(lambda L: L[0].update(dte=-1)), "a negative DTE")
+    refused(legs_with(lambda L: L[0].update(dte=None)), "a leg without a DTE")
+    refused(legs_with(lambda L: L[0].update(side="short")), "a side other than buy/sell")
+    refused(legs_with(lambda L: L[0].update(right="straddle")), "a right other than call/put")
+    refused(legs_with(lambda L: L[0]["strike"].update(value=0)), "a 0 delta")
+    refused(legs_with(lambda L: L[0]["strike"].update(value=100)), "a 100 delta")
+    refused(legs_with(lambda L: L[0]["strike"].update(value=None)), "a delta leg without its delta")
+    refused(legs_with(lambda L: L[0].update(strike={"method": "offset"})), "a spot offset without its points")
+    refused(legs_with(lambda L: L[0].update(strike={"method": "nearest"})), "an unknown strike method")
+    refused(legs_with(lambda L: L[2].update(strike={"method": "same", "ref": None})), "same-strike with no leg chosen")
+    refused(legs_with(lambda L: L.pop(0)), "same-strike pointing at a removed leg")
+    refused(legs_with(lambda L: L[2].update(strike={"method": "same", "ref": "lc"})), "a leg sharing its own strike")
+    refused(legs_with(lambda L: (L[0].update(strike={"method": "same", "ref": "lc"}))), "a circle of same-strike references")
+    refused(legs_with(lambda L: L[1].update(id="sc")), "two legs with one id")
+    refused(legs_with(lambda L: L.extend(copy.deepcopy(L[0]) | {"id": f"x{i}"} for i in range(5))), "more than 8 legs")
+    refused({**T1_TRADE, "target": {"value": 25, "unit": "R"}}, "a target unit other than % / $ / points")
+    refused({**T1_TRADE, "exit": {"exit_time": "25:00"}}, "an exit time that is not a time")
+    refused({**T1_TRADE, "exit": {"max_dit": -3}}, "a negative maximum DIT")
+
+    # Reordering is moving dicts: the reference is an id, so it follows.
+    moved = copy.deepcopy(T1_TRADE)
+    moved["legs"] = [moved["legs"][i] for i in (2, 0, 3, 1)]
+    t2 = store.clean_trade(moved)
+    check(t2["legs"][0]["strike"]["ref"] == "sc" and t2["legs"][1]["id"] == "sc",
+          "reordered legs keep their references (the long call still shares the short call's strike)")
+
+    # The decision never reads the definition, schedule or instructions.
+    with_t = cfg(["TRADE", "NO TRADE"], "and", [sig("r", "<", 1.14)], days=(3,))
+    for vals, wd in (({"r": 1.0}, 4), ({"r": 1.2}, 3), ({"r": None}, 2)):
+        check(ev.decide({**with_t, "trade": T1_TRADE}, vals, wd) == ev.decide(with_t, vals, wd),
+              f"decide is identical with and without a trade definition ({vals}, day {wd})")
+
+
 def check_images():
     print("images")
     try:
@@ -297,12 +400,13 @@ def main() -> int:
     check_clock_and_daily()
     check_board()
     check_store()
+    check_trade()
     check_images()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} strategy-signal check(s) failed")
         return 1
-    print("PASS: strategy signal — decision, percentile, clock, board fetch, config store, schedule fields, images")
+    print("PASS: strategy signal — decision, percentile, clock, board fetch, config store, schedule fields, trade definitions, images")
     return 0
 
 

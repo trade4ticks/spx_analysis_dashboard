@@ -98,8 +98,8 @@ def _number(v, *, name) -> float:
     return f
 
 
-def clean_time(v, *, where: str) -> str:
-    """'9:5' / '09:05' -> '09:05'; inside the session or refused."""
+def clean_time(v, *, where: str, session: bool = True) -> str:
+    """'9:5' / '09:05' -> '09:05'; inside the session (unless session=False) or refused."""
     parts = str(v or "").strip().split(":")
     if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
         raise ValueError(f"{where}: {v!r} is not a time (HH:MM).")
@@ -107,9 +107,176 @@ def clean_time(v, *, where: str) -> str:
     if not (0 <= h <= 23 and 0 <= m <= 59):
         raise ValueError(f"{where}: {v!r} is not a time (HH:MM).")
     t = f"{h:02d}:{m:02d}"
-    if not FIRST_TIME <= t <= LAST_TIME:
+    if session and not FIRST_TIME <= t <= LAST_TIME:
         raise ValueError(f"{where}: {t} is outside the session ({FIRST_TIME}-{LAST_TIME} ET).")
     return t
+
+
+# ── the trade definition ────────────────────────────────────────────────────
+#
+# INFORMATION ONLY (Phase 1.5): how the trade is built, entered and managed.
+# Nothing here reaches evaluate.decide. Shape, version 1:
+#
+#   trade = {"v": 1,
+#            "entry_notes": str,                    # exceptions; the schedule
+#                                                   # itself is weekdays/entry_times
+#            "legs": [{"id", "side": buy|sell, "right": call|put, "qty": int >= 1,
+#                      "dte": int >= 0,
+#                      "strike": {"method": delta|atm|offset|same,
+#                                 "value": float|None,   # |delta| 0-100, or points from SPX
+#                                 "ref": leg id|None},   # method "same" only
+#                      "note": str}],
+#            "target": {"value": float|None, "unit": pct|usd|pts, "basis": str} | None,
+#            "stop":   (same) | None,
+#            "exit": {"max_dit": int|None, "exit_dte": int|None,
+#                     "exit_time": "HH:MM" ET|None, "rules": str},
+#            "management": str}
+#
+# A leg is named by a STABLE id, never its position: "same strike as" holds
+# the id, so reordering cannot repoint it, and a removed target is refused
+# rather than silently becoming another leg. Delta is the MAGNITUDE (30 =
+# 30 delta); the side of the chain comes from `right`. Nothing is inferred:
+# a long leg shares a short leg's strike only when it says so. A definition
+# with nothing in it is stored as None, so "has a definition" is one test.
+
+TRADE_VERSION = 1
+MAX_LEGS = 8
+LEG_SIDES = ("buy", "sell")
+LEG_RIGHTS = ("call", "put")
+STRIKE_METHODS = ("delta", "atm", "offset", "same")
+PT_UNITS = ("pct", "usd", "pts")
+TRADE_TEXT_MAX = 2000
+LEG_NOTE_MAX = 160
+BASIS_MAX = 200
+MANAGEMENT_MAX = 4000
+
+
+def _int(v, *, name, lo, hi) -> int | None:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    f = _number(v, name=name)
+    if f != int(f):
+        raise ValueError(f"{name} must be a whole number, not {v!r}.")
+    if not lo <= f <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}.")
+    return int(f)
+
+
+def _opt_number(v, *, name) -> float | None:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    return _number(v, name=name)
+
+
+def _long_text(v, *, name, cap) -> str:
+    s = str(v or "").strip()
+    if len(s) > cap:
+        raise ValueError(f"{name} is longer than {cap} characters.")
+    return s
+
+
+def clean_leg(raw, idx: int, seen: set[str]) -> dict:
+    where = f"Leg {idx + 1}"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where} must be an object.")
+    lid = _text(raw.get("id") or f"L{idx + 1}", name=f"{where} id", cap=20, required=True)
+    if lid in seen:
+        raise ValueError(f"{where}: two legs share the id {lid!r}.")
+    seen.add(lid)
+    side, right = raw.get("side"), raw.get("right")
+    if side not in LEG_SIDES:
+        raise ValueError(f"{where}: buy or sell.")
+    if right not in LEG_RIGHTS:
+        raise ValueError(f"{where}: call or put.")
+    qty = _int(raw.get("qty"), name=f"{where} quantity", lo=1, hi=1000)
+    if qty is None:
+        raise ValueError(f"{where}: a quantity is required (1 or more).")
+    dte = _int(raw.get("dte"), name=f"{where} DTE", lo=0, hi=2000)
+    if dte is None:
+        raise ValueError(f"{where}: a target DTE is required (0 or more).")
+    st = raw.get("strike") or {}
+    method = st.get("method")
+    if method not in STRIKE_METHODS:
+        raise ValueError(f"{where}: strike selection is delta, ATM, spot offset or same strike as another leg.")
+    value, ref = None, None
+    if method == "delta":
+        value = _opt_number(st.get("value"), name=f"{where} delta")
+        if value is None or not 0 < value < 100:
+            raise ValueError(f"{where}: delta is a magnitude between 0 and 100 (30 = 30 delta).")
+    elif method == "offset":
+        value = _opt_number(st.get("value"), name=f"{where} spot offset")
+        if value is None:
+            raise ValueError(f"{where}: a spot offset needs its points (negative = below SPX).")
+    elif method == "same":
+        ref = st.get("ref") or None
+        if not ref:
+            raise ValueError(f"{where}: choose the leg whose strike it shares.")
+    return {"id": lid, "side": side, "right": right, "qty": qty, "dte": dte,
+            "strike": {"method": method, "value": value, "ref": ref},
+            "note": _text(raw.get("note"), name=f"{where} note", cap=LEG_NOTE_MAX)}
+
+
+def _clean_level(raw, name: str) -> dict | None:
+    """A profit target or stop: a number, a unit and the basis in words.
+    The unit's basis is never assumed -- 25% of what is the user's to say."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{name} must be an object.")
+    value = _opt_number(raw.get("value"), name=name)
+    basis = _text(raw.get("basis"), name=f"{name} basis", cap=BASIS_MAX)
+    if value is None and not basis:
+        return None
+    unit = raw.get("unit") or "pct"
+    if unit not in PT_UNITS:
+        raise ValueError(f"{name}: the unit is percent, dollars or points.")
+    return {"value": value, "unit": unit, "basis": basis}
+
+
+def clean_trade(raw) -> dict | None:
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("The trade definition must be an object.")
+    legs_raw = raw.get("legs") or []
+    if not isinstance(legs_raw, list) or len(legs_raw) > MAX_LEGS:
+        raise ValueError(f"At most {MAX_LEGS} legs.")
+    seen: set[str] = set()
+    legs = [clean_leg(x, i, seen) for i, x in enumerate(legs_raw)]
+    pos = {lg["id"]: i for i, lg in enumerate(legs)}
+    for i, lg in enumerate(legs):
+        ref = lg["strike"]["ref"]
+        if ref is None:
+            continue
+        if ref == lg["id"]:
+            raise ValueError(f"Leg {i + 1} cannot share its own strike.")
+        if ref not in pos:
+            raise ValueError(f"Leg {i + 1} shares the strike of a leg that no longer exists -- choose another.")
+    for i, lg in enumerate(legs):                 # A -> B -> A has no strike to share
+        hops, cur = set(), lg
+        while cur["strike"]["method"] == "same":
+            if cur["id"] in hops:
+                raise ValueError(f"Leg {i + 1}: its same-strike references go round in a circle.")
+            hops.add(cur["id"])
+            cur = legs[pos[cur["strike"]["ref"]]]
+    ex = raw.get("exit") or {}
+    if not isinstance(ex, dict):
+        raise ValueError("Exit rules must be an object.")
+    exit_time = ex.get("exit_time") or None
+    exit_ = {"max_dit": _int(ex.get("max_dit"), name="Maximum DIT", lo=0, hi=2000),
+             "exit_dte": _int(ex.get("exit_dte"), name="Exit DTE", lo=0, hi=2000),
+             "exit_time": clean_time(exit_time, where="Exit time", session=False) if exit_time else None,
+             "rules": _long_text(ex.get("rules"), name="Exit rules", cap=TRADE_TEXT_MAX)}
+    out = {"v": TRADE_VERSION,
+           "entry_notes": _long_text(raw.get("entry_notes"), name="Entry instructions", cap=TRADE_TEXT_MAX),
+           "legs": legs,
+           "target": _clean_level(raw.get("target"), "Profit target"),
+           "stop": _clean_level(raw.get("stop"), "Stop loss"),
+           "exit": exit_,
+           "management": _long_text(raw.get("management"), name="Trade management notes", cap=MANAGEMENT_MAX)}
+    empty = (not out["entry_notes"] and not legs and out["target"] is None and out["stop"] is None
+             and not out["management"] and all(v in (None, "") for v in exit_.values()))
+    return None if empty else out
 
 
 def clean_entry_times(raw) -> list[dict]:
@@ -228,7 +395,7 @@ def clean_config(raw, sources: set[str]) -> dict:
         raise ValueError(f"At most {MAX_MANUAL} manual requirements.")
 
     return {"name": name, "notes": notes, "weekdays": days, "entry_times": entry_times,
-            "display": display, "states": states,
+            "display": display, "trade": clean_trade(raw.get("trade")), "states": states,
             "logic": logic, "metrics": metrics, "manual": manual}
 
 
@@ -248,7 +415,7 @@ def with_defaults(cfg: dict) -> dict:
     """A saved config with every field the page reads. Defaults for rows
     saved before a field existed -- read time only; the stored config is
     never rewritten to add them."""
-    return {"weekdays": [], "entry_times": [], "display": DEFAULT_DISPLAY, **cfg}
+    return {"weekdays": [], "entry_times": [], "display": DEFAULT_DISPLAY, "trade": None, **cfg}
 
 
 def _row(r) -> dict:

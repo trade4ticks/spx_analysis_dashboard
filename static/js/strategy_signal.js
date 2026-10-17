@@ -189,6 +189,76 @@ function ssDaysText(days) {
   return runs.map(([a, b]) => (a === b ? nm(a) : b === a + 1 ? `${nm(a)}, ${nm(b)}` : `${nm(a)}–${nm(b)}`)).join(', ');
 }
 
+/* ── the trade definition, in words ─────────────────────────────────────────
+ * ONE formatter for the hover popover and the section's panel, so the two
+ * cannot describe a trade differently. Information only: nothing here is
+ * read by the decision. Empty fields produce no row. */
+const SS_TIP_OPEN_MS = 220;      // hover this long before it opens (no flicker on a pass-over)
+const SS_TIP_CLOSE_MS = 300;     // and this long to reach it before it closes
+
+function ssNum(v) { return Number.isInteger(v) ? String(v) : String(+Number(v).toFixed(4)); }
+
+function ssLevelText(l) {
+  if (!l) return '';
+  const v = l.value === null || l.value === undefined ? ''
+    : l.unit === 'usd' ? `$${ssNum(l.value)}` : l.unit === 'pts' ? `${ssNum(l.value)} pts` : `${ssNum(l.value)}%`;
+  return [v, l.basis].filter(Boolean).join(' — ');
+}
+
+/* "SELL 1 × 30Δ Call, 1 DTE"; "BUY 1 × Call, same strike as leg 1 (short call), 6 DTE". */
+function ssLegText(leg, legs) {
+  const right = leg.right === 'call' ? 'Call' : 'Put', st = leg.strike || {};
+  let k = right, extra = '';
+  if (st.method === 'delta') k = `${ssNum(st.value)}Δ ${right}`;
+  else if (st.method === 'atm') k = `ATM ${right}`;
+  else if (st.method === 'offset') extra = `, SPX ${st.value < 0 ? '−' : '+'}${ssNum(Math.abs(st.value))}`;
+  else if (st.method === 'same') {
+    const i = legs.findIndex(l => l.id === st.ref), r = legs[i];
+    extra = r ? `, same strike as leg ${i + 1} (${r.side === 'sell' ? 'short' : 'long'} ${r.right})`
+              : ', same strike as a leg that no longer exists';
+  }
+  return `${leg.side.toUpperCase()} ${leg.qty} × ${k}${extra}, ${leg.dte} DTE${leg.note ? ' — ' + leg.note : ''}`;
+}
+
+/* The schedule grouped by time: "Tue / Wed / Thu 15:00 ET · Mon (no time)". */
+function ssEntryText(s) {
+  const days = s.weekdays || [], times = s.entry_times || [];
+  const groups = new Map();
+  for (const d of days) {
+    const key = times.filter(t => t.day === d).map(t => t.time).join(', ');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(SS_WEEKDAYS[d - 1].label);
+  }
+  return [...groups].map(([t, ds]) => `${ds.join(' / ')} ${t ? t + ' ET' : '(no time)'}`).join(' · ');
+}
+
+function ssExitText(ex) {
+  if (!ex) return '';
+  return [ex.exit_time ? `${ex.exit_time} ET` : '', ex.exit_dte !== null && ex.exit_dte !== undefined ? `${ex.exit_dte} DTE` : '',
+          ex.max_dit !== null && ex.max_dit !== undefined ? `max ${ex.max_dit} DIT` : ''].filter(Boolean).join(' · ');
+}
+
+/* [{k, v}] or {k, legs: [...]} rows, in reading order, for one strategy. */
+function ssTradeRows(s) {
+  const t = s.trade;
+  if (!t) return [];
+  const rows = [];
+  const add = (k, v) => { if (v) rows.push({ k, v }); };
+  add('Entry', ssEntryText(s));
+  add('Entry exceptions', t.entry_notes);
+  if ((t.legs || []).length) rows.push({ k: 'Legs', legs: t.legs.map(l => ssLegText(l, t.legs)) });
+  add('Profit target', ssLevelText(t.target));
+  add('Stop loss', ssLevelText(t.stop));
+  add('Exit', ssExitText(t.exit));
+  add('Exit rules', t.exit && t.exit.rules);
+  add('Management', t.management);
+  return rows;
+}
+
+/* The card the popover belongs to, outside the proxy like SS_CHARTS (a DOM
+ * element in a reactive proxy is wrapped for nothing). */
+const SS_TIP_ANCHOR = { el: null };
+
 /* The staged image File, outside the Alpine proxy like SS_CHARTS: it is
  * only ever handed to FormData, never rendered. */
 const SS_STAGED = { file: null };
@@ -214,6 +284,9 @@ document.addEventListener('alpine:init', () => {
     // this monitor lays the page out is not a fact about the strategies.
     layout: ssLoad(SS_PREF_LAYOUT, 'full') === 'two' ? 'two' : 'full',
     collapsed: ssLoad(SS_PREF_COLLAPSED, {}) || {},
+    tip: null,            // {id, top, left}: the trade-definition popover, one for the page
+    tipTimer: null,
+    tdOpen: {},           // section Trade Definition panels opened this visit (closed by default)
 
     init() {
       this.loadBoard();
@@ -335,6 +408,86 @@ document.addEventListener('alpine:init', () => {
     imageUrl(s, size) {
       return s.image ? `/api/strategy-signal/strategies/${s.id}/image?size=${size}&v=${s.image.v}` : '';
     },
+
+    // ── the trade definition: popover and panel ─────────────────────────
+    hasTrade(e) { return !!(e && e.strategy.trade); },
+    tradeRows(e) { return e ? ssTradeRows(e.strategy) : []; },
+    tradeSummary(s) {
+      const t = s.trade;
+      if (!t) return '';
+      const n = (t.legs || []).length;
+      return [n ? `${n} leg${n > 1 ? 's' : ''}` : '', t.target ? 'target ' + ssLevelText(t.target).split(' — ')[0] : '',
+              t.stop ? 'stop ' + ssLevelText(t.stop).split(' — ')[0] : ''].filter(Boolean).join(' · ');
+    },
+
+    /* Hover opens after a short pause and closes after a short grace, which
+     * the popover itself cancels -- so the pointer can travel into it to
+     * read. A card without a definition opens nothing. Clicking the card
+     * still goes to its section; the popover never takes the click. */
+    tipEnter(e, ev) {
+      if (!this.hasTrade(e)) return;
+      const el = ev.currentTarget;
+      clearTimeout(this.tipTimer);
+      this.tipTimer = setTimeout(() => this.openTip(e, el), this.tip ? 60 : SS_TIP_OPEN_MS);
+    },
+    tipLeave() {
+      clearTimeout(this.tipTimer);
+      this.tipTimer = setTimeout(() => { this.tip = null; }, SS_TIP_CLOSE_MS);
+    },
+    tipHold() { clearTimeout(this.tipTimer); },
+    closeTip() { clearTimeout(this.tipTimer); this.tip = null; },
+
+    /* The ⓘ on a card, for screens without hover: toggles the popover and
+     * stops there, so the card's own click (go to the section) does not fire. */
+    tipToggle(e, ev) {
+      ev.stopPropagation();
+      if (this.tip && this.tip.id === e.strategy.id) { this.closeTip(); return; }
+      this.openTip(e, ev.currentTarget.closest('.ss-mini, .ss-card'));
+    },
+
+    openTip(e, el) {
+      if (!el || !el.isConnected) return;
+      SS_TIP_ANCHOR.el = el;
+      this.tip = { id: e.strategy.id, top: -9999, left: -9999 };
+      this.$nextTick(() => this.placeTip());
+    },
+    /* Beside the card (right if it fits, else left), else below it, kept
+     * inside the window. */
+    placeTip() {
+      const pop = this.$refs.tip, el = SS_TIP_ANCHOR.el;
+      if (!pop || !this.tip || !el || !el.isConnected) return;
+      const r = el.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+      const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight, gap = 8;
+      let left = r.right + gap + w <= vw ? r.right + gap : r.left - gap - w;
+      let top = r.top;
+      if (left < gap) { left = Math.min(Math.max(gap, r.left), vw - w - gap); top = r.bottom + gap; }
+      top = Math.max(gap, Math.min(top, vh - h - gap));
+      this.tip = { id: this.tip.id, top, left };
+    },
+    /* The page scrolled: the popover follows its card while the card is on
+     * screen, and closes once it is not -- a definition beside nothing. */
+    tipScrolled() {
+      if (!this.tip) return;
+      const el = SS_TIP_ANCHOR.el;
+      const r = el && el.isConnected ? el.getBoundingClientRect() : null;
+      // Measured against the scrolling area, not the window: a card scrolled
+      // up under the top bar is off screen though still inside the window.
+      const box = el && el.closest('.ss-main') ? el.closest('.ss-main').getBoundingClientRect()
+        : { top: 0, bottom: document.documentElement.clientHeight };
+      if (!r || r.bottom <= box.top || r.top >= box.bottom) { this.closeTip(); return; }
+      this.placeTip();
+    },
+    tipEntry() { return this.tip ? this.entries().find(x => x.strategy.id === this.tip.id) || null : null; },
+    // Visibility is HERE, not x-show: x-show hides at once but shows a frame
+    // later, so a close inside that frame (a scroll, a click away) was
+    // followed by a stale show -- an empty popover left on screen. An object,
+    // too: a string :style would replace the whole attribute.
+    tipStyle() {
+      return this.tip ? { display: 'block', top: `${this.tip.top}px`, left: `${this.tip.left}px` } : { display: 'none' };
+    },
+
+    isTdOpen(e) { return !!this.tdOpen[e.strategy.id]; },
+    toggleTd(e) { this.tdOpen = { ...this.tdOpen, [e.strategy.id]: !this.tdOpen[e.strategy.id] }; },
 
     // ── layout and collapsing ───────────────────────────────────────────
     setLayout(v) {
@@ -690,6 +843,7 @@ document.addEventListener('alpine:init', () => {
       // nothing is pre-ticked.
       this.draft = { id: null, name: '', notes: '', weekdays: [], times: this.timesByDay([]),
                      display: 'calendar', image: null, imageAction: null, imagePreview: '',
+                     trade: this.draftTrade(null), tradeOpen: false,
                      states: ['TRADE', 'NO TRADE'], logic: 'and', metrics: [], manual: [] };
       this.draft.metrics.push(this.blankMetric());
       this.openPanel();
@@ -704,10 +858,82 @@ document.addEventListener('alpine:init', () => {
       s.weekdays = s.weekdays || [];
       s.times = this.timesByDay(s.entry_times);
       s.display = s.display || 'calendar';
+      s.trade = this.draftTrade(s.trade);
+      s.tradeOpen = false;      // collapsed; its summary line says what is in it
       s.imageAction = null;     // null | 'set' | 'remove' -- applied by Save, after the config
       s.imagePreview = '';
       this.draft = s;
       this.openPanel();
+    },
+
+    /* The editor's trade: every field present, numbers as input strings. */
+    draftTrade(t) {
+      const str = v => (v === null || v === undefined ? '' : String(v));
+      const lvl = l => ({ value: str(l && l.value), unit: (l && l.unit) || 'pct', basis: (l && l.basis) || '' });
+      t = t || {};
+      const ex = t.exit || {};
+      return {
+        entry_notes: t.entry_notes || '',
+        legs: (t.legs || []).map(l => ({ id: l.id, side: l.side, right: l.right, qty: str(l.qty), dte: str(l.dte),
+                                          method: l.strike.method, value: str(l.strike.value), ref: l.strike.ref || '',
+                                          note: l.note || '' })),
+        target: lvl(t.target), stop: lvl(t.stop),
+        exit: { max_dit: str(ex.max_dit), exit_dte: str(ex.exit_dte), exit_time: ex.exit_time || '', rules: ex.rules || '' },
+        management: t.management || '',
+      };
+    },
+    addLeg() {
+      this.draft.trade.legs.push({ id: 'L' + Math.random().toString(36).slice(2, 7), side: 'sell', right: 'put',
+                                   qty: '1', dte: '', method: 'delta', value: '', ref: '', note: '' });
+    },
+    removeLeg(i) { this.draft.trade.legs.splice(i, 1); },
+    moveLeg(i, dir) {
+      const L = this.draft.trade.legs, j = i + dir;
+      if (j < 0 || j >= L.length) return;
+      [L[i], L[j]] = [L[j], L[i]];       // ids move with their legs; references follow them
+    },
+    /* The legs a "same strike as" may point at: every other leg, by its
+     * current number. */
+    refOptions(leg) {
+      return this.draft.trade.legs.map((l, i) => ({ id: l.id, text: `Leg ${i + 1} · ${l.side.toUpperCase()} ${l.right} ${l.dte || '?'} DTE` }))
+        .filter(o => o.id !== leg.id);
+    },
+    /* A same-strike reference whose leg was removed (or never chosen). Shown
+     * on the leg and refused by the server -- never repointed silently. */
+    brokenRef(leg) {
+      return leg.method === 'same' && !this.draft.trade.legs.some(l => l.id === leg.ref && l.id !== leg.id);
+    },
+    /* The schedule as it stands in the editor (ticked days and their times),
+     * in the popover's words -- the trade definition reuses it, never a copy. */
+    draftEntryText() {
+      const d = this.draft, entry_times = [];
+      for (const n of d.weekdays) for (const t of d.times[n] || []) if (String(t).trim()) entry_times.push({ day: n, time: t });
+      return ssEntryText({ weekdays: d.weekdays, entry_times });
+    },
+    draftTradeSummary() {
+      const t = this.draft.trade, n = t.legs.length, parts = [];
+      if (n) parts.push(`${n} leg${n > 1 ? 's' : ''}`);
+      if (String(t.target.value).trim() || t.target.basis) parts.push('profit target');
+      if (String(t.stop.value).trim() || t.stop.basis) parts.push('stop');
+      if (t.entry_notes || t.management || Object.values(t.exit).some(v => String(v).trim())) parts.push('notes');
+      return parts.length ? parts.join(' · ') : 'none — optional, information only';
+    },
+    tradePayload() {
+      const t = this.draft.trade;
+      const num = v => (String(v).trim() === '' ? null : Number(v));
+      const lvl = l => ({ value: num(l.value), unit: l.unit, basis: l.basis });
+      return {
+        v: 1, entry_notes: t.entry_notes,
+        legs: t.legs.map(l => ({ id: l.id, side: l.side, right: l.right, qty: num(l.qty), dte: num(l.dte),
+                                 strike: { method: l.method,
+                                           value: l.method === 'delta' || l.method === 'offset' ? num(l.value) : null,
+                                           ref: l.method === 'same' ? (l.ref || null) : null },
+                                 note: l.note })),
+        target: lvl(t.target), stop: lvl(t.stop),
+        exit: { max_dit: num(t.exit.max_dit), exit_dte: num(t.exit.exit_dte), exit_time: t.exit.exit_time || null,
+                rules: t.exit.rules },
+        management: t.management,
+      };
     },
 
     addTime(n) {
@@ -806,6 +1032,7 @@ document.addEventListener('alpine:init', () => {
       }
       return {
         name: d.name, notes: d.notes, weekdays: d.weekdays, entry_times, display: d.display,
+        trade: this.tradePayload(),
         states: d.states, logic: d.logic,
         manual: d.manual,
         metrics: d.metrics.map(m => ({
@@ -819,6 +1046,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     async save() {
+      const broken = this.draft.trade.legs.findIndex(l => this.brokenRef(l));
+      if (broken >= 0) {
+        this.draft.tradeOpen = true;
+        this.saveError = `Leg ${broken + 1} is set to the same strike as a leg that no longer exists — choose another leg or another method.`;
+        return;
+      }
       this.saving = true;
       this.saveError = '';
       try {
