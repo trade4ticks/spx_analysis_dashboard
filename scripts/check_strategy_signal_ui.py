@@ -323,8 +323,21 @@ try { localStorage.setItem('ss.layout', JSON.stringify('two'));
     eq('mini card shows its thumbnail', cell(3, 1).querySelectorAll('.ss-mini')[1].querySelector('img').getAttribute('src'),
        '/api/strategy-signal/strategies/5/image?size=thumb&v=1790812900000');
     eq('no image → no img', cell(3, 1).querySelectorAll('.ss-mini')[0].querySelector('img'), null);
-    eq('section heading links the full image', secOf(1).querySelector('.ss-sec-hdr a').getAttribute('href'),
+    eq('section image links the full image', secOf(1).querySelector('.ss-why-line a').getAttribute('href'),
        '/api/strategy-signal/strategies/1/image?size=full&v=1790812800000');
+    eq('no image in the section heading', secOf(1).querySelector('.ss-sec-hdr img'), null);
+    {
+      const si = secOf(1).querySelector('.ss-why-line img').getBoundingClientRect();
+      const wy = secOf(1).querySelector('.ss-why-line .ss-why').getBoundingClientRect();
+      const body = secOf(1).querySelector('.ss-sec-body').getBoundingClientRect();
+      const mi = cell(3, 1).querySelectorAll('.ss-mini')[1].querySelector('img').getBoundingClientRect();
+      eq('section image is the mini card image size (144 × 44, mini at its widest)',
+         [Math.round(si.width), Math.round(si.height), Math.round(mi.height), mi.width <= 144.5], [144, 44, 44, true]);
+      eq('image first, on the body\'s left edge; conditions beside it on the same row',
+         [Math.abs(si.left - body.left - 12) < 1.5, wy.left >= si.right, Math.abs(wy.top - si.top) < 1.5], [true, true, true]);
+      const wn = secOf(2).querySelector('.ss-why').getBoundingClientRect(), bn = secOf(2).querySelector('.ss-sec-body').getBoundingClientRect();
+      eq('without an image the conditions box keeps the full width', Math.abs(wn.left - bn.left - 12) < 1.5, true);
+    }
     const sImg = $$('.ss-side .ss-card')[0].querySelector('img');
     eq('thumbnail keeps its aspect ratio', getComputedStyle(sImg).objectFit, 'contain');
 

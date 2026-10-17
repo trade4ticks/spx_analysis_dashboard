@@ -100,7 +100,12 @@
     .ss-sec-body { padding:12px; }
     .ss-sec.closed .ss-sec-hdr { border-bottom:0; border-radius:8px; }
     .ss-fold { width:18px; text-align:center; }
-    .ss-sec-img { height:28px; max-width:90px; object-fit:contain; border-radius:3px; background:#1f1f1f; }
+    /* The risk graph beside the checklist: the box a calendar mini card's
+       image gets at its widest (150px card less its padding, 44px tall). */
+    .ss-why-line { display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }
+    .ss-why-line .ss-why { flex:1; min-width:0; margin-bottom:0; }
+    .ss-sec-imglink { flex:none; display:block; }
+    .ss-sec-img { width:144px; height:44px; object-fit:contain; display:block; border-radius:3px; background:#1f1f1f; }
     .ss-sched { font-size:10.5px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
     /* Two columns: row-major in strategy order; one column below 1300px.
        Charts take a narrower minimum so a half-width section keeps two. */
@@ -505,10 +510,6 @@
           <button class="ss-x ss-fold" @click="toggleCollapse(e)" :title="isCollapsed(e) ? 'Expand' : 'Collapse'"
                   x-text="isCollapsed(e) ? '▸' : '▾'"></button>
           <span class="ss-sec-name" x-text="e.strategy.name"></span>
-          <template x-if="e.strategy.image">
-            <a :href="imageUrl(e.strategy, 'full')" target="_blank" rel="noopener" title="Risk graph — open full size">
-              <img class="ss-sec-img" :src="imageUrl(e.strategy, 'thumb')" loading="lazy" alt="risk graph"></a>
-          </template>
           <span class="ss-pill small" :class="stateIndex(e) === null && 'nodata'"
                 :style="'background:' + color(e)" x-text="stateLabel(e)"></span>
           <span class="ss-reason" x-text="reason(e)"></span>
@@ -522,7 +523,15 @@
         </div>
         <div class="ss-sec-body" x-show="!isCollapsed(e)">
           <!-- WHY: every input to the decision, its value, what it needs,
-               and whether it passed. The verdict alone cannot be checked. -->
+               and whether it passed. The verdict alone cannot be checked.
+               The risk graph, when there is one, leads the row at the
+               calendar mini card's size; the checklist takes the rest. -->
+          <div class="ss-why-line">
+          <template x-if="e.strategy.image">
+            <a class="ss-sec-imglink" :href="imageUrl(e.strategy, 'full')" target="_blank" rel="noopener"
+               title="Risk graph — open full size">
+              <img class="ss-sec-img" :src="imageUrl(e.strategy, 'thumb')" loading="lazy" alt="risk graph"></a>
+          </template>
           <div class="ss-why">
             <template x-for="(row, ri) in whyRows(e)" :key="ri">
               <div class="ss-why-row">
@@ -539,6 +548,7 @@
               </div>
             </template>
             <div class="ss-why-sum" x-text="summaryLine(e)"></div>
+          </div>
           </div>
           <template x-if="e.strategy.manual.length">
             <div class="ss-manual" :class="!showManual(e) && 'quiet'">
