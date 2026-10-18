@@ -226,7 +226,11 @@ def combine(parsed: list[tuple[str, pd.DataFrame]]) -> tuple[pd.DataFrame, dict 
             keys = tuple(k for _, k in cols)
             values = []
             for col, key in cols:
-                v = [clean_value(x) for x in df[col].tolist()]
+                # Each distinct cell cleaned once (an MCP file repeats a
+                # handful of values over thousands of rows).
+                codes, uniq = pd.factorize(df[col], use_na_sentinel=False)
+                cu = [clean_value(u) for u in uniq]
+                v = [cu[k] for k in codes.tolist()]
                 blank = sum(1 for x in v if x is None)
                 if blank:
                     raise SweepError(f'{filename}: {blank} of {len(v)} rows have no value in "{col}", '
@@ -284,7 +288,8 @@ def combine(parsed: list[tuple[str, pd.DataFrame]]) -> tuple[pd.DataFrame, dict 
     frames, n_of = [], Counter()
     for filename, df, keys, rows, report in per_file:
         pos = [keys.index(k) for k in params]
-        ids = [vid[tuple(r[p] for p in pos)] for r in rows]
+        id_of = {r: vid[tuple(r[p] for p in pos)] for r in dict.fromkeys(rows)}
+        ids = [id_of[r] for r in rows]
         n_of.update(ids)
         report["variant_ids"] = sorted(set(ids))
         f = df.drop(columns=report.get("columns") or []).copy()

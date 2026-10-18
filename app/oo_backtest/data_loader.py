@@ -197,12 +197,12 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
     """
     contents = _decode_upload_contents(contents)
 
-    # Read CSV
-    df = pd.read_csv(io.StringIO(contents), sep="\t")
-
-    # If tab-separated didn't work, try comma
-    if len(df.columns) <= 1:
-        df = pd.read_csv(io.StringIO(contents), sep=",")
+    # Tab-separated if the header line has a tab, else comma. This is what
+    # "read as tab; if that gives one column, read again as comma" decided,
+    # in one read instead of two -- the second read was half of parsing a
+    # 75-file sweep.
+    header = contents.split("\n", 1)[0]
+    df = pd.read_csv(io.StringIO(contents), sep="\t" if len(header.split("\t")) > 1 else ",")
 
     # Rename columns -- by the format the header says this is.
     fmt = csv_format(df.columns)

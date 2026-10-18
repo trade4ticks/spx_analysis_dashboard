@@ -142,6 +142,38 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   every bin lookup went through Alpine's proxy — `renderSections` passes
   `Alpine.raw` copies. Any per-trade loop over a registry object needs the
   raw object.
+- **Scatter tails (2026-10-18, the user's ask).** Above `OB_SCATTER_MAX`
+  the sample ALWAYS holds the `OB_SCATTER_TAIL` (200) highest and lowest
+  P/L, then every k-th of the rest up to the cap (`obScatterPick`; edges by
+  quickselect, `obKth` — a full sort was 40 ms a scatter; ties at an edge
+  filled in trade order). Outlier hunting is half of why a scatter is read;
+  a 2% stride missed nearly every extreme. The title says so. No custom
+  canvas renderer, by decision.
+- **The VPS load time (2026-10-18).** The user's VPS timings at P2: 75 MCP
+  files, shared entries, 45 s server-side (join + payload 32 s); random
+  entries 53 s; plus ~5 MB each way. The hypothesis was a per-trade SQL
+  lookup — it was not: `ENTRY_BAR_SQL` always ran once per DISTINCT (date,
+  time) (3,167 keys, 0.08 s). The repetition was in PYTHON, per trade,
+  over values that belong to the day or the bar. Now computed once per
+  distinct date / bar / value and broadcast: `apply_market` (factorize +
+  `_broadcast`, assigning a plain list so pandas infers the same dtype),
+  `entry_dates`, `entry_bar_requests`' counts, `entry_bar_report` (distinct
+  pairs), `null_reasons` (null rows only), `trades_to_payload` (numeric
+  columns vectorised in `_numbers`, dates/text factorised, the FRAME
+  reordered before conversion), `sweep.combine`, the CSV read ONCE (the
+  separator from the header line; it used to read every file twice), the
+  calendar (`_sched` slices one 1990..+2y schedule built once per process,
+  vectorised; 300 random spans equal a direct build), and **orjson** for
+  the response (0.24 s vs 2.3 s for 85 MB; requirements, SOFT — without it
+  the stdlib encodes, slower, with a warning). **Verified byte-identical**:
+  payloads from the old and new code on one database (75 MCP files, 20
+  random-entry files, a tab-separated file of awkward times/dates, the real
+  MesoSim fixture) differ only in the rollup's own build time. Locally the
+  server side went 22.6 s → 6.9 s (3.3×); the VPS number is the user's to
+  measure. `measure_sweep_parse.py` prints data-gap warnings in their own
+  block AFTER the timings and ends PASS/OVER against `--budget` (20 s),
+  exit 1 when over — the known 2026 ingestion gaps must not mask a timing
+  regression.
 - **Surface ranking memory.** `/surface/rank` no longer builds trades × 452
   (~870 MB at 240k): `entry_matrix_gathered` returns the distinct bars +
   a per-trade index, `correlations_gathered` materialises at most

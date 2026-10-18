@@ -46,11 +46,63 @@ const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: 
 
 /* A scatter draws at most this many points. A 240,000-trade sweep drew all of
  * them in every section on every filter change: 16 s of Chart.js per
- * recompute, against 3 ms to filter. Above it every k-th point is drawn
- * (k = ceil(n / max), in trade order) and the section says so; the fitted
- * line always uses every point. Every single log seen so far is below it. */
+ * recompute, against 3 ms to filter. Every single log seen so far is below
+ * the cap and draws every point.
+ *
+ * Above it the sample ALWAYS holds the OB_SCATTER_TAIL highest and lowest
+ * P/L -- outlier hunting is half of why the scatter is looked at, and a 2%
+ * stride would miss nearly every extreme trade -- plus every k-th of the
+ * rest, in trade order, up to the cap. The fitted line always uses every
+ * point, and the section title says what was drawn. */
 const OB_SCATTER_MAX = 5000;
-function obScatterStride(n) { return n > OB_SCATTER_MAX ? Math.ceil(n / OB_SCATTER_MAX) : 1; }
+const OB_SCATTER_TAIL = 200;
+
+/* Indices into ys to draw: all of them under the cap; else the tails plus a
+ * stride. Returns { pick, stride } (stride 1 = everything). Ties at a tail's
+ * edge are taken in trade order until the tail is full. */
+/* The k-th smallest of a (0-based), rearranging a: quickselect, linear on
+ * average. A full sort for two order statistics was 40 ms a scatter. */
+function obKth(a, k) {
+  let lo = 0, hi = a.length - 1;
+  while (hi > lo) {
+    const pivot = a[(lo + hi) >> 1];
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+  }
+  return a[k];
+}
+
+function obScatterPick(ys) {
+  const n = ys.length;
+  if (n <= OB_SCATTER_MAX) return { pick: null, stride: 1 };
+  const work = Float64Array.from(ys);
+  const loEdge = obKth(work, OB_SCATTER_TAIL - 1), hiEdge = obKth(work, n - OB_SCATTER_TAIL);
+  let below = 0, above = 0;
+  for (let i = 0; i < n; i++) { if (ys[i] < loEdge) below++; else if (ys[i] > hiEdge) above++; }
+  let loEq = OB_SCATTER_TAIL - below;          // ties allowed at the low edge
+  let hiEq = OB_SCATTER_TAIL - above;          // ties allowed at the high edge
+  const tail = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const y = ys[i];
+    if (y < loEdge || (y === loEdge && loEq-- > 0)) tail[i] = 1;
+    else if (y > hiEdge || (y === hiEdge && hiEq-- > 0)) tail[i] = 1;
+  }
+  let tails = 0;
+  for (let i = 0; i < n; i++) tails += tail[i];
+  const stride = Math.ceil((n - tails) / Math.max(1, OB_SCATTER_MAX - tails));
+  const pick = [];
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    if (tail[i]) pick.push(i);
+    else if (k++ % stride === 0) pick.push(i);
+  }
+  return { pick, stride };
+}
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
 const OB_CHARTS = { cum: null, dd: null, deploy: null, rank: null, rankAxis: null, sec: {} };
 const OB_DEFAULT_CAPITAL = 10000;
@@ -2088,8 +2140,10 @@ document.addEventListener('alpine:init', () => {
 
     scatterNote(m) {
       const s = this.sections[m.key];
-      const k = s ? obScatterStride(s.valued) : 1;
-      return k > 1 ? `· every ${k}th of ${s.valued.toLocaleString()} points drawn; the line fits all` : '';
+      if (!s || !s.scatter || s.scatter.stride <= 1) return '';
+      const sc = s.scatter;
+      return `· ${sc.drawn.toLocaleString()} of ${s.valued.toLocaleString()} points drawn: the ${OB_SCATTER_TAIL} best and ` +
+             `${OB_SCATTER_TAIL} worst P/L always, every ${sc.stride}th of the rest; the line fits all`;
     },
 
     totalTitle(m) { return 'Total P/L by ' + this.binNoun(m) + (this.vk > 1 ? ' · mean per variant' : ''); },
@@ -2118,7 +2172,8 @@ document.addEventListener('alpine:init', () => {
         const d = obSectionData(OB_DATA.columns, rowIdx, mm, this.metricColumn(m));
         const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
         sections[m.key] = { valued: d.valued, bins: d.rows.filter(r => r.count).length, fit };
-        if (d.valued) this.drawSection(m, d, fit);
+        // drawSection says what its scatter drew (the sample), for the title.
+        if (d.valued) sections[m.key].scatter = this.drawSection(m, d, fit) || null;
       }
       this.sections = sections;
     },
@@ -2165,12 +2220,14 @@ document.addEventListener('alpine:init', () => {
       if (!m.hasScatter) return;
 
       const cols = OB_DATA.columns;
-      const stride = obScatterStride(d.xs.length);
+      const { pick, stride } = obScatterPick(d.ys);
       // Profit and loss as TWO datasets of one colour each, not one with a
       // colour per point: an indexable colour stops Chart.js sharing point
       // options, and resolving them per point was most of a scatter's cost.
       const pos = [], neg = [];
-      for (let k = 0; k < d.xs.length; k += stride) (d.ys[k] >= 0 ? pos : neg).push({ x: d.xs[k], y: d.ys[k], row: d.rowsIdx[k] });
+      const put = k => (d.ys[k] >= 0 ? pos : neg).push({ x: d.xs[k], y: d.ys[k], row: d.rowsIdx[k] });
+      if (pick) pick.forEach(put); else for (let k = 0; k < d.xs.length; k++) put(k);
+
       let lo = Infinity, hi = -Infinity;
       for (const x of d.xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
       const line = fit ? [{ x: lo, y: fit.intercept + fit.slope * lo }, { x: hi, y: fit.intercept + fit.slope * hi }] : [];
@@ -2196,6 +2253,7 @@ document.addEventListener('alpine:init', () => {
                                              label: it => `${m.label} ${obFmt(it.raw.x, m.format)} · P/L ${obMoney(it.raw.y)}` } } },
         },
       });
+      return { stride, drawn: pos.length + neg.length };
     },
 
     /* Create a section chart, or update it in place. A canvas Alpine has

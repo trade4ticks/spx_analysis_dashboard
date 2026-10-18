@@ -189,6 +189,28 @@ window.addEventListener('load', () => setTimeout(async () => {
     await until(() => c.registry.length > 0);
     ok('the file input takes several files', document.querySelector('.ob-drop input[type=file]').multiple, true);
 
+    // ── the scatter sample keeps the extremes ───────────────────────────
+    {
+      let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+      const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+      ok('under the cap every point is drawn', obScatterPick(Array.from({ length: 4000 }, gauss)).pick, null);
+      const ys = Array.from({ length: 240000 }, () => Math.round(gauss() * 40000) / 100);
+      const r = obScatterPick(ys);
+      const byY = ys.map((y, i) => [y, i]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const want = new Set([...byY.slice(0, 200), ...byY.slice(-200)].map(p => p[1]));
+      const got = new Set(r.pick);
+      ok('240,000 points: at most 5,000 drawn, every one of the 200 best and 200 worst among them',
+         [r.pick.length <= 5000, r.stride > 1, [...want].every(i => got.has(i))], [true, true, true]);
+      // Heavy ties at both edges: each tail is still exactly 200, ties in trade order.
+      const tied = Array.from({ length: 240000 }, (_, i) => (i % 1000 === 0 ? 9 : i % 997 === 0 ? -9 : 0));
+      const t = obScatterPick(tied);
+      // (Ties past the first 200 are ordinary points and may be drawn by the stride too.)
+      const tset = new Set(t.pick);
+      const firstOf = v => tied.map((y, i) => [y, i]).filter(p => p[0] === v).slice(0, 200).map(p => p[1]);
+      ok('ties at the tail edges: the first 200 of the highest and of the lowest, in trade order, all drawn',
+         [firstOf(9).every(i => tset.has(i)), firstOf(-9).every(i => tset.has(i)), t.pick.length <= 5000], [true, true, true]);
+    }
+
     // ── one request, every file, gzipped ────────────────────────────────
     drop(FIX.names);
     ok('the sweep loads', await until(() => c.loaded && !!c.sweep && c.filteredCount > 0), true);

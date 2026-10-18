@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 # Columnar: {name: [values]}. A few thousand rows of ~20 columns is small
@@ -67,30 +68,95 @@ def _num(v):
     return None if math.isnan(f) or math.isinf(f) else f
 
 
+def _dates_iso(s: pd.Series) -> list:
+    """'YYYY-MM-DD' per value, None where not a date; one strftime per
+    distinct date."""
+    d = pd.to_datetime(s, errors="coerce")
+    codes, uniq = pd.factorize(d)                    # NaT -> -1
+    out = np.empty(len(uniq) + 1, dtype=object)
+    out[:-1] = [x.strftime("%Y-%m-%d") for x in uniq]
+    out[-1] = None
+    return out[codes].tolist()
+
+
+def _numbers(s: pd.Series) -> list | None:
+    """_num over a NUMERIC column, vectorised: the same floats, None where
+    NaN or infinite. None (use the per-value path) for any other dtype."""
+    if s.dtype.kind not in "fiub":
+        return None
+    arr = s.to_numpy(dtype=float, na_value=np.nan)
+    out = arr.tolist()
+    for i in np.flatnonzero(~np.isfinite(arr)).tolist():
+        out[i] = None
+    return out
+
+
+def _by_value(s: pd.Series, f) -> list:
+    """f(x) for every x, computed once per distinct value. A sweep repeats
+    every text and date value once per variant."""
+    memo: dict = {}
+    out = []
+    for x in s.tolist():
+        k = (type(x), x if isinstance(x, str) else repr(x))
+        if k not in memo:
+            memo[k] = f(x)
+        out.append(memo[k])
+    return out
+
+
+def _text(x):
+    return None if (x is None or (isinstance(x, float) and math.isnan(x))) else str(x)
+
+
+def _texts(s: pd.Series) -> list:
+    """_text over a column. A column of strings (and missing values) is
+    factorised -- one _text per distinct value, mapped back in C; anything
+    else takes the per-value memo, where 1 and 1.0 stay distinct."""
+    # pandas 3 reads text as its own `str` dtype, not object.
+    strings = (pd.api.types.is_string_dtype(s) if s.dtype != object
+               else pd.api.types.infer_dtype(s, skipna=True) in ("string", "empty"))
+    if strings:
+        codes, uniq = pd.factorize(s, use_na_sentinel=True)          # missing -> -1
+        out = np.empty(len(uniq) + 1, dtype=object)
+        out[:-1] = [_text(u) for u in uniq]
+        out[-1] = None
+        return out[codes].tolist()
+    return _by_value(s, _text)
+
+
 def trades_to_payload(df: pd.DataFrame) -> dict:
+    # Every column below gives exactly what the per-value comprehension it
+    # replaced gave; only the work is shared. A 240,000-trade sweep spent
+    # 3.7 s here, against a tunnel that ends the request at 100 s.
+    # Order by open date and time FIRST, so cumulative P/L and drawdown read
+    # left to right without the client re-sorting -- stable, so ties keep
+    # file order. Taking the frame in that order is one numpy take per
+    # column; reordering the finished lists was 0.4 s of a sweep.
+    n = len(df)
+    d_key = _dates_iso(df["date_opened"]) if "date_opened" in df.columns else [None] * n
+    t_key = _texts(df["time_opened"]) if "time_opened" in df.columns else [None] * n
+    keys = pd.DataFrame({"d": [d or "" for d in d_key], "t": [t or "" for t in t_key]})
+    order = keys.sort_values(["d", "t"], kind="mergesort").index.to_numpy()
+    if n > 1 and not np.array_equal(order, np.arange(n)):
+        df = df.iloc[order]
+
     cols: dict[str, list] = {}
     for c in [c for c in TRADE_COLUMNS if c in df.columns]:
         s = df[c]
         if c in DATE_COLUMNS:
-            d = pd.to_datetime(s, errors="coerce")
-            cols[c] = [None if pd.isna(x) else x.strftime("%Y-%m-%d") for x in d]
+            cols[c] = _dates_iso(s)
         elif c in TEXT_COLUMNS:
-            cols[c] = [None if (x is None or (isinstance(x, float) and math.isnan(x))) else str(x)
-                       for x in s]
+            cols[c] = _texts(s)
         elif c == "is_win":
             cols[c] = [bool(x) for x in s]
         elif c in INT_COLUMNS:
-            cols[c] = [None if _num(x) is None else int(x) for x in s]
+            nums = _numbers(s)
+            cols[c] = ([None if v is None else int(v) for v in nums] if nums is not None
+                       else [None if _num(x) is None else int(x) for x in s])
         else:
-            cols[c] = [_num(x) for x in s]
+            nums = _numbers(s)
+            cols[c] = nums if nums is not None else [_num(x) for x in s]
 
-    # Order by open date and time so cumulative P/L and drawdown read left to
-    # right without the client re-sorting. Stable, so ties keep file order.
-    n = len(df)
-    times = cols.get("time_opened") or [None] * n
-    order = sorted(range(n), key=lambda i: (cols["date_opened"][i] or "", times[i] or "", i))
-    if order != list(range(n)):
-        cols = {k: [v[i] for i in order] for k, v in cols.items()}
 
     opened = [d for d in cols["date_opened"] if d]
     closed = [d for d in cols["date_closed"] if d]

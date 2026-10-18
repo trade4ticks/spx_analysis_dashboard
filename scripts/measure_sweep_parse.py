@@ -19,6 +19,14 @@ synthetic Option Omega CSVs and prints each stage.
                          param_delta / param_pt columns, ~2% isIgnored: the
                          files a real sweep arrives as (default)
   --format site          the website CSV export, variants in the filenames
+  --budget S             the server-side total this load must stay under
+                         (default 20 s); over it, the script ends "OVER" and
+                         exits 1, so a regression is a result, not a mood
+
+DATA GAPS ARE NOT TIMINGS. The market join logs what index_ohlc is missing
+(e.g. SPX on 2026-04-08, VIX for most of May-June 2026). Those warnings are
+collected and printed once, in their own block, AFTER the timings -- they
+are an ingestion matter, and the verdict line below them is about speed.
 
     sudo -u gates .venv/bin/python scripts/measure_sweep_parse.py
     sudo -u gates .venv/bin/python scripts/measure_sweep_parse.py --entries random
@@ -80,7 +88,20 @@ async def main() -> int:
     ap.add_argument("--trades", type=int, default=3200)
     ap.add_argument("--entries", choices=("shared", "random"), default="shared")
     ap.add_argument("--format", choices=("mcp", "site"), default="mcp")
+    ap.add_argument("--budget", type=float, default=20.0)
     args = ap.parse_args()
+
+    # The join's data-gap warnings, held back from the timings (see above).
+    import logging
+    gaps: list[str] = []
+
+    class _Gaps(logging.Handler):
+        def emit(self, record):
+            gaps.append(record.getMessage())
+    for name in ("app.oo_backtest.market", "app.oo_backtest"):
+        lg = logging.getLogger(name)
+        lg.addHandler(_Gaps(level=logging.WARNING))
+        lg.propagate = False
 
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
@@ -116,6 +137,7 @@ async def main() -> int:
         await market.get_daily(pool)
         t1 = time.monotonic()
         print(f"daily rollup, cold          {t1 - t0:6.2f} s  (once per process, then cached)")
+        totals = []
         for run in ("first", "second"):
             t0 = time.monotonic()
             read = [(n, gzip.decompress(z)) for n, z in parts]
@@ -131,13 +153,24 @@ async def main() -> int:
             print(f"  join + payload            {tm['join_payload_s']:6.2f} s  "
                   f"(market joined: {payload['market'].get('joined')})")
             print(f"  encode + gzip             {t3 - t2:6.2f} s  ({len(resp.body) / 1e6:.1f} MB response)")
+            totals.append(t3 - t0)
             print(f"  SERVER TOTAL              {t3 - t0:6.2f} s  of the tunnel's 100 s "
                   f"({payload['n']:,} trades, {len(payload['sweep']['variants'])} variants)")
     finally:
         await pool.close()
     print("Upload and download time over your connection come on top: the request is the size above, "
           "the response the size printed.")
-    return 0
+    if gaps:
+        print()
+        print("Data gaps the market join reported (index_ohlc ingestion -- NOT part of the timing):")
+        for g in dict.fromkeys(gaps):
+            print("  - " + g.replace("oo-backtest: ", "")[:240])
+    best = min(totals)
+    print()
+    ok = best <= args.budget
+    print(f"{'PASS' if ok else 'OVER'}: best server total {best:.2f} s against a budget of {args.budget:.0f} s "
+          f"({args.files} {args.format} files, entries {args.entries})")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -68,6 +68,7 @@ import re
 import time as _time
 from datetime import date, datetime, time, timedelta
 
+import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
@@ -633,6 +634,16 @@ def normalize_entry_time(v) -> str | None:
     return None
 
 
+def entry_dates(df: pd.DataFrame) -> pd.Series:
+    """pd.to_datetime(df["date_opened"]).dt.date, converted once per DISTINCT
+    date: a sweep repeats each entry date once per variant, and making a
+    Python date per trade was paid in four places per load."""
+    d = pd.to_datetime(df["date_opened"])
+    codes, uniq = pd.factorize(d, use_na_sentinel=False)
+    as_date = pd.Series(uniq).dt.date.to_numpy(dtype=object)
+    return pd.Series(as_date[codes], index=df.index)
+
+
 def entry_bar_requests(df: pd.DataFrame) -> tuple[list[date], list[time], pd.Series, dict]:
     """The distinct (date, time) pairs to look up, each trade's key, and coverage.
 
@@ -652,17 +663,17 @@ def entry_bar_requests(df: pd.DataFrame) -> tuple[list[date], list[time], pd.Ser
     norm = raw.map(_norm)
     found = int(norm.notna().sum())
     used = norm.fillna(SESSION_OPEN.strftime("%H:%M:%S"))
-    dates = pd.to_datetime(df["date_opened"]).dt.date
+    dates = entry_dates(df)
     keys = pd.Series(list(zip(dates, used)), index=df.index)
     distinct = sorted(set(keys))
-    tod_of = {t: time.fromisoformat(t) for t in set(norm.dropna())}
-    tod = [tod_of[t] for t in norm.dropna()]
+    per_time = norm.value_counts()                    # distinct entry time -> trades
+    tod_of = {t: time.fromisoformat(t) for t in per_time.index}
     info = {
         "entry_time_found": found,
         "trades": int(len(df)),
         "entry_time_fallback_0930": int(len(df) - found),
-        "before_open": sum(1 for t in tod if t < SESSION_OPEN),
-        "after_close": sum(1 for t in tod if t > time(16, 0)),
+        "before_open": int(sum(n for t, n in per_time.items() if tod_of[t] < SESSION_OPEN)),
+        "after_close": int(sum(n for t, n in per_time.items() if tod_of[t] > time(16, 0))),
     }
     return [d for d, _ in distinct], [time.fromisoformat(t) for _, t in distinct], keys, info
 
@@ -676,37 +687,59 @@ def _pct(a, b):
         return None
 
 
+def _broadcast(per_unique: list, codes) -> list:
+    """per_unique[codes[i]] for every trade, as a plain list -- assigned to a
+    column exactly as the per-trade list comprehension it replaces was, so
+    pandas infers the same dtype from the same values."""
+    arr = np.empty(len(per_unique), dtype=object)
+    arr[:] = per_unique
+    return arr[codes].tolist()
+
+
 def apply_market(df: pd.DataFrame, daily: pd.DataFrame, entry_rows: list[dict], keys: pd.Series) -> pd.DataFrame:
-    """Join the rollup (by entry date) and the entry bars (by entry date+time)."""
+    """Join the rollup (by entry date) and the entry bars (by entry date+time).
+
+    COMPUTED ONCE PER DISTINCT DATE AND PER DISTINCT ENTRY BAR, then given to
+    every trade that shares it. Everything here is a fact about the day or the
+    bar, never about the trade; a parameter sweep repeats each entry once per
+    variant, and doing it per trade was most of a 240,000-trade load. The SQL
+    was always per distinct bar (entry_bar_requests)."""
     df = df.copy()
-    dates = pd.to_datetime(df["date_opened"]).dt.date
+    dates = entry_dates(df)
 
     by_date = {r["trade_date"]: r for r in daily.to_dict("records")} if not daily.empty else {}
-    get = lambda col: [by_date.get(d, {}).get(col) for d in dates]   # noqa: E731
+    d_codes, d_uniq = pd.factorize(dates, use_na_sentinel=False)
+    day = [by_date.get(d, {}) for d in d_uniq]
+    get = lambda col: [r.get(col) for r in day]   # noqa: E731
 
     # Gaps are a property of the DAY: 09:30 open vs the previous row's close.
-    df["gap"] = [_pct(o, p) for o, p in zip(get("spx_open"), get("spx_prev_close"))]
-    df["vix_overnight_gap"] = [_pct(o, p) for o, p in zip(get("vix_open"), get("vix_prev_close"))]
+    df["gap"] = _broadcast([_pct(o, p) for o, p in zip(get("spx_open"), get("spx_prev_close"))], d_codes)
+    df["vix_overnight_gap"] = _broadcast([_pct(o, p) for o, p in zip(get("vix_open"), get("vix_prev_close"))], d_codes)
 
     # Daily-close ratios: the source app's basis, kept for comparison only.
     vix_c, v3m_c, v9d_c = get("vix_close"), get("vix3m_close"), get("vix9d_close")
-    df["vix3m_vix_ratio_close"] = [_ratio(a, b) for a, b in zip(v3m_c, vix_c)]
-    df["vix_vix9d_ratio_close"] = [_ratio(a, b) for a, b in zip(vix_c, v9d_c)]
+    df["vix3m_vix_ratio_close"] = _broadcast([_ratio(a, b) for a, b in zip(v3m_c, vix_c)], d_codes)
+    df["vix_vix9d_ratio_close"] = _broadcast([_ratio(a, b) for a, b in zip(vix_c, v9d_c)], d_codes)
 
     by_key = {(r["trade_date"], r["entry_time"].strftime("%H:%M:%S")): r for r in entry_rows}
-    # Each distinct entry bar's times formatted once, not once per trade.
-    bar_str = {k: {s: (r[f"{s}_bar_time"].strftime("%H:%M:%S") if r.get(f"{s}_bar_time") else None)
-                   for s in _LEVEL_SERIES} for k, r in by_key.items()}
-    ent = [by_key.get(k, {}) for k in keys]
-    ent_str = [bar_str.get(k, {}) for k in keys]
+    # A key carries its own date (entry_bar_requests builds it from `dates`).
+    k_codes, k_uniq = pd.factorize(keys, use_na_sentinel=False)
+    levels = {}
     for s in _LEVEL_SERIES:
         # A bar on a day this series has no SESSION is an artifact (the VIX
         # holiday rows): the level is null, never that bar's price.
-        in_session = [bool(by_date.get(d, {}).get(f"{s}_session")) for d in dates]
-        df[f"{s}_level"] = [_float(r.get(f"{s}_entry")) if ok else None for r, ok in zip(ent, in_session)]
-        df[f"{s}_bar_time"] = [r.get(s) if ok else None for r, ok in zip(ent_str, in_session)]
-    df["vix3m_vix_ratio_entry"] = [_ratio(a, b) for a, b in zip(df["vix3m_level"], df["vix_level"])]
-    df["vix_vix9d_ratio_entry"] = [_ratio(a, b) for a, b in zip(df["vix_level"], df["vix9d_level"])]
+        lv, bt = [], []
+        for k in k_uniq:
+            r = by_key.get(k, {})
+            ok = bool(by_date.get(k[0], {}).get(f"{s}_session"))
+            lv.append(_float(r.get(f"{s}_entry")) if ok else None)
+            t = r.get(f"{s}_bar_time")
+            bt.append(t.strftime("%H:%M:%S") if ok and t else None)
+        levels[s] = lv
+        df[f"{s}_level"] = _broadcast(lv, k_codes)
+        df[f"{s}_bar_time"] = _broadcast(bt, k_codes)
+    df["vix3m_vix_ratio_entry"] = _broadcast([_ratio(a, b) for a, b in zip(levels["vix3m"], levels["vix"])], k_codes)
+    df["vix_vix9d_ratio_entry"] = _broadcast([_ratio(a, b) for a, b in zip(levels["vix"], levels["vix9d"])], k_codes)
     return df
 
 
@@ -727,13 +760,16 @@ def entry_bar_report(df: pd.DataFrame, keys: pd.Series) -> dict:
     """How the entry join landed: null levels, and bars earlier than the entry's
     own 5-minute bar (a NaN on the entry bar pushed it back)."""
     out = {}
-    own = [(_floor5(t)) for _, t in keys]
+    floors: dict = {}
+    own = [floors[t] if t in floors else floors.setdefault(t, _floor5(t)) for _, t in keys]
     for s in _LEVEL_SERIES:
-        bt = df[f"{s}_bar_time"].tolist()
+        # Counted over the distinct (bar, own bar) pairs: a sweep repeats each
+        # entry once per variant.
+        pairs = pd.DataFrame({"b": df[f"{s}_bar_time"].tolist(), "o": own}).value_counts(dropna=False)
         out[s] = {
             "null": int(df[f"{s}_level"].isna().sum()),
             # A missing bar arrives as NaN once it has been through a DataFrame.
-            "earlier_than_entry_bar": sum(1 for b, o in zip(bt, own) if isinstance(b, str) and b < o),
+            "earlier_than_entry_bar": int(sum(n for (b, o), n in pairs.items() if isinstance(b, str) and b < o)),
         }
     return out
 
@@ -752,7 +788,7 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
     """For every null gap and every null VIX-family level: the reason, counted,
     with the trades listed (up to 25 per series)."""
     by_date = {r["trade_date"]: r for r in daily.to_dict("records")} if not daily.empty else {}
-    dates = pd.to_datetime(df["date_opened"]).dt.date.tolist()
+    dates = entry_dates(df).tolist()
     out: dict = {}
 
     def no_session(r, s):
@@ -765,11 +801,19 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
         return (f"{s.upper()} has {what} on this exchange session "
                 f"(short by more than {_TOL})")
 
+    # Only the NULL rows are visited (in row order, so the counts and the
+    # first-25 samples are what a full pass gave): a 240,000-trade sweep has
+    # few, and testing every row was most of this function's time.
+    def nulls(col):
+        c = df[col]
+        if c.dtype.kind == "f":                       # a float column is null exactly where it is NaN
+            return np.flatnonzero(c.isna().to_numpy()).tolist()
+        return [i for i, v in enumerate(c.tolist()) if _float(v) is None]
+
     for name, col, s in (("spx_gap", "gap", "spx"), ("vix_gap", "vix_overnight_gap", "vix")):
         counts, sample = {}, []
-        for i, (d, v) in enumerate(zip(dates, df[col])):
-            if _float(v) is not None:
-                continue
+        for i in nulls(col):
+            d = dates[i]
             r = by_date.get(d)
             if r is None:
                 why = "entry date is not an exchange session (the market was shut)"
@@ -789,9 +833,9 @@ def null_reasons(df: pd.DataFrame, daily: pd.DataFrame, keys: pd.Series, coverag
     for s in _LEVEL_SERIES:
         counts, sample = {}, []
         first = coverage.get(s)
-        for i, (d, (kd, hms), v) in enumerate(zip(dates, keys, df[f"{s}_level"])):
-            if _float(v) is not None:
-                continue
+        key_list = keys.tolist()
+        for i in nulls(f"{s}_level"):
+            d, (kd, hms) = dates[i], key_list[i]
             if time.fromisoformat(hms) < SESSION_OPEN:
                 why = "entry before 09:30"
             elif first and d.isoformat() < first:
@@ -849,7 +893,7 @@ async def join_market(pool, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                  for name, col in (("spx", "gap"), ("vix", "vix_overnight_gap"))},
         # Entry dates the table has no session for: before coverage, or a
         # date that is not a trading day at all (a timezone slip can do that).
-        "trades_without_daily_row": int(sum(1 for d in pd.to_datetime(out["date_opened"]).dt.date
+        "trades_without_daily_row": int(sum(n for d, n in entry_dates(out).value_counts(dropna=False).items()
                                             if d not in known)),
     }
     return out, report

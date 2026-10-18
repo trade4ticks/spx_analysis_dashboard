@@ -30,6 +30,7 @@ removes.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from datetime import date
 from functools import lru_cache
 
@@ -57,28 +58,51 @@ BAR_SHORTFALL_TOLERANCE = 2
 _TZ = "America/New_York"
 
 
+# One schedule from here to two years ahead, built once per process (~1 s)
+# and sliced for every span inside it. Each upload asks for its own span, and
+# building it fresh was ~0.5 s of every load. A slice of the rules' schedule
+# is the schedule of the slice.
+_WIDE_FROM = "1990-01-01"
+
+
+def _wide_to() -> str:
+    return f"{date.today().year + 2}-12-31"
+
+
+@lru_cache(maxsize=2)
+def _wide(to: str) -> tuple[tuple, list[str]]:
+    rows = _build(_WIDE_FROM, to)
+    return rows, [r[0] for r in rows]
+
+
 @lru_cache(maxsize=16)
 def _sched(start: str, end: str) -> tuple[tuple[str, int, str, str], ...]:
     """(iso, expected_bars, open HH:MM, close HH:MM) per session, ascending.
 
-    Cached because the page asks for the same span repeatedly and building a
-    decade of schedule is milliseconds we need not spend twice. The cache
+    Cached because the page asks for the same span repeatedly. The cache
     holds tuples, not dicts, so a caller cannot mutate what the next caller
     receives.
     """
+    to = _wide_to()
+    if _WIDE_FROM <= start and end <= to:
+        rows, isos = _wide(to)
+        return rows[bisect_left(isos, start):bisect_right(isos, end)]
+    return _build(start, end)
+
+
+def _build(start: str, end: str) -> tuple[tuple[str, int, str, str], ...]:
     cal = mcal.get_calendar(MARKET)
     sch = cal.schedule(start_date=start, end_date=end)
-    out = []
-    for day, row in sch.iterrows():
-        opened, closed = row["market_open"], row["market_close"]
-        minutes = int((closed - opened).total_seconds() // 60)
-        out.append((
-            day.strftime("%Y-%m-%d"),
-            max(0, minutes // BAR_MINUTES),
-            opened.tz_convert(_TZ).strftime("%H:%M"),
-            closed.tz_convert(_TZ).strftime("%H:%M"),
-        ))
-    return tuple(out)
+    if sch.empty:
+        return ()
+    # Column-wise, not iterrows: a decade row by row was ~1 s, paid again
+    # for every new span (each upload's), on a request the tunnel cuts at 100 s.
+    opened, closed = sch["market_open"], sch["market_close"]
+    minutes = ((closed - opened).dt.total_seconds() // 60).astype(int)
+    bars = (minutes // BAR_MINUTES).clip(lower=0)
+    return tuple(zip(sch.index.strftime("%Y-%m-%d"), (int(b) for b in bars),
+                     opened.dt.tz_convert(_TZ).dt.strftime("%H:%M"),
+                     closed.dt.tz_convert(_TZ).dt.strftime("%H:%M")))
 
 
 def _iso(d) -> str:

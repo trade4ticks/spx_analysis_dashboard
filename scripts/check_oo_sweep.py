@@ -391,9 +391,24 @@ def check_endpoints() -> None:
     sample = {"d": date(2026, 4, 8), "dt": datetime(2026, 4, 8, 9, 30), "t": time(15, 55), "s": "é ü", "n": None,
               "f": 1.5, "l": [1, 2.25, "x"], "nested": {"missed": [date(2026, 1, 2)]}}
     from fastapi.responses import JSONResponse
-    check(R.encode_json(sample) == JSONResponse(jsonable_encoder(sample)).body,
-          "encode_json == JSONResponse(jsonable_encoder(...)) for dates, times, unicode, nesting")
-    check(R.encode_json(body) == JSONResponse(jsonable_encoder(body)).body, "...and for a whole sweep payload")
+    sample.update({"tiny": 1e-05, "huge": 1.5e17, "neg0": -0.0, "third": 1 / 3, "ints": {1: "a", 2: [3, 4.0]}})
+    want_s, want_b = JSONResponse(jsonable_encoder(sample)).body, JSONResponse(jsonable_encoder(body)).body
+    # Both encoders: orjson when installed, and the stdlib fallback it
+    # replaces when it is not. The same VALUES always; bytes noted.
+    keep = R._orjson
+    try:
+        for name, mod in (("orjson", keep), ("stdlib fallback", None)):
+            if name == "orjson" and mod is None:
+                print("  note  orjson is not installed here: only the stdlib fallback is checked")
+                continue
+            R._orjson = mod
+            got_s, got_b = R.encode_json(sample), R.encode_json(body)
+            check(json.loads(got_s) == json.loads(want_s) and json.loads(got_b) == json.loads(want_b),
+                  f"{name}: the same JSON values as JSONResponse(jsonable_encoder(...)) -- dates, times, unicode, "
+                  f"int keys, tiny/huge floats, -0.0, a whole sweep payload")
+            check(got_b == want_b, f"{name}: byte-identical for a whole sweep payload")
+    finally:
+        R._orjson = keep
 
 
 def check_rank_memory() -> None:

@@ -196,8 +196,31 @@ def _json_default(o):
     raise TypeError(f"{type(o).__name__} is not JSON serialisable")
 
 
+try:
+    import orjson as _orjson
+except ImportError:          # speed only: the stdlib below gives the same JSON, ~10x slower
+    _orjson = None
+_ORJSON_WARNED = False
+
+
 def encode_json(obj) -> bytes:
-    """The bytes Starlette's JSONResponse would send, without jsonable_encoder."""
+    """What Starlette's JSONResponse would send, without jsonable_encoder.
+
+    orjson when installed: a 75-variant sweep's 85 MB encodes in 0.24 s
+    against 2.3 s for the stdlib here (and the VPS is slower), on a request
+    the tunnel ends at 100 s. Same JSON -- compact, UTF-8, dates as ISO,
+    non-string keys as strings; check_oo_sweep compares it with JSONResponse.
+    One difference: the stdlib REFUSES a NaN (allow_nan=False) where orjson
+    writes null. The payload builder never emits one (payload._num), and the
+    parser gates still encode with the stdlib's refusal."""
+    global _ORJSON_WARNED
+    if _orjson is not None:
+        return _orjson.dumps(obj, default=_json_default,
+                             option=_orjson.OPT_NON_STR_KEYS | _orjson.OPT_SERIALIZE_NUMPY)
+    if not _ORJSON_WARNED:
+        _ORJSON_WARNED = True
+        log.warning("orjson is not installed: large OO payloads encode ~10x slower "
+                    "(pip install 'orjson>=3.9')")
     return json.dumps(obj, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
                       default=_json_default).encode("utf-8")
 

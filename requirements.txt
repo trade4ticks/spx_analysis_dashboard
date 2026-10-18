@@ -20,6 +20,11 @@ openpyxl>=3.1.0
 # Install on the VPS BEFORE pulling:
 #   sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'
 pandas_market_calendars>=5.0
+# Encodes the OO page's trade payloads ~10x faster than the stdlib (85 MB for
+# a 75-variant sweep: 0.24 s vs 2.3 s) inside the tunnel's 100 s. SOFT: without
+# it app/routers/oo_backtest.py falls back to json and logs a warning.
+#   sudo /spx_analysis_dashboard/.venv/bin/pip install 'orjson>=3.9'
+orjson>=3.9
 jinja2==3.1.3
 duckdb>=1.1.0
 anthropic>=0.40.0
