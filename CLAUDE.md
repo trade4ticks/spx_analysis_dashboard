@@ -151,10 +151,15 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   under it says which, with counts); avg/win/count POOL its trades, total/
   Max DD/Calmar are the MEAN OF EACH VARIANT'S OWN figure — the summary's
   rule. A combination no variant has is blank; one the filters emptied reads
-  "—". Shade: hue by sign (win rate and count always blue), opacity
-  `obBarAlpha(cell trades, busiest cell)` as the user specified — which in a
-  BALANCED sweep is uniform, so the shade then shows only the sign (raised
-  with the user, 2026-10-18). PARAMETER SECTIONS: each parameter is a
+  "—". Shade: hue by sign (win rate and count always blue), opacity by
+  MAGNITUDE — |value| against the largest |value| in the grid, from the
+  bars' floor (`obGridAlpha`). The first spec was opacity by trade count;
+  in a balanced sweep every cell has the same count, so it showed nothing
+  (the user's call, 2026-10-18: magnitude, grid only — the bar charts keep
+  opacity by n). A THIN cell — under `OB_GRID_THIN` (50%) of the median
+  non-empty cell's trades — gets a dashed outline, never opacity (which now
+  means magnitude); the note gives the threshold, the median and the count.
+  PARAMETER SECTIONS: each parameter is a
   per-trade column `param__<name>` (built once from the variant table on the
   full set) and a registry-shaped categorical entry (`paramRows`) drawn by
   the ordinary section code, no scatter, win rate on. A value's TOTAL is the

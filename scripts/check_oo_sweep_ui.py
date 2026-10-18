@@ -25,6 +25,8 @@ with payloads the REAL router built (analyze_batch, no database):
     single-row axes, every cell against stats.py on the variants it holds --
     on a three-parameter sweep, where a cell pools across the hidden one and
     the note says so -- with and without a filter; hidden for one variant
+  * grid shading is magnitude (|value| / largest |value|), and a cell under
+    half the median cell's trades is outlined, the threshold said beneath
   * the parameter sections: avg and win rate pool, a value's TOTAL is the
     mean over the variants holding that value
   * no console errors (an Alpine expression error leaves a control inert)
@@ -60,13 +62,13 @@ VARIANTS = [(30, 25), (30, 50), (45, 25), (45, 50)]
 NAMES = [f"sweep_dte{d}_pt{p}.csv" for d, p in VARIANTS]
 
 
-def make_csv(seed: int) -> str:
+def make_csv(seed: int, n: int = 60) -> str:
     """~60 trades through 2024. Each variant its own P/L path, so the mean of
     the variants' drawdowns is NOT the pooled drawdown (the gate needs that)."""
     rng = random.Random(seed)
     days = pd.bdate_range("2024-01-02", "2024-12-20")
     rows = []
-    for _ in range(60):
+    for _ in range(n):
         i = rng.randrange(len(days) - 6)
         d0, d1 = days[i], days[i + rng.randrange(1, 6)]
         pnl = round(rng.gauss(40 if seed % 2 else -10, 380), 2)
@@ -139,7 +141,8 @@ def payloads() -> tuple[dict, dict, dict, dict]:
     expect["grid2"] = {f"{d},{p}": cell([figures(frames[n])]) for (d, p), n in zip(VARIANTS, NAMES)}
 
     # A 3-parameter sweep: cells pool across sl.
-    files3 = {n: make_csv(20 + i) for i, n in enumerate(NAMES3)}
+    # dte=45 x pt=50 is THIN: 20 trades per variant against 60 -- the grid must outline it.
+    files3 = {n: make_csv(20 + i, 20 if VARIANTS3[i][:2] == (45, 50) else 60) for i, n in enumerate(NAMES3)}
     sweep3 = with_sessions(asyncio.run(analyze_batch([(n, c.encode()) for n, c in files3.items()], None)))
     fr3 = {n: data_loader.parse_upload(files3[n].encode(), n) for n in NAMES3}
     no_mon = {n: f[f["date_opened"].dt.dayofweek != 0] for n, f in fr3.items()}
@@ -439,6 +442,24 @@ window.addEventListener('load', () => setTimeout(async () => {
       }
     };
     await check3(FIX.expect.grid3, '3-param grid');
+    // Magnitude shading and the thin outline, on Avg P/L.
+    await setSel('ob-grid-m', 'avg');
+    const tds = () => [...gridCard().querySelectorAll('.ob-pgrid tbody tr')].map(tr => [...tr.querySelectorAll('td')]);
+    const alphaOf = td => { const m = getComputedStyle(td).backgroundColor.match(/rgba?\(([^)]+)\)/); const p = m[1].split(','); return p.length === 4 ? +p[3] : 1; };
+    const G3 = FIX.expect.grid3, at = [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']];
+    const maxAbs = Math.max(...at.map(([d, p]) => Math.abs(G3[d + ',' + p].avg)));
+    let worstA = 0;
+    for (const [d, p] of at) {
+      const td = tds()[p === '25' ? 0 : 1][d === '30' ? 0 : 1];
+      const want = OB_ALPHA_FLOOR + (1 - OB_ALPHA_FLOOR) * Math.abs(G3[d + ',' + p].avg) / maxAbs;
+      worstA = Math.max(worstA, Math.abs(alphaOf(td) - want));
+    }
+    out.push((worstA < 0.003 ? 'ok|' : 'FAIL|') + 'shade is |value| against the largest |value| (from the floor)|worst alpha diff ' + worstA + '|< 0.003');
+    const thinCells = tds().flatMap((row, r) => row.map((td, k) => [r, k, td])).filter(([, , td]) => td.classList.contains('thin'));
+    ok('exactly the thin combination (dte=45, pt=50: 40 trades against a median of 120) is outlined',
+       [thinCells.map(([r, k]) => r + ',' + k), getComputedStyle(thinCells[0] ? thinCells[0][2] : document.body).outlineStyle], [['1,1'], 'dashed']);
+    ok('the note gives the threshold and the median', /dashed outline: a thin cell, under 50% of the median cell's trades \(median 120; 1 thin now\)/i
+       .test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
     // The dte section: pooled avg and win, total = mean over that value's 4 variants.
     const chartData = which => OB_CHARTS.sec[`ob-sec-param__dte-${which}`].data.datasets[0].data;
     ok('a section per parameter, in order, before the metric sections', [...document.querySelectorAll('[id^="ob-sec-card-param__"]')]

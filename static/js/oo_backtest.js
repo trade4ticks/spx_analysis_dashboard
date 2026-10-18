@@ -427,6 +427,23 @@ function obParamGrid(variants, values, figures, x, y) {
   return { xs, ys, cells };
 }
 
+/* Grid shading is MAGNITUDE: |value| against the largest |value| in the grid,
+ * from the bars' floor up (a balanced sweep gives every cell the same trade
+ * count, so opacity by n -- the first spec -- showed nothing). A cell holding
+ * fewer than OB_GRID_THIN x the median cell's trades is THIN, marked by a
+ * dashed outline: under a filter that thins some combinations much harder
+ * than others, that is what makes it visible without hovering. */
+const OB_GRID_THIN = 0.5;
+function obGridAlpha(v, maxAbs) {
+  return maxAbs > 0 ? OB_ALPHA_FLOOR + (1 - OB_ALPHA_FLOOR) * Math.abs(v) / maxAbs : OB_ALPHA_FLOOR;
+}
+function obMedian(values) {
+  const v = values.slice().sort((a, b) => a - b);
+  if (!v.length) return null;
+  const h = v.length >> 1;
+  return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2;
+}
+
 const OB_GRID_METRICS = [
   { key: 'avg', label: 'Avg P/L', fmt: v => obMoney(v, 2), signed: true },
   { key: 'total', label: 'Total P/L (mean per variant)', fmt: v => obMoney(v), signed: true },
@@ -936,7 +953,10 @@ document.addEventListener('alpine:init', () => {
       }));
       const g = obParamGrid(sw.variants, sw.values, figures, this.gridX, this.gridY);
       const metric = OB_GRID_METRICS.find(m => m.key === this.gridMetric) || OB_GRID_METRICS[0];
-      const maxN = Math.max(0, ...g.cells.flat().map(c => c.n));
+      const shown = g.cells.flat().filter(c => c.n && c[metric.key] !== null);
+      const maxAbs = Math.max(0, ...shown.map(c => Math.abs(c[metric.key])));
+      const median = obMedian(g.cells.flat().filter(c => c.n).map(c => c.n));
+      const thinBelow = median === null ? 0 : median * OB_GRID_THIN;
       const lab = (k, v) => `${k}=${v}`;
       const rows = g.cells.map((row, r) => row.map((c, k) => {
         const v = c[metric.key];
@@ -947,17 +967,20 @@ document.addEventListener('alpine:init', () => {
                    title: `${where}: ${c.n ? 'no ' + metric.label + ' (no drawdown, or too short a span)' : 'no trades under the filters'}` };
         }
         const hue = metric.signed && v < 0 ? OB_PINK : OB_BLUE;
+        const thin = c.n < thinBelow;
         const f = OB_GRID_METRICS;
         const fig = (key, val) => (val === null ? '—' : f.find(m => m.key === key).fmt(val));
         return {
-          text: metric.fmt(v), sub: `${c.n.toLocaleString()} trades`, empty: false,
-          bg: obRgba(hue, obBarAlpha(c.n, maxN)),
-          title: `${where}: ${c.inView} of ${c.variants} variant${c.variants === 1 ? '' : 's'} with trades, ` +
+          text: metric.fmt(v), sub: `${c.n.toLocaleString()} trades`, empty: false, thin,
+          bg: obRgba(hue, obGridAlpha(v, maxAbs)),
+          title: (thin ? `THIN: under ${Math.round(OB_GRID_THIN * 100)}% of the median cell's ${median.toLocaleString()} trades. ` : '') +
+                 `${where}: ${c.inView} of ${c.variants} variant${c.variants === 1 ? '' : 's'} with trades, ` +
                  `${c.n.toLocaleString()} trades · Avg ${fig('avg', c.avg)} · Total ${fig('total', c.total)} per variant · ` +
                  `Win ${fig('win', c.win)} · Max DD ${fig('maxdd', c.maxdd)} · Calmar ${fig('calmar', c.calmar)}`,
         };
       }));
-      this.grid = { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label };
+      this.grid = { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label,
+                    median, thin: rows.flat().filter(x => x.thin).length };
     },
 
     /* Said under the grid: what a cell is when it holds several variants. */
@@ -966,8 +989,11 @@ document.addEventListener('alpine:init', () => {
       if (!sw || !this.grid) return '';
       const others = sw.params.filter(p => p !== this.gridX && p !== this.gridY);
       const rule = 'Avg P/L, win rate and trade count pool the cell\'s trades; total P/L, Max DD and Calmar are the ' +
-                   'mean of each variant\'s own figure. Shade: blue profit, pink loss (win rate and count always blue); ' +
-                   'opacity by the cell\'s trades against the busiest cell. All filters apply.';
+                   'mean of each variant\'s own figure. Shade: blue profit, pink loss (win rate and count always blue), ' +
+                   'stronger the larger the value against the largest in the grid. Dashed outline: a THIN cell, under ' +
+                   `${Math.round(OB_GRID_THIN * 100)}% of the median cell's trades (median ` +
+                   `${this.grid.median === null ? '—' : this.grid.median.toLocaleString()}; ${this.grid.thin} thin now). ` +
+                   'All filters apply.';
       if (!others.length) return 'Each cell is one variant. ' + rule;
       const what = others.map(p => `${p} (${(sw.values[p] || []).length} values)`).join(', ');
       return `More than two parameters: each cell pools every variant sharing its ${this.gridX}` +
