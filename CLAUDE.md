@@ -39,7 +39,7 @@ with varied parameters, loaded as ONE trade set — the same client-side
 filtering over more rows (75 variants ≈ 240,000 trades), not a new
 architecture. Phases: **P1** server (batch parse, variants, isIgnored) —
 done; **P2** page (multi-file drop, load report, variant selector, BH
-suppression when pooled, surface-rank memory fix); **P3** parameter grid +
+suppression when pooled, surface-rank memory fix) — done; **P3** parameter grid +
 per-parameter sections; **P4** save/load sweeps (child table of files),
 docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
 - **Variant source, per file:** `param_*` columns (discovered; one MCP file
@@ -69,9 +69,13 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   `gap` (the vendor gap must never sit under our SPX gap heading).
   `daysInTrade` and `underlying` are deliberately unread. A zoned date keeps
   its WRITTEN date. The format travels as `df.attrs["source_format"]` →
-  payload/store `source` (`mixed` for a batch of several). **Unconfirmed:**
-  that `premiumPerContract` means what the website's `Premium` means, and
-  the units of the two percentages — awaiting one trade in both exports.
+  payload/store `source` (`mixed` for a batch of several). **Confirmed by
+  the user against a real website export (2026-10-18):** `premiumPerContract`
+  ≡ the website's `Premium` — per contract, dollars, positive credit /
+  negative debit (both read −705 for one trade), so no conversion and no
+  magnitude check (it would only false-alarm); the percentages are WHOLE
+  percentages (35, not 0.35); `highestLossPercentage` is negative, bounded
+  at 0.
 - **Payload:** one int `variant` column (whitelisted) + `sweep: {params,
   values, variants: [{id, params, label, file, n}], files: [report],
   timing}`. Ids follow numeric order (5 < 10 < 45).
@@ -98,6 +102,55 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   page exactly as today (auto bins and slider ranges from that variant).
 - **The Backtest Portfolio refuses a sweep** (P4), saying a single variant
   can be exported and saved as a normal strategy to use it there.
+- **P2, the page (done 2026-10-18).** Every upload — one file or many —
+  goes to `/parse-batch` as ONE request, each part gzipped in the browser
+  (`obGzipFile`, CompressionStream); a refusal changes nothing on the page.
+  The sidebar says what each file was read as. **The variant VIEW**:
+  `OB_DATA.full` holds every trade, `OB_DATA.columns`/`n` the view — the
+  full set at ALL, else one variant's rows SLICED OUT — so with one variant
+  selected every other line of the page runs on exactly what that variant's
+  file alone would give it (auto bins, slider ranges, date bounds, "Showing
+  X of Y"); the UI gate compares the two screen by screen. Filters the user
+  narrowed survive a switch, clamped. Surface rows fetch for `full` and
+  re-slice. **At ALL** `recompute` builds `obVariantFigures` (per variant:
+  rows, obStats, obConcurrency) and the summary's scale-dependent figures,
+  the section TOTAL P/L bars, the cumulative curve (pooled / k), the
+  drawdown (`obMeanEquity`: the mean of the variants' OWN drawdowns per
+  date, carried forward — its trough is shallower than Max DD, the mean of
+  each variant's trough, and the title says so) and deployment (pooled
+  counts / k; title = mean of the variants' peaks) follow the mean rule;
+  k = variants with a trade in view. The five boxes wear a "mean / variant"
+  tag (`stat_box(tag_expr=…)`, optional, other pages unaffected).
+  **Ranking over pooled variants** marks no significance — no BH line, no
+  ✓, no p in the tooltip, a note — decided by `surf.result.variants`, the k
+  at ranking time; the signature includes the variant, since every view's
+  rows are numbered from 0. Export CSV leads with `param_*` columns.
+  **Saving a multi-file sweep is P4**: no Save box, a note (a single MCP
+  file holding several variants saves as usual — its param_* columns come
+  back on reload).
+- **Speed at 240,000 trades** (measured in Edge over CDP): the calculations
+  were never the problem (filter 3 ms, stats 10 ms); the sections were —
+  19.6 s per recompute, now 0.26–0.46 s at ALL, 29 ms for one variant, and a
+  single log 62–78 ms (was 181–230). Three causes: (1) every scatter point
+  drawn, 16 s — now at most `OB_SCATTER_MAX` 5,000, every k-th in trade
+  order above that, the line fitted to all, the title says "every Nth of M";
+  and profit/loss are TWO single-colour datasets, because an indexable
+  per-point colour stops Chart.js sharing point options; (2) `obSectionData`
+  built a string key per trade per section (Map of `extra + ':' + key`) —
+  now an array plus a Map keyed String(v), identical output, parity gate
+  green; (3) **the section metric was the reactive registry entry**, so
+  every bin lookup went through Alpine's proxy — `renderSections` passes
+  `Alpine.raw` copies. Any per-trade loop over a registry object needs the
+  raw object.
+- **Surface ranking memory.** `/surface/rank` no longer builds trades × 452
+  (~870 MB at 240k): `entry_matrix_gathered` returns the distinct bars +
+  a per-trade index, `correlations_gathered` materialises at most
+  `BLOCK_CELLS` (4M) cells at a time and ranks for Spearman from the
+  distinct values weighted by trade count (`_ranks_by_count`: the same
+  average ranks as rankdata on the trades). 240k × 452: 174 MB peak, 6.6 s.
+  Bit-identical to the old path below the block size (the rank array is
+  made column-major, as rankdata returns it — numpy's summation order
+  follows the layout, and a C-ordered copy differed in the 16th digit).
 
 **Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
 loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes

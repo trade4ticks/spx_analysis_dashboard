@@ -465,11 +465,12 @@ async def surface_rank(body: dict = Body(...), pool=Depends(get_pool)):
         raise HTTPException(400, str(exc))
     cat = await _surface_catalog(pool)
     cols = [m["column_name"] for m in cat["metrics"]]
-    bar_times, X, join_report = await surface.entry_matrix(pool, trades, cols)
+    bar_times, distinct, gather, join_report = await surface.entry_matrix_gathered(pool, trades, cols)
     t0 = _t.monotonic()
     ids: dict = {}
     bar_ids = [ids.setdefault((t[0], bt), len(ids)) for t, bt in zip(trades, bar_times)]
-    result = await asyncio.to_thread(surface_stats.rank, cat["metrics"], X, [t[2] for t in trades], bar_ids)
+    result = await asyncio.to_thread(surface_stats.rank, cat["metrics"], distinct, [t[2] for t in trades], bar_ids,
+                                     gather)
     compute_s = round(_t.monotonic() - t0, 3)
     log.info("oo-backtest surface rank: %d trades (%d with a bar), %d distinct entries, %d metrics; "
              "query %.2fs, stats %.3fs", len(trades), join_report["with_bar"], join_report["distinct_entries"],

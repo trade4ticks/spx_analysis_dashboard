@@ -174,6 +174,10 @@ GATES = [
     # Editing a saved strategy's notes on the OO page, clicked in Edge.
     _s("check_oo_notes_ui.py", can_skip=True,
        note="OO page: a saved strategy's notes edit, save and cancel"),
+    # A parameter sweep on the page, clicked: one batch request, the mean per
+    # variant at ALL against stats.py per file, one variant == its own file.
+    _s("check_oo_sweep_ui.py", can_skip=True,
+       note="OO sweeps clicked: batch upload, ALL = mean per variant, one variant = its file"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
     # Strategy Signal: the decision rule, the percentile, the index/surface

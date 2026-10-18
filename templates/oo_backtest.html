@@ -118,6 +118,15 @@
     .ob-table { border-collapse:collapse; font-size:11px; width:100%; }
     .ob-table th, .ob-table td { padding:3px 8px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; }
     .ob-table th { color:var(--dim); font-weight:600; }
+    .ob-sweep { margin-top:6px; }
+    .ob-sweep-files { margin-top:4px; max-height:240px; overflow:auto; font-size:11px; color:var(--dim);
+                      overflow-wrap:anywhere; }
+    .ob-sweep-files div { padding:1px 0; }
+    .ob-variant-bar .ob-card-body { padding:8px 12px; }
+    .ob-variant-sel { flex:1; min-width:0; }
+    .ob-variant-note { margin-top:4px; font-size:12px; line-height:1.4; }
+    .ob-rank-pooled { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px;
+                      border:1px solid var(--border); color:var(--dim); }
 
   </style>
 
@@ -153,10 +162,10 @@
           <label class="ob-drop" :class="{ over: dragOver }"
                  @dragover.prevent="dragOver = true" @dragleave.prevent="dragOver = false"
                  @drop.prevent="onDrop($event)">
-            <input type="file" accept=".csv,.json" @change="onPick($event)">
+            <input type="file" accept=".csv,.json" multiple @change="onPick($event)">
             <span x-show="!uploading">Drop a trade log here, or click to choose<br>
-              <span class="ob-dim">Option Omega .csv · Mesosim .json</span></span>
-            <span x-show="uploading">Parsing…</span>
+              <span class="ob-dim">Option Omega .csv · Mesosim .json · several files for a parameter sweep</span></span>
+            <span x-show="uploading" x-text="uploadCount > 1 ? 'Parsing ' + uploadCount + ' files…' : 'Parsing…'"></span>
           </label>
           <div class="ob-err" x-show="uploadError" x-text="uploadError" style="margin-top:6px;"></div>
 
@@ -184,6 +193,18 @@
               </div>
               <div class="ob-note" x-show="notesMsg" x-text="notesMsg" style="margin-top:4px;"></div>
             </div>
+            <!-- A sweep: what every file was read as, said on load so a
+                 misread filename is visible before anything is trusted. -->
+            <div class="ob-sweep" x-show="sweep">
+              <div class="ob-parse-note" x-text="sweepHeadline()"></div>
+              <a href="#" class="ob-dim" @click.prevent="filesOpen = !filesOpen"
+                 x-text="filesOpen ? 'hide what each file was read as' : 'show what each file was read as'"></a>
+              <div class="ob-sweep-files" x-show="filesOpen">
+                <template x-for="line in sweepFileLines()" :key="line.key">
+                  <div x-text="line.text"></div>
+                </template>
+              </div>
+            </div>
             <template x-for="note in savedNotes().concat(parseNotes(), marketNotes())" :key="note.text">
               <div class="ob-parse-note" :class="{ warn: note.warn }" x-text="note.text"></div>
             </template>
@@ -191,7 +212,10 @@
 
           <!-- Save what was just uploaded. Only an upload can be saved: the
                server re-parses the file bytes, never page-supplied rows. -->
-          <div class="ob-save" x-show="loaded && hasUploadFile">
+          <div class="ob-parse-note" x-show="loaded && multiFile()">
+            A sweep of several files cannot be saved yet. One file — an MCP export holding several variants
+            in its param_* columns — saves as usual.</div>
+          <div class="ob-save" x-show="loaded && hasUploadFile && !multiFile()">
             <div class="ob-lbl">Save this log</div>
             <input class="ob-input" type="text" x-model="saveName" maxlength="200" placeholder="Name">
             <textarea class="ob-input" rows="2" x-model="saveNotes" maxlength="4000" placeholder="Notes (optional)"></textarea>
@@ -367,9 +391,28 @@
         </div>
       </div>
 
+      <!-- A parameter sweep: which variant the whole page shows. ALL is the
+           default; one variant is that variant's own file, exactly. -->
+      <div class="ob-card ob-variant-bar" x-show="loaded && sweep">
+        <div class="ob-card-body">
+          <div class="ob-row">
+            <label class="ob-lbl" for="ob-variant">Variant</label>
+            <select id="ob-variant" class="ob-sel ob-variant-sel" @change="setVariant($event.target.value)">
+              <option value="all" :selected="variantSel === 'all'"
+                      x-text="'ALL — ' + (sweep ? sweep.variants.length : 0) + ' variants'"></option>
+              <template x-for="v in (sweep ? sweep.variants : [])" :key="v.id">
+                <option :value="String(v.id)" :selected="variantSel === String(v.id)"
+                        x-text="v.label + ' (' + v.n.toLocaleString() + ' trades)'"></option>
+              </template>
+            </select>
+          </div>
+          <div class="ob-dim ob-variant-note" x-text="variantNote()"></div>
+        </div>
+      </div>
+
       <!-- Filter status: how much of the log the page is showing. -->
       <div class="ob-status" x-show="loaded">
-        <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + (meta ? meta.n.toLocaleString() : 0) + ' trades'"></span>
+        <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + viewN.toLocaleString() + ' trades'"></span>
         <span class="ob-dim" x-show="activeCount()" x-text="' · ' + activeCount() + ' filter' + (activeCount() === 1 ? '' : 's') + ' active'"></span>
         <a href="#" class="ob-reset" x-show="activeCount()" @click.prevent="resetAllFilters()">reset all filters</a>
         <button class="btn primary" style="margin-left:auto;" @click="exportCsv()" :disabled="!filteredCount"
@@ -386,7 +429,7 @@
           <!-- row 1 -->
           {{ m.stat_box('# Trades', "stat('num_trades')") | indent(10) | safe }}
           {{ m.stat_box('Win %', "stat('win_pct')") | indent(10) | safe }}
-          {{ m.stat_box('Total P/L', "stat('total_pnl')", "statNum('total_pnl')") | indent(10) | safe }}
+          {{ m.stat_box('Total P/L', "stat('total_pnl')", "statNum('total_pnl')", tag_expr="perVariantTag()") | indent(10) | safe }}
           {{ m.stat_box('Avg P/L', "stat('avg_pnl')", "statNum('avg_pnl')") | indent(10) | safe }}
           {{ m.stat_box('Avg P/L %', "stat('avg_pnl_pct')", "statNum('avg_pnl_pct')") | indent(10) | safe }}
           <!-- row 2 -->
@@ -396,10 +439,10 @@
           {{ m.stat_box('Max Loss', "stat('max_loser')", "statNum('max_loser')") | indent(10) | safe }}
           {{ m.stat_box('Profit Factor', "stat('profit_factor')", "statNum('profit_factor')") | indent(10) | safe }}
           <!-- row 3 -->
-          {{ m.stat_box('Avg Annual P/L', "stat('avg_annual_pnl')", "statNum('avg_annual_pnl')") | indent(10) | safe }}
-          {{ m.stat_box('Avg Annual Return %', "stat('avg_annual_return_pct')", "statNum('avg_annual_return_pct')") | indent(10) | safe }}
-          {{ m.stat_box('Max DD', "stat('max_drawdown')", "statNum('max_drawdown')") | indent(10) | safe }}
-          {{ m.stat_box('Calmar', "stat('calmar')", "statNum('calmar')") | indent(10) | safe }}
+          {{ m.stat_box('Avg Annual P/L', "stat('avg_annual_pnl')", "statNum('avg_annual_pnl')", tag_expr="perVariantTag()") | indent(10) | safe }}
+          {{ m.stat_box('Avg Annual Return %', "stat('avg_annual_return_pct')", "statNum('avg_annual_return_pct')", tag_expr="perVariantTag()") | indent(10) | safe }}
+          {{ m.stat_box('Max DD', "stat('max_drawdown')", "statNum('max_drawdown')", tag_expr="perVariantTag()") | indent(10) | safe }}
+          {{ m.stat_box('Calmar', "stat('calmar')", "statNum('calmar')", tag_expr="perVariantTag()") | indent(10) | safe }}
           {{ m.stat_box('Avg Days', "stat('avg_days_in_trade')") | indent(10) | safe }}
         </div>
       </div>
@@ -412,7 +455,7 @@
         <div class="ob-card-body ob-sec-grid two">
           <div class="chart-box">
             <div class="chart-title">Cumulative P/L
-              <span class="ob-dim" x-text="stats ? moneyText(stats.total_pnl) : ''"></span></div>
+              <span class="ob-dim" x-text="cumLine()"></span></div>
             <div class="chart-canvas"><canvas id="ob-cum-chart" role="img" aria-label="Cumulative P/L over time"></canvas></div>
           </div>
           <div class="chart-box">
@@ -470,7 +513,7 @@
                 <div class="chart-canvas"><canvas :id="canvasId(m, 'avg')" role="img" :aria-label="'Average P/L by ' + m.label"></canvas></div>
               </div>
               <div class="chart-box">
-                <div class="chart-title" x-text="'Total P/L by ' + binNoun(m)"></div>
+                <div class="chart-title" x-text="totalTitle(m)"></div>
                 <div class="chart-canvas"><canvas :id="canvasId(m, 'total')" role="img" :aria-label="'Total P/L by ' + m.label"></canvas></div>
               </div>
               <div class="chart-box" x-show="m.winRate">
@@ -479,7 +522,8 @@
               </div>
               <div class="chart-box" x-show="m.hasScatter">
                 <div class="chart-title"><span x-text="'P/L vs ' + m.label"></span>
-                  <span class="ob-dim" x-text="fitText(m)"></span></div>
+                  <span class="ob-dim" x-text="fitText(m)"></span>
+                  <span class="ob-dim" x-show="scatterNote(m)" x-text="scatterNote(m)"></span></div>
                 <div class="chart-canvas"><canvas :id="canvasId(m, 'scatter')" role="img" :aria-label="'P/L against ' + m.label + ' with a least-squares line'"></canvas></div>
               </div>
             </div>
@@ -594,6 +638,7 @@
           <!-- Prominent, not folded into the footer: later-starting forms sit
                systematically at low n and can fail BH left of the line. -->
           <div class="ob-rank-bhwarn" x-show="surf.result && surfBhWarning()" x-text="'⚠ ' + surfBhWarning()"></div>
+          <div class="ob-rank-pooled" x-show="surfPooled()" x-text="surfPooledNote()"></div>
         </div>
       </div>
 

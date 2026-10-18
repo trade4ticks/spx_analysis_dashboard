@@ -255,6 +255,15 @@ async def entry_matrix(pool, trades: list[tuple], columns: list[str]):
     if no bar) and a trades x columns float matrix, NaN where missing. Distinct
     (date, time) pairs are looked up once; the matrix is built from the
     distinct rows and gathered, never cell by cell."""
+    bar_times, distinct, gather, report = await entry_matrix_gathered(pool, trades, columns)
+    return bar_times, distinct[gather], report
+
+
+async def entry_matrix_gathered(pool, trades: list[tuple], columns: list[str]):
+    """(bar_times, distinct, gather, report): entry_matrix without the gather,
+    so X = distinct[gather]. The ranking takes this form: a sweep's 240,000
+    trades point at a few thousand distinct bars, and the gathered matrix
+    would be ~870 MB (surface_stats.correlations_gathered)."""
     import numpy as np
     keys = sorted({(t[0], t[1]) for t in trades if t[0] is not None and t[1] is not None})
     t0 = _time.monotonic()
@@ -273,10 +282,9 @@ async def entry_matrix(pool, trades: list[tuple], columns: list[str]):
         if r["bar_time"] is not None:
             distinct[i] = [np.nan if v is None else v for v in tuple(r)[3:]]
     gather = np.fromiter((pos.get((t[0], t[1]), 0) for t in trades), dtype=np.int64, count=len(trades))
-    X = distinct[gather]
     bar_times = [bar_of[g] for g in gather.tolist()]
     no_bar = sum(1 for b in bar_times if b is None)
-    return bar_times, X, {"distinct_entries": len(keys), "no_bar": no_bar, "with_bar": len(trades) - no_bar,
+    return bar_times, distinct, gather, {"distinct_entries": len(keys), "no_bar": no_bar, "with_bar": len(trades) - no_bar,
                           "query_s": query_s, "bar_rule": BAR_RULE, "lookahead_confirmed": LOOKAHEAD_CONFIRMED}
 
 

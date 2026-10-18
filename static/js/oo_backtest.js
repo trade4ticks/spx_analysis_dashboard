@@ -35,7 +35,22 @@ const OB_PINK = '#e84393';   // negative
  * reactive getters is slow to build and slower to iterate, and nothing in the
  * template binds to an individual value. */
 const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: null, autoBins: {}, rank: null,
-                  logToken: 0 };
+                  logToken: 0,
+                  // A sweep: `full` is every variant's trades; `columns`/`n`
+                  // are the VIEW -- the full set at ALL, else one variant's
+                  // rows sliced out, so with one variant selected every line
+                  // of this file runs on exactly what loading that variant's
+                  // file alone would give it. `files` are the uploaded Files
+                  // (for saving); `vm` the per-variant figures in view.
+                  full: null, files: [], vm: null };
+
+/* A scatter draws at most this many points. A 240,000-trade sweep drew all of
+ * them in every section on every filter change: 16 s of Chart.js per
+ * recompute, against 3 ms to filter. Above it every k-th point is drawn
+ * (k = ceil(n / max), in trade order) and the section says so; the fitted
+ * line always uses every point. Every single log seen so far is below it. */
+const OB_SCATTER_MAX = 5000;
+function obScatterStride(n) { return n > OB_SCATTER_MAX ? Math.ceil(n / OB_SCATTER_MAX) : 1; }
 /* Chart.js instances, also outside the proxy (Alpine would wrap their internals). */
 const OB_CHARTS = { cum: null, dd: null, deploy: null, rank: null, rankAxis: null, sec: {} };
 const OB_DEFAULT_CAPITAL = 10000;
@@ -203,24 +218,32 @@ function obP(p) {
  * where xs/ys/rowsIdx are the (value, pnl, row) triples the scatter plots. */
 function obSectionData(cols, idx, m, column) {
   const vals = cols[column] || [], pnl = cols.pnl;
-  const acc = new Map();   // label -> {extra, key, label, count, total, wins}
+  // `extra` 0 sorts by bin/category index; 1 is a value outside a fixed
+  // category list (or any value of a data-derived one), sorted by value.
+  // Two stores rather than one Map keyed `extra + ':' + key`: building that
+  // string for every trade in every section was 2 s of a 240,000-trade
+  // sweep's recompute. `loose` is keyed String(v), which is what the
+  // string key merged on.
+  const fixed = [];          // bin / category index -> {extra: 0, key, label, count, total, wins}
+  const loose = new Map();   // String(value) -> {extra: 1, ...}
   const xs = [], ys = [], rowsIdx = [];
   const cats = m.categories ? new Map(m.categories.map((c, i) => [c.value, { i, label: c.label }])) : null;
+  const range = m.type === 'range';
   for (const i of idx) {
     const v = vals[i];
     if (obNull(v)) continue;
-    // `extra` 0 sorts by bin/category index; 1 is a value outside a fixed
-    // category list (or any value of a data-derived one), sorted by value.
-    let extra = 0, key, label;
-    if (m.type === 'range') {
-      key = obBinIndex(v, m.bins); label = m.bins.labels[key];
+    let b;
+    if (range) {
+      const key = obBinIndex(v, m.bins);
+      b = fixed[key] || (fixed[key] = { extra: 0, key, label: m.bins.labels[key], count: 0, total: 0, wins: 0 });
     } else if (cats && cats.has(v)) {
-      key = cats.get(v).i; label = cats.get(v).label;
+      const c = cats.get(v);
+      b = fixed[c.i] || (fixed[c.i] = { extra: 0, key: c.i, label: c.label, count: 0, total: 0, wins: 0 });
     } else {
-      extra = 1; key = v; label = String(v);
+      const s = String(v);
+      b = loose.get(s);
+      if (!b) loose.set(s, b = { extra: 1, key: v, label: s, count: 0, total: 0, wins: 0 });
     }
-    let b = acc.get(extra + ':' + key);
-    if (!b) acc.set(extra + ':' + key, b = { extra, key, label, count: 0, total: 0, wins: 0 });
     b.count++; b.total += pnl[i]; if (pnl[i] > 0) b.wins++;
     xs.push(v); ys.push(pnl[i]); rowsIdx.push(i);
   }
@@ -228,17 +251,97 @@ function obSectionData(cols, idx, m, column) {
   // to scale: dropping them put ">40" beside "18-20". Deliberately unlike
   // calculate_bin_stats (observed=True). An empty bin is count 0 with null
   // avg/total/win, which Chart.js draws as nothing.
-  if (m.type === 'range') {
+  if (range) {
     m.bins.labels.forEach((label, key) => {
-      if (!acc.has('0:' + key)) acc.set('0:' + key, { extra: 0, key, label, count: 0, total: 0, wins: 0 });
+      if (!fixed[key]) fixed[key] = { extra: 0, key, label, count: 0, total: 0, wins: 0 };
     });
   }
-  const rows = [...acc.values()].sort((a, b) =>
+  const rows = [...fixed.filter(Boolean), ...loose.values()].sort((a, b) =>
     a.extra - b.extra || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
   ).map(b => (b.count
     ? { label: b.label, count: b.count, total: b.total, avg: b.total / b.count, win: b.wins / b.count * 100 }
     : { label: b.label, count: 0, total: null, avg: null, win: null }));
   return { valued: xs.length, rows, xs, ys, rowsIdx };
+}
+
+/* ── parameter sweeps: the mean per variant ─────────────────────────────
+ *
+ * A sweep at ALL pools every variant's trades. Figures that do not depend on
+ * how many variants there are (avg P/L, win %, profit factor, avg/max win and
+ * loss, avg days, avg P/L %) are computed over the pooled trades. Figures that
+ * GROW with the count -- total P/L, Max DD, Calmar, avg annual P/L, ann ret %,
+ * peak deployed -- are the MEAN OF EACH VARIANT'S OWN FIGURE, and the equity,
+ * drawdown and capital-deployed charts draw the mean-per-variant curve.
+ * Pooled, 75 variants read as 75 strategies run at once: a total 75x one
+ * variant's and a drawdown set by how many variants happened to be selected
+ * (settled with the user, 2026-10-18; the parameter grid uses the same rule).
+ *
+ * k is the number of variants with at least one trade in view. A variant a
+ * filter leaves empty is not "in view", and averaging its zero in would shrink
+ * every figure by an amount set by the filter rather than by the strategy. */
+
+/* Map variant id -> its rows within idx, in idx order. */
+function obByVariant(cols, idx) {
+  const v = cols.variant || [];
+  const out = new Map();
+  for (const i of idx) {
+    const id = v[i];
+    let g = out.get(id);
+    if (!g) out.set(id, g = []);
+    g.push(i);
+  }
+  return out;
+}
+
+/* Each variant's own figures that do not depend on capital: {id, rows, stats,
+ * conc}. obExtraStats is applied per variant by the caller, with capital. */
+function obVariantFigures(cols, idx, sessions) {
+  const out = [];
+  for (const [id, rows] of obByVariant(cols, idx)) {
+    out.push({ id, rows, stats: obStats(cols, rows), conc: obConcurrency(cols, rows, sessions) });
+  }
+  return out;
+}
+
+/* Mean of the non-null values; null when there are none. */
+function obMeanOf(values) {
+  let s = 0, n = 0;
+  for (const v of values) if (v !== null && v !== undefined && Number.isFinite(v)) { s += v; n++; }
+  return n ? s / n : null;
+}
+
+/* The mean-per-variant equity and drawdown, one point per close date of the
+ * pooled trades.
+ *   cumulative  the mean of the variants' cumulative P/L = pooled / k
+ *   drawdown    the mean of the variants' OWN drawdowns on that date (each
+ *               variant's drawdown carried forward between its closes, 0
+ *               before its first) -- not the drawdown of the mean curve,
+ *               which would be the basket's shallower dip in disguise.
+ * Its deepest point is shallower than the summary's Max DD (the mean of each
+ * variant's deepest point) whenever variants bottom on different days; the
+ * chart says so. Returns obEquity's shape plus `k`. */
+function obMeanEquity(cols, idx, figures) {
+  const k = figures.length;
+  const pooled = obEquity(cols, idx);
+  if (!k) return { points: [], maxDD: null, k };
+  const dates = pooled.points.map(p => p.date);
+  const ddSum = new Array(dates.length).fill(0);
+  for (const f of figures) {
+    const pts = obEquity(cols, f.rows).points;
+    let j = 0, cur = 0;
+    for (let t = 0; t < dates.length; t++) {
+      while (j < pts.length && pts[j].date <= dates[t]) { cur = pts[j].drawdown; j++; }
+      ddSum[t] += cur;
+    }
+  }
+  const points = [];
+  let maxDD = null;
+  pooled.points.forEach((p, t) => {
+    const pt = { date: p.date, pnl: p.pnl / k, cumulative: p.cumulative / k, peak: null, drawdown: ddSum[t] / k };
+    points.push(pt);
+    if (pt.drawdown < 0 && (maxDD === null || pt.drawdown < maxDD.drawdown)) maxDD = pt;
+  });
+  return { points, maxDD, k };
 }
 
 /* Bar opacity from a bin's trade count relative to the largest bin in that
@@ -392,6 +495,15 @@ function obCsvCell(v) {
 
 /* fields: [{header, column, map?}] — one CSV column each, rows in idx order.
  * Values are written as held (full precision), never as the page formats them. */
+/* A File as the page uploads it: gzipped where the browser can (the server
+ * un-gzips any part that starts with the gzip magic), so a 75-file sweep
+ * crosses the tunnel as ~4 MB instead of ~40. The name is kept. */
+async function obGzipFile(file) {
+  if (typeof CompressionStream !== 'function' || !file.stream) return file;
+  const blob = await new Response(file.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+  return new File([blob], file.name, { type: 'application/octet-stream' });
+}
+
 function obTradeCsv(cols, idx, fields) {
   const lines = [fields.map(f => obCsvCell(f.header)).join(',')];
   for (const i of idx) {
@@ -415,7 +527,21 @@ document.addEventListener('alpine:init', () => {
 
     uploading: false,
     uploadError: '',
+    uploadCount: 0,      // files in the upload being parsed
+    // Files behind the loaded log when it came from an upload. Reactive on
+    // purpose: OB_DATA.files is outside the proxy, and a Save box keyed on it
+    // stayed hidden after a single file replaced a sweep.
+    fileCount: 0,
     dragOver: false,
+
+    // A parameter sweep (payload.sweep): null for a single log. variantSel is
+    // 'all' or one variant's id as a string; vk the number of variants with
+    // trades in view (1 unless ALL pools several); viewN the trades in view.
+    sweep: null,
+    variantSel: 'all',
+    vk: 1,
+    viewN: 0,
+    filesOpen: false,
 
     market: null,
     marketLoading: false,
@@ -519,32 +645,40 @@ document.addEventListener('alpine:init', () => {
 
     onDrop(ev) {
       this.dragOver = false;
-      const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
-      if (f) this.upload(f);
+      const fs = ev.dataTransfer && ev.dataTransfer.files;
+      if (fs && fs.length) this.upload([...fs]);
     },
 
     onPick(ev) {
-      const f = ev.target.files && ev.target.files[0];
-      if (f) this.upload(f);
+      const fs = ev.target.files;
+      if (fs && fs.length) this.upload([...fs]);
       ev.target.value = '';   // re-picking the same file must fire change again
     },
 
-    async upload(file) {
-      const name = file.name || '';
-      if (!/\.(csv|json)$/i.test(name)) {
-        this.uploadError = `${name}: upload an Option Omega .csv or a Mesosim .json`;
+    /* One file or a whole sweep, in ONE request: the server parses every
+     * file, refuses the batch (naming the file) if they do not form one
+     * sweep, and returns one payload. Nothing on the page changes until it
+     * has answered. */
+    async upload(files) {
+      files = [...files];
+      const bad = files.find(f => !/\.(csv|json)$/i.test(f.name || ''));
+      if (bad) {
+        this.uploadError = `${bad.name}: upload Option Omega .csv files or Mesosim .json`;
         return;
       }
       this.uploading = true;
+      this.uploadCount = files.length;
       this.uploadError = '';
       try {
         const fd = new FormData();
-        fd.append('file', file);
-        const r = await fetch('/api/oo-backtest/parse', { method: 'POST', body: fd });
+        for (const f of files) fd.append('files', await obGzipFile(f), f.name);
+        const r = await fetch('/api/oo-backtest/parse-batch', { method: 'POST', body: fd });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
         this.setTrades(body);
-        OB_DATA.file = file;
+        OB_DATA.files = files;
+        OB_DATA.file = files.length === 1 ? files[0] : null;
+        this.fileCount = files.length;
         this.hasUploadFile = true;
         this.selectedSavedId = '';
         this.saveName = body.suggested_name || '';
@@ -560,11 +694,14 @@ document.addEventListener('alpine:init', () => {
     },
 
     setTrades(payload) {
-      OB_DATA.columns = payload.columns;
-      OB_DATA.n = payload.n;
+      OB_DATA.full = { columns: payload.columns, n: payload.n };
+      OB_DATA.files = [];
+      this.fileCount = 0;
       OB_DATA.logToken++;
-      this.presentColumns = Object.keys(payload.columns)
-        .filter(c => payload.columns[c].some(v => v !== null && v !== undefined));
+      this.sweep = payload.sweep && payload.sweep.variants && payload.sweep.variants.length ? payload.sweep : null;
+      this.variantSel = 'all';
+      this.filesOpen = false;
+      this.applyView();
       const { columns, ...meta } = payload;
       OB_DATA.sessions = (payload.market && payload.market.spx_sessions) || [];
       if (payload.saved) {
@@ -585,6 +722,110 @@ document.addEventListener('alpine:init', () => {
       for (const row of this.surfRows) this.fetchSurfRow(row.key);
       this.initFilters();
       this.$nextTick(() => this.recompute());
+    },
+
+    /* ── parameter sweeps: the variant view ─────────────────────────────── */
+
+    /* OB_DATA.columns/n become the selected variant's rows (or every row at
+     * ALL). One variant is then, to every other line of this page, exactly
+     * the log that variant's file would have been. */
+    applyView() {
+      const full = OB_DATA.full;
+      if (!full) return;
+      if (!this.sweep || this.variantSel === 'all') {
+        OB_DATA.columns = full.columns;
+        OB_DATA.n = full.n;
+      } else {
+        const id = Number(this.variantSel), v = full.columns.variant || [];
+        const rows = [];
+        for (let i = 0; i < full.n; i++) if (v[i] === id) rows.push(i);
+        const cols = {};
+        for (const [k, arr] of Object.entries(full.columns)) cols[k] = rows.map(i => arr[i]);
+        OB_DATA.columns = cols;
+        OB_DATA.n = rows.length;
+      }
+      this.viewN = OB_DATA.n;
+      this.presentColumns = Object.keys(OB_DATA.columns)
+        .filter(c => OB_DATA.columns[c].some(v => v !== null && v !== undefined));
+    },
+
+    /* Pick a variant (or 'all'). Auto bins and filter ranges are rebuilt from
+     * the rows now in view, as a fresh load of that variant would build them;
+     * what the user narrowed stays narrowed, clamped to the new ranges. */
+    setVariant(sel) {
+      if (!this.sweep || String(sel) === this.variantSel) return;
+      this.variantSel = String(sel);
+      this.applyView();
+      this.computeAutoBins();
+      this.reinitFiltersKeeping();
+      for (const row of this.surfRows) if (row.rowFilter) this.initRowFilter(row);
+      this.$nextTick(() => this.recompute());
+    },
+
+    reinitFiltersKeeping() {
+      const old = this.filters, oldBounds = this.dateBounds;
+      this.initFilters();
+      const nf = this.filters;
+      const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+      for (const [key, r] of Object.entries(old.ranges)) {
+        const n = nf.ranges[key];
+        if (!n || !(r.lo > r.min || r.hi < r.max)) continue;
+        n.lo = clamp(r.lo, n.min, n.max);
+        n.hi = clamp(r.hi, n.lo, n.max);
+      }
+      for (const [key, c] of Object.entries(old.cats)) {
+        const n = nf.cats[key];
+        if (!n || c.selected.length >= c.options.length) continue;
+        const had = new Set(c.options.map(o => o.value)), kept = new Set(c.selected);
+        // A value the old options did not have was never unticked: keep it.
+        n.selected = n.options.map(o => o.value).filter(v => kept.has(v) || !had.has(v));
+      }
+      if (old.dateFrom && old.dateFrom > oldBounds.min) nf.dateFrom = old.dateFrom < nf.dateFrom ? nf.dateFrom : (old.dateFrom > nf.dateTo ? nf.dateTo : old.dateFrom);
+      if (old.dateTo && old.dateTo < oldBounds.max) nf.dateTo = old.dateTo > nf.dateTo ? nf.dateTo : (old.dateTo < nf.dateFrom ? nf.dateFrom : old.dateTo);
+    },
+
+    variantK() { return this.vk; },
+
+    variantNote() {
+      if (!this.sweep) return '';
+      const all = this.sweep.variants.length;
+      if (this.variantSel !== 'all') return 'One variant: the page exactly as for that variant\'s own file.';
+      if (this.vk <= 1) return all > 1 ? `${this.vk} of ${all} variants has trades under the filters.` : '';
+      const of = this.vk < all ? ` (${this.vk} of ${all} have trades under the filters)` : '';
+      return `ALL pools ${this.vk} variants${of}. Avg P/L, Win %, Profit Factor, Avg/Max Win and Loss, Avg Days and ` +
+             `Avg P/L % use every trade. Total P/L, Max DD, Calmar, Avg Annual P/L, Avg Annual Return %, peak ` +
+             `deployed and the cumulative, drawdown and deployment charts are the MEAN PER VARIANT, not the ` +
+             `${this.vk} run at once.`;
+    },
+
+    /* The small tag on a summary box whose figure is a per-variant mean. */
+    perVariantTag() { return this.vk > 1 ? 'mean / variant' : ''; },
+
+    multiFile() { return this.fileCount > 1 && this.hasUploadFile; },
+
+    /* What each file was read as -- said on load, so a filename misread shows. */
+    sweepHeadline() {
+      const sw = this.sweep;
+      if (!sw) return '';
+      const src = new Set(sw.files.map(f => f.source));
+      const from = src.size === 1 ? ({ columns: 'param_* columns', filename: 'the filenames' }[[...src][0]] || '')
+                                  : 'param_* columns and filenames';
+      return `${sw.variants.length} variant${sw.variants.length === 1 ? '' : 's'} · ${sw.params.join(', ')}` +
+             (from ? ` (from ${from})` : '') + ` · ${sw.files.length} file${sw.files.length === 1 ? '' : 's'}`;
+    },
+
+    sweepFileLines() {
+      const sw = this.sweep;
+      if (!sw) return [];
+      return sw.files.map(f => {
+        let what;
+        if (f.source === 'columns') what = `${f.variants} variant${f.variants === 1 ? '' : 's'} from ${(f.columns || []).join(', ')}`;
+        else if (f.source === 'filename') what = 'read as ' + sw.params.map(k => `${k}=${f.params[k]}`).join(' · ');
+        else what = 'no parameters';
+        const ign = f.ignored_tokens && f.ignored_tokens.length ? ` (not read: ${f.ignored_tokens.join(' ')})` : '';
+        const drop = f.ignored_dropped ? ` · ${f.ignored_dropped.toLocaleString()} isIgnored dropped` : '';
+        return { key: f.file, text: `${f.file}: ${what}${ign} · ${f.trades.toLocaleString()} trades${drop}` };
+      });
     },
 
     /* ── saved strategies ──────────────────────────────────────────────── */
@@ -622,6 +863,7 @@ document.addEventListener('alpine:init', () => {
         this.setTrades(body);
         // A loaded saved strategy is already saved; there is no File to send.
         OB_DATA.file = null;
+        OB_DATA.files = [];
         this.hasUploadFile = false;
         this.saveMsg = '';
         this.saveError = '';
@@ -845,13 +1087,25 @@ document.addEventListener('alpine:init', () => {
 
     recompute() {
       if (!OB_DATA.columns) return;
-      const idx = obApplyFilters(OB_DATA.columns, OB_DATA.n, this.activeSpecs());
+      const cols = OB_DATA.columns;
+      const idx = obApplyFilters(cols, OB_DATA.n, this.activeSpecs());
       OB_DATA.idx = idx;
       this.idxTick++;
       this.filteredCount = idx.length;
-      this.stats = obStats(OB_DATA.columns, idx);
-      OB_DATA.conc = obConcurrency(OB_DATA.columns, idx, OB_DATA.sessions);
-      this.renderPerformance(obEquity(OB_DATA.columns, idx));
+      const pooled = obStats(cols, idx);
+      OB_DATA.pooledStats = pooled;
+      // ALL over several variants: the scale-dependent figures are the mean
+      // of each variant's own (see obVariantFigures).
+      const per = this.sweep && this.variantSel === 'all' ? obVariantFigures(cols, idx, OB_DATA.sessions) : [];
+      OB_DATA.vm = per.length > 1 ? per : null;
+      this.vk = OB_DATA.vm ? per.length : (per.length || 1);
+      this.stats = OB_DATA.vm
+        ? { ...pooled, total_pnl: obMeanOf(per.map(f => f.stats.total_pnl)),
+            max_drawdown: obMeanOf(per.map(f => f.stats.max_drawdown)) }
+        : pooled;
+      OB_DATA.conc = obConcurrency(cols, idx, OB_DATA.sessions);
+      OB_DATA.eq = OB_DATA.vm ? obMeanEquity(cols, idx, OB_DATA.vm) : obEquity(cols, idx);
+      this.renderPerformance(OB_DATA.eq);
       this.renderSections(idx);
       this.recomputeCapital();
     },
@@ -928,7 +1182,9 @@ document.addEventListener('alpine:init', () => {
       let h = 0;
       for (const i of idx) h = (h * 31 + i + 1) % 1000000007;
       const cov = this.surf.common ? (this.surfCoverage() || {}).commonStart : '';
-      return `${idx.length}:${h}:${cov || ''}`;
+      // The view's rows are numbered from 0 in every variant: without the
+      // selection, two variants of equal size would share a signature.
+      return `${this.variantSel}:${idx.length}:${h}:${cov || ''}`;
     },
     surfStale() { return !!this.surf.result && this.surf.result.sig !== this.surfSignature(); },
 
@@ -957,6 +1213,9 @@ document.addEventListener('alpine:init', () => {
           beforeCoverage: beforeEarliest, nMin: ns.length ? Math.min(...ns) : 0, nMax: ns.length ? Math.max(...ns) : 0,
           at: new Date().toTimeString().slice(0, 5), ms: Math.round(performance.now() - t0),
           lookahead: body.lookahead_confirmed,
+          // Several variants pooled: the same market day is in the sample
+          // once per variant, so n -- and every p-value -- is inflated.
+          variants: OB_DATA.vm ? OB_DATA.vm.length : 1,
         };
         this.$nextTick(() => this.renderRanking());
       } catch (e) {
@@ -1020,9 +1279,23 @@ document.addEventListener('alpine:init', () => {
                                         groups: this.surf.groups, other: this.surf.other });
     },
 
+    surfPooled() { return !!this.surf.result && this.surf.result.variants > 1; },
+
+    surfPooledNote() {
+      if (!this.surfPooled()) return '';
+      return `Significance is not marked: these trades pool ${this.surf.result.variants} variants, and the same ` +
+             `market day appears once per variant, which inflates n and every p-value. The correlations stand; ` +
+             `the Benjamini-Hochberg line cannot be computed this way. Select one variant to see it.`;
+    },
+
     surfFooter() {
       const v = this.surfView();
       if (!v) return '';
+      if (this.surfPooled()) {
+        return `${v.bars.length} bars · ${this.surf.result.variants} variants pooled, no significance marked` +
+               (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
+               ' · opacity by n · click a bar to add its section below';
+      }
       const name = this.surf.method === 'spearman' ? 'Spearman' : 'Pearson';
       const bh = obBhBoundary(v.bars);
       const line = bh.index === null ? 'none in view survive, so no line' : 'left of the dashed line';
@@ -1039,7 +1312,7 @@ document.addEventListener('alpine:init', () => {
      * forms and the n ranges, so the cause is visible. */
     surfBhWarning() {
       const v = this.surfView();
-      if (!v) return '';
+      if (!v || this.surfPooled()) return '';
       const bh = obBhBoundary(v.bars);
       if (!bh.failLeft) return '';
       const left = v.bars.slice(0, bh.index);
@@ -1111,19 +1384,22 @@ document.addEventListener('alpine:init', () => {
       const lim = Math.ceil(maxAbs * 20) / 20;
       const yScale = { min: -lim, max: lim, border: { display: false } };
       const method = this.surf.method;
+      const pooled = this.surfPooled();
       const tipLines = b => {
         const m = cat.get(b.column) || {};
-        const pr = `Pearson r ${b.pearson === null ? '—' : b.pearson.toFixed(3)} (p ${obP(b.pearson_p)}, BH ${obP(b.pearson_p_bh)})`;
-        const sp = `Spearman ρ ${b.spearman === null ? '—' : b.spearman.toFixed(3)} (p ${obP(b.spearman_p)}, BH ${obP(b.spearman_p_bh)})`;
+        // Pooled variants: no p, no BH, no tick -- they would be wrong.
+        const sig = (p, bh) => (pooled ? '' : ` (p ${obP(p)}, BH ${obP(bh)})`);
+        const pr = `Pearson r ${b.pearson === null ? '—' : b.pearson.toFixed(3)}${sig(b.pearson_p, b.pearson_p_bh)}`;
+        const sp = `Spearman ρ ${b.spearman === null ? '—' : b.spearman.toFixed(3)}${sig(b.spearman_p, b.spearman_p_bh)}`;
         return [...obWrap(m.description, 60), ...(m.formula ? obWrap('= ' + m.formula, 60) : []),
                 `n ${b.n.toLocaleString()} · ${b.bars.toLocaleString()} distinct bars · from ${m.min_date || '—'}`,
-                method === 'spearman' ? sp + (b.survives ? '  ✓ BH' : '') : sp,
-                method === 'pearson' ? pr + (b.survives ? '  ✓ BH' : '') : pr,
+                method === 'spearman' ? sp + (b.survives && !pooled ? '  ✓ BH' : '') : sp,
+                method === 'pearson' ? pr + (b.survives && !pooled ? '  ✓ BH' : '') : pr,
                 `${b.family} · ${b.form}${b.tenor ? ' · ' + b.tenor : ''}${b.wing ? ' · ' + b.wing : ''}`];
       };
       // The BH boundary: a faint vertical line after the last surviving bar,
       // drawn by a per-chart plugin (no outline on the bars themselves).
-      const bh = obBhBoundary(v.bars);
+      const bh = pooled ? { index: null } : obBhBoundary(v.bars);
       const bhLine = {
         id: 'obBhLine',
         afterDatasetsDraw(chart) {
@@ -1262,7 +1538,8 @@ document.addEventListener('alpine:init', () => {
       const token = OB_DATA.logToken;
       row.loading = true;
       row.error = '';
-      const cols = OB_DATA.columns;
+      // Every trade of the LOAD, every variant: the view is re-sliced from it.
+      const cols = (OB_DATA.full || { columns: OB_DATA.columns }).columns;
       const trades = cols.date_opened.map((d, i) => [d, (cols.time_opened || [])[i] ?? null]);
       try {
         const r = await fetch('/api/oo-backtest/surface/values', {
@@ -1276,9 +1553,9 @@ document.addEventListener('alpine:init', () => {
         }
         const vals = body.values.map(v => (v === null || v === undefined ? null : v * row.scale));
         cols[row.column] = vals;
-        this.presentColumns = this.presentColumns.filter(c => c !== row.column)
-          .concat(vals.some(v => v !== null) ? [row.column] : []);
-        row.report = { withValue: vals.filter(v => v !== null).length, trades: vals.length, noBar: body.report.no_bar };
+        this.applyView();
+        const inView = OB_DATA.columns[row.column];
+        row.report = { withValue: inView.filter(v => v !== null).length, trades: inView.length, noBar: body.report.no_bar };
         this.computeAutoBins();
         this.initRowFilter(row);
       } catch (e) {
@@ -1299,6 +1576,7 @@ document.addEventListener('alpine:init', () => {
         if (OB_CHARTS.sec[id]) { OB_CHARTS.sec[id].destroy(); delete OB_CHARTS.sec[id]; }
       }
       if (OB_DATA.columns) delete OB_DATA.columns[m.column];
+      if (OB_DATA.full) delete OB_DATA.full.columns[m.column];
       this.presentColumns = this.presentColumns.filter(c => c !== m.column);
       this.surfRows = this.surfRows.filter(r => r.key !== m.key);
       delete OB_DATA.autoBins[m.key];
@@ -1405,9 +1683,21 @@ document.addEventListener('alpine:init', () => {
     /* Everything capital feeds, and nothing else: no re-filter, no re-bin. */
     recomputeCapital() {
       if (!OB_DATA.columns || !this.stats) return;
-      const conc = OB_DATA.conc;
-      this.extra = obExtraStats(OB_DATA.columns, OB_DATA.idx, this.stats, this.capital(), conc ? conc.peak : 0);
-      this.deploy = conc && { peak: conc.peak, peakDay: conc.peakDay, offSession: conc.offSession,
+      const conc = OB_DATA.conc, cap = this.capital(), vm = OB_DATA.vm;
+      let extra = obExtraStats(OB_DATA.columns, OB_DATA.idx, OB_DATA.pooledStats || this.stats, cap, conc ? conc.peak : 0);
+      if (vm) {
+        // Profit factor and Avg P/L % pool; the annual figures are each
+        // variant's own over its own span and peak, averaged.
+        const per = vm.map(f => obExtraStats(OB_DATA.columns, f.rows, f.stats, cap, f.conc.peak));
+        extra = { ...extra, years: null,
+                  avg_annual_pnl: obMeanOf(per.map(e => e.avg_annual_pnl)),
+                  calmar: obMeanOf(per.map(e => e.calmar)),
+                  avg_annual_return_pct: obMeanOf(per.map(e => e.avg_annual_return_pct)) };
+      }
+      this.extra = extra;
+      this.deploy = conc && { peak: vm ? obMeanOf(vm.map(f => f.conc.peak)) : conc.peak,
+                              curvePeak: vm ? conc.peak / vm.length : conc.peak,
+                              pooled: !!vm, peakDay: conc.peakDay, offSession: conc.offSession,
                               unclosed: conc.unclosed, sameSession: conc.sameSession,
                               counted: conc.counted, days: conc.days.length,
                               hasSessions: OB_DATA.sessions.length > 0 };
@@ -1485,6 +1775,10 @@ document.addEventListener('alpine:init', () => {
       const d = this.deploy;
       if (!d || !d.peak) return '';
       const cap = this.capital();
+      if (d.pooled) {
+        return `mean peak ${d.peak.toFixed(1)} per variant` + (cap ? ` · ${obMoney(d.peak * cap)}` : '') +
+               ` (curve ${d.curvePeak.toFixed(1)})`;
+      }
       return `peak ${d.peak} on ${d.peakDay}` + (cap ? ` · ${obMoney(d.peak * cap)}` : '');
     },
 
@@ -1516,14 +1810,18 @@ document.addEventListener('alpine:init', () => {
       if (OB_CHARTS.deploy && OB_CHARTS.deploy.canvas !== el) { OB_CHARTS.deploy.destroy(); OB_CHARTS.deploy = null; }
       if (!el || !conc) return;
       const cap = this.capital();
-      const pts = conc.days.map((d, k) => ({ x: obDay(d), y: conc.counts[k], d }));
+      // At ALL over several variants: the mean positions per variant.
+      const kv = OB_DATA.vm ? OB_DATA.vm.length : 1;
+      const pts = conc.days.map((d, k) => ({ x: obDay(d), y: conc.counts[k] / kv, d }));
+      const peak = conc.peak / kv;
+      const num = y => (kv > 1 ? y.toFixed(1) : String(y));
       // ONE line. The dollar axis is the position axis times capital: both
       // scales are pinned to the same range, so the right one only relabels.
       // A whole-number step from 1-2-5 giving about five ticks, the top rounded
       // up to it; the dollar axis ticks at the same step times capital, so the
       // two sets of labels sit level.
-      const step = [1, 2, 5, 10, 20, 50, 100, 200, 500].find(s => conc.peak * 1.05 / s <= 5) || 1000;
-      const yMax = Math.max(step, Math.ceil(conc.peak * 1.05 / step) * step);
+      const step = [1, 2, 5, 10, 20, 50, 100, 200, 500].find(s => peak * 1.05 / s <= 5) || 1000;
+      const yMax = Math.max(step, Math.ceil(peak * 1.05 / step) * step);
       const tick = { color: '#9a9a9a', font: { size: 10 } };
       const xr = pts.length ? { min: pts[0].x, max: pts[pts.length - 1].x } : {};
       const cfg = {
@@ -1538,13 +1836,13 @@ document.addEventListener('alpine:init', () => {
                  ticks: { ...tick, maxTicksLimit: 6, callback: v => obIsoDay(v).slice(0, 7) } },
             y: { min: 0, max: yMax, grid: { color: 'rgba(255,255,255,0.05)' }, border: { display: false },
                  ticks: { ...tick, precision: 0, stepSize: step },
-                 title: { display: true, text: 'positions', color: '#9a9a9a', font: { size: 10 } } },
+                 title: { display: true, text: kv > 1 ? 'positions per variant (mean)' : 'positions', color: '#9a9a9a', font: { size: 10 } } },
             y2: { display: !!cap, position: 'right', min: 0, max: yMax * (cap || 1), grid: { display: false },
                   border: { display: false }, ticks: { ...tick, stepSize: step * (cap || 1), callback: v => obMoney(v) } },
           },
           plugins: { legend: { display: false },
                      tooltip: { callbacks: { title: it => it[0].raw.d,
-                                             label: it => `${it.raw.y} open` + (cap ? ` · ${obMoney(it.raw.y * cap)} deployed` : '') } } },
+                                             label: it => `${num(it.raw.y)} open` + (kv > 1 ? ' per variant' : '') + (cap ? ` · ${obMoney(it.raw.y * cap)} deployed` : '') } } },
         },
       };
       if (OB_CHARTS.deploy) { OB_CHARTS.deploy.data = cfg.data; OB_CHARTS.deploy.options = cfg.options; OB_CHARTS.deploy.update('none'); }
@@ -1552,7 +1850,6 @@ document.addEventListener('alpine:init', () => {
     },
 
     fmtVal(m, v) { return obFmt(v, m.format); },
-    moneyText(v) { return obMoney(v); },
 
     rangeSummary(m) {
       const r = this.rangeOf(m);
@@ -1599,8 +1896,20 @@ document.addEventListener('alpine:init', () => {
     maxDDLine() {
       const st = this.stats;
       if (!st || !st.num_trades) return '';
-      const eq = obEquity(OB_DATA.columns, OB_DATA.idx);
+      const eq = OB_DATA.eq || obEquity(OB_DATA.columns, OB_DATA.idx);
+      if (this.vk > 1) {
+        // Not the same number, and said so: the summary's Max DD is the mean
+        // of each variant's deepest point; this curve's deepest point is
+        // shallower whenever the variants bottom on different days.
+        return `mean of the variants' drawdowns · deepest ${eq.maxDD ? obMoney(eq.maxDD.drawdown) : '—'}` +
+               ` · Max DD ${obMoney(st.max_drawdown)} is each variant's deepest, averaged`;
+      }
       return eq.maxDD ? `max ${obMoney(eq.maxDD.drawdown)} on ${eq.maxDD.date}` : 'no drawdown';
+    },
+
+    cumLine() {
+      if (!this.stats) return '';
+      return obMoney(this.stats.total_pnl) + (this.vk > 1 ? ` · mean of ${this.vk} variants` : '');
     },
 
     renderPerformance(eq) {
@@ -1653,8 +1962,8 @@ document.addEventListener('alpine:init', () => {
       if (OB_CHARTS.dd) { OB_CHARTS.dd.data = ddData; Object.assign(OB_CHARTS.dd.options.scales.x, xr); OB_CHARTS.dd.update('none'); }
       else {
         OB_CHARTS.dd = new Chart(ddEl.getContext('2d'), { type: 'line', data: ddData,
-          options: base(c => (c.datasetIndex === 1 ? 'Max drawdown ' : 'Drawdown ') +
-                             `${obMoney(c.raw.p.drawdown)} · peak ${obMoney(c.raw.p.peak)}`) });
+          options: base(c => (c.datasetIndex === 1 ? 'Max drawdown ' : 'Drawdown ') + `${obMoney(c.raw.p.drawdown)}` +
+                             (c.raw.p.peak === null ? ' (mean per variant)' : ` · peak ${obMoney(c.raw.p.peak)}`)) });
       }
     },
 
@@ -1777,6 +2086,14 @@ document.addEventListener('alpine:init', () => {
 
     canvasId(m, which) { return `ob-sec-${m.key}-${which}`; },
 
+    scatterNote(m) {
+      const s = this.sections[m.key];
+      const k = s ? obScatterStride(s.valued) : 1;
+      return k > 1 ? `· every ${k}th of ${s.valued.toLocaleString()} points drawn; the line fits all` : '';
+    },
+
+    totalTitle(m) { return 'Total P/L by ' + this.binNoun(m) + (this.vk > 1 ? ' · mean per variant' : ''); },
+
     /* "bin" for a range metric; the category's own name otherwise
      * ("Day of Week" -> "day of week", "P&L by Year" -> "year"). */
     binNoun(m) { return m.type === 'range' ? 'bin' : m.label.replace(/^P&L by /, '').toLowerCase(); },
@@ -1787,7 +2104,11 @@ document.addEventListener('alpine:init', () => {
         if (!this.hasColumn(m)) continue;
         const bins = m.type === 'range' ? this.binsFor(m) : null;
         if (m.type === 'range' && !bins) continue;
-        const mm = bins === m.bins ? m : { ...m, bins };
+        // RAW, not the reactive registry entry: obSectionData reads the bins
+        // once per trade, and through Alpine's proxy that was over a second
+        // of a 240,000-trade recompute. Nothing here writes to them.
+        const raw = o => (o && typeof Alpine !== 'undefined' && Alpine.raw ? Alpine.raw(o) : o);
+        const mm = { ...raw(m), bins: raw(bins) };
         // A row-scoped filter narrows this section only.
         let rowIdx = idx;
         if (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m)) {
@@ -1811,8 +2132,13 @@ document.addEventListener('alpine:init', () => {
       const grid = { color: 'rgba(255,255,255,0.05)' };
       const tick = { color: '#9a9a9a', font: { size: 10 } };
       const labels = d.rows.map(r => r.label);
+      // At ALL over several variants the bin's TOTAL is the mean per variant
+      // (it grows with the variant count); its average and win rate pool.
+      const kv = this.variantK();
+      const tot = r => (r.total === null ? null : r.total / kv);
       const rowTip = r => [`${r.count.toLocaleString()} trade${r.count === 1 ? '' : 's'}`,
-                           `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(r.total)}`, `Win ${r.win.toFixed(1)}%`];
+                           `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(tot(r))}` + (kv > 1 ? ` (mean of ${kv} variants)` : ''),
+                           `Win ${r.win.toFixed(1)}%`];
       const bar = (values, yTick, color) => ({
         type: 'bar',
         data: { labels, datasets: [{ data: values, backgroundColor: values.map((v, k) => (v === null ? 'transparent' : color(v, k))),
@@ -1829,7 +2155,7 @@ document.addEventListener('alpine:init', () => {
         },
       });
       this.upsertChart(this.canvasId(m, 'avg'), bar(d.rows.map(r => r.avg), v => obMoney(v), signColor));
-      this.upsertChart(this.canvasId(m, 'total'), bar(d.rows.map(r => r.total), v => obMoney(v), signColor));
+      this.upsertChart(this.canvasId(m, 'total'), bar(d.rows.map(tot), v => obMoney(v), signColor));
       if (m.winRate) {
         const cfg = bar(d.rows.map(r => r.win), v => v + '%',
                         (v, k) => obRgba(OB_BLUE, obBarAlpha(d.rows[k].count, maxCount)));
@@ -1839,15 +2165,22 @@ document.addEventListener('alpine:init', () => {
       if (!m.hasScatter) return;
 
       const cols = OB_DATA.columns;
-      const pts = d.xs.map((x, k) => ({ x, y: d.ys[k], row: d.rowsIdx[k] }));
+      const stride = obScatterStride(d.xs.length);
+      // Profit and loss as TWO datasets of one colour each, not one with a
+      // colour per point: an indexable colour stops Chart.js sharing point
+      // options, and resolving them per point was most of a scatter's cost.
+      const pos = [], neg = [];
+      for (let k = 0; k < d.xs.length; k += stride) (d.ys[k] >= 0 ? pos : neg).push({ x: d.xs[k], y: d.ys[k], row: d.rowsIdx[k] });
       let lo = Infinity, hi = -Infinity;
       for (const x of d.xs) { if (x < lo) lo = x; if (x > hi) hi = x; }
       const line = fit ? [{ x: lo, y: fit.intercept + fit.slope * lo }, { x: hi, y: fit.intercept + fit.slope * hi }] : [];
       this.upsertChart(this.canvasId(m, 'scatter'), {
         type: 'scatter',
         data: { datasets: [
-          { data: pts, pointRadius: 2.5, pointHoverRadius: 5, pointHitRadius: 4, borderWidth: 0,
-            pointBackgroundColor: pts.map(p => (p.y >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)')) },
+          { data: pos, pointRadius: 2.5, pointHoverRadius: 5, pointHitRadius: 4, borderWidth: 0,
+            pointBackgroundColor: 'rgba(52,152,219,0.55)' },
+          { data: neg, pointRadius: 2.5, pointHoverRadius: 5, pointHitRadius: 4, borderWidth: 0,
+            pointBackgroundColor: 'rgba(232,67,147,0.55)' },
           { data: line, type: 'line', borderColor: '#e0e0e0', borderWidth: 2, borderDash: [5, 4],
             pointRadius: 0, pointHitRadius: 0, fill: false },
         ] },
@@ -1858,7 +2191,7 @@ document.addEventListener('alpine:init', () => {
             y: { grid, border: { display: false }, ticks: { ...tick, maxTicksLimit: 6, callback: v => obMoney(v) } },
           },
           plugins: { legend: { display: false },
-                     tooltip: { filter: it => it.datasetIndex === 0,
+                     tooltip: { filter: it => it.datasetIndex < 2,
                                 callbacks: { title: it => cols.date_opened[it[0].raw.row],
                                              label: it => `${m.label} ${obFmt(it.raw.x, m.format)} · P/L ${obMoney(it.raw.y)}` } } },
         },
@@ -1886,6 +2219,10 @@ document.addEventListener('alpine:init', () => {
       const n = (this.meta && this.meta.notes) || {};
       const out = [];
       const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+      if (n.ignored_dropped) {
+        out.push({ warn: false, text: `${plural(n.ignored_dropped, 'trade', 'trades')} marked isIgnored dropped ` +
+                                      `(wide bid-ask; the website export leaves them out)` });
+      }
       if (n.open_positions) {
         out.push({ warn: true, text: `${plural(n.open_positions, 'position', 'positions')} still open at backtest end, excluded` });
       }
@@ -1927,6 +2264,13 @@ document.addEventListener('alpine:init', () => {
       const has = c => (cols[c] || []).some(v => v !== null && v !== undefined);
       const fields = OB_EXPORT_BASE.filter(has).map(c => ({ header: c, column: c }));
       const seen = new Set(fields.map(f => f.column));
+      // A sweep's trades carry their variant's parameters, as param_* -- the
+      // MCP export's own naming, so a re-upload reads them back.
+      if (this.sweep && cols.variant) {
+        const byId = new Map(this.sweep.variants.map(v => [v.id, v.params]));
+        fields.unshift(...this.sweep.params.map(k => ({ header: `param_${k}`, column: 'variant',
+                                                        map: id => (byId.get(id) || {})[k] })));
+      }
       const add = f => { if (!seen.has(f.column) && cols[f.column]) { seen.add(f.column); fields.push(f); } };
       for (const m of this.registry.filter(x => x.filter && this.isActive(x))) {
         const column = this.metricColumn(m);

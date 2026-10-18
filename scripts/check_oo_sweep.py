@@ -396,12 +396,65 @@ def check_endpoints() -> None:
     check(R.encode_json(body) == JSONResponse(jsonable_encoder(body)).body, "...and for a whole sweep payload")
 
 
+def check_rank_memory() -> None:
+    """The surface ranking at sweep scale: the same numbers as the direct
+    matrix, in a fraction of its memory."""
+    print("surface ranking at sweep scale")
+    import time as _t
+    import tracemalloc
+
+    import numpy as np
+
+    from app.oo_backtest import surface_stats as ss
+    rng = np.random.default_rng(3)
+    D, C = 300, 40
+    distinct = rng.normal(size=(D, C))
+    distinct[:120, ::3] = np.nan                       # late coverage: a second null pattern
+    distinct[0] = np.nan                               # the "no bar" row
+    distinct[:, 7] = 0.5                               # constant
+    gather = rng.integers(0, D, size=6000)
+    pnl = rng.normal(30, 400, size=6000)
+    pnl[::97] = np.nan
+    bars = gather.copy()
+    want = ss.correlations(distinct[gather], pnl, bars)
+    keep = ss.BLOCK_CELLS
+    try:
+        ss.BLOCK_CELLS = 6000 * 3                     # three columns a block: chunking exercised
+        got = ss.correlations_gathered(distinct, gather, pnl, bars)
+    finally:
+        ss.BLOCK_CELLS = keep
+    same = all(np.array_equal(got[f], want[f]) for f in ("n", "bars"))
+    close = all(np.allclose(got[f], want[f], rtol=1e-12, atol=1e-15, equal_nan=True)
+                for f in ("pearson", "pearson_p", "spearman", "spearman_p"))
+    check(same and close, "gathered + chunked == the full matrix (n, bars exact; r, p within 1e-12)")
+    one = ss.correlations_gathered(distinct, gather, pnl, bars)
+    check(all(np.array_equal(one[f], want[f], equal_nan=True) for f in want),
+          "below the block size: bit-identical to the full-matrix path")
+
+    # 240,000 trades over 2,500 distinct bars x 452 metrics.
+    distinct = rng.normal(size=(2500, 452))
+    distinct[:900, 200:] = np.nan
+    distinct[0] = np.nan
+    gather = rng.integers(0, 2500, size=240_000)
+    pnl = rng.normal(30, 400, size=240_000)
+    tracemalloc.start()
+    t0 = _t.monotonic()
+    ss.correlations_gathered(distinct, gather, pnl, gather)
+    took = _t.monotonic() - t0
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    full = 240_000 * 452 * 8
+    check(peak < 300e6, f"240,000 trades x 452 metrics: peak {peak / 1e6:.0f} MB, against {full / 1e6:.0f} MB for the "
+                        f"gathered matrix alone ({took:.1f}s)")
+
+
 def main() -> int:
     check_filenames()
     check_combine()
     check_ignored()
     check_mcp()
     check_endpoints()
+    check_rank_memory()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

@@ -192,9 +192,12 @@
 {%- endmacro %}
 
 
-{% macro stat_box(label, value_expr, sign_expr=None) -%}
+{#- tag_expr: an optional Alpine expression for a small tag after the label
+    (the OO page's "mean / variant" on a parameter sweep). Empty: no tag. -#}
+{% macro stat_box(label, value_expr, sign_expr=None, tag_expr=None) -%}
 <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-  <div class="stat-label">{{ label }}</div>
+  <div class="stat-label">{{ label }}
+    {%- if tag_expr %} <span class="stat-tag" x-show="{{ tag_expr|safe }}" x-text="{{ tag_expr|safe }}" style="font-size:10px;opacity:.75"></span>{% endif %}</div>
   {%- if sign_expr %}
   <div :class="({{ sign_expr|safe }} ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
        x-text="{{ value_expr|safe }}"></div>
