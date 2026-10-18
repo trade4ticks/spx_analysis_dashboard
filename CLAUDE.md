@@ -34,6 +34,54 @@ $10/$25/$50/$100/$250 gives a bin count nearest 24 (tie → smaller step), outli
 metrics are excluded from the fixed pd.cut parity; `check_auto_bins` tests them against a
 numpy reference instead. Everything else stays `fixed`.
 
+**Parameter sweeps** (in progress, 2026-10-18). Several logs of one strategy
+with varied parameters, loaded as ONE trade set — the same client-side
+filtering over more rows (75 variants ≈ 240,000 trades), not a new
+architecture. Phases: **P1** server (batch parse, variants, isIgnored) —
+done; **P2** page (multi-file drop, load report, variant selector, BH
+suppression when pooled, surface-rank memory fix); **P3** parameter grid +
+per-parameter sections; **P4** save/load sweeps (child table of files),
+docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
+- **Variant source, per file:** `param_*` columns (discovered; one MCP file
+  can hold several variants) beat the filename (`dte45`, `dte_45`, `dte=45`;
+  keys lower-cased; unread tokens REPORTED per file). A single file's NAME is
+  never read — every log ever uploaded would sprout parameters ("v2").
+  One file with no `param_*` columns is today's payload plus `sweep: null`.
+- **Refused, nothing loaded, the file named:** a different parameter set
+  (the majority set is the reference), the same variant twice (`"45"` from a
+  column equals `45` from a name), a blank `param_*` cell, the same file
+  twice, a batch with no parameters at all. The user's five MesoSim allantis
+  exports are refused as one variant (`v=2 · spx=0.35` each — the weekday
+  that differs is a bare word): rename them `day=mon` etc.
+- **`isIgnored`** (MCP exports keep the wide-bid-ask trades the website's
+  CSV omits) is dropped in `parse_csv`, for single files too; counted in
+  `parse_notes.ignored_dropped`; a value neither true nor false is refused.
+- **Payload:** one int `variant` column (whitelisted) + `sweep: {params,
+  values, variants: [{id, params, label, file, n}], files: [report],
+  timing}`. Ids follow numeric order (5 < 10 < 45).
+- **The 100 s tunnel.** Measured 75 × 3,200 trades through the shipped
+  code (`scripts/measure_sweep_parse.py`, read-only, also runnable on the
+  VPS): 11–12 s server-side with shared entries, 16–17 s with every variant
+  entering at random times (230k distinct entry bars). Before P1 it was ~32 s:
+  per-trade `strptime` in the entry join (memoised now), FastAPI's
+  `jsonable_encoder` (5.8 s) and GZipMiddleware's level 9 (9.2 s) — the
+  parse endpoints now return `json_gzip_response` (level 5; the middleware
+  skips an encoded response; `encode_json` is gated byte-identical to
+  JSONResponse). The page gzips each part before upload (~3.4 MB for 75).
+  `MAX_BATCH_BYTES` 300 MB uncompressed: ~5 MesoSim JSONs, not 75.
+- **Settled with the user (2026-10-18) for P2/P3 — every stat that SCALES
+  with the number of variants is the MEAN across the selected variants**:
+  total P/L, Max DD, Calmar, avg annual P/L, ann ret %, peak deployed; and
+  the equity, drawdown and capital-deployed charts at ALL draw the
+  mean-per-variant curve, said next to the selector. Scale-free stats (avg
+  P/L, win %, profit factor, avg days, avg/max win/loss, avg P/L %) POOL all
+  trades, as do the parameter sections and the grid's avg P/L / win rate /
+  count. The grid's Max DD / Calmar cells are the mean of each variant's own
+  figure — one rule for the summary and the grid. One variant selected = the
+  page exactly as today (auto bins and slider ranges from that variant).
+- **The Backtest Portfolio refuses a sweep** (P4), saying a single variant
+  can be exported and saved as a normal strategy to use it there.
+
 **Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
 loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes
 `PUT /strategies/{id}/notes` (`store.set_notes`) — the notes only, trimmed,

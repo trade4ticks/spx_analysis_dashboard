@@ -50,6 +50,7 @@ parse_csv() no longer copies the CSV's Gap into `gap` (a different definition).
 """
 
 import io
+import math
 import json
 import re
 from collections import defaultdict
@@ -99,6 +100,37 @@ def _decode_upload_contents(contents: str | bytes) -> str:
     return contents
 
 
+_TRUE = {"true", "1", "yes", "y", "t"}
+_FALSE = {"false", "0", "no", "n", "f", ""}
+
+
+def drop_ignored(df: pd.DataFrame, filename: str = "") -> dict:
+    """Drop the rows Option Omega marks isIgnored.
+
+    Logs exported through OptionOmega's MCP API keep the wide-bid-ask trades
+    the website's CSV export leaves out, flagged with an isIgnored boolean.
+    Dropping them here makes the two exports the same trade set. No column,
+    nothing dropped. A value that is neither true nor false is refused rather
+    than guessed: keeping a trade the vendor excluded, or dropping one it
+    kept, would change every figure without a trace. A blank reads as false.
+    """
+    col = next((c for c in df.columns if re.sub(r"[^a-z]", "", str(c).lower()) == "isignored"), None)
+    if col is None:
+        return {"df": df, "present": False, "dropped": 0}
+    s = df[col]
+    if s.dtype == bool:
+        flag = s
+    else:
+        text = s.map(lambda v: "" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v).strip().lower())
+        bad = sorted(set(text) - _TRUE - _FALSE)
+        if bad:
+            raise ValueError(f'{filename}: column "{col}" holds {", ".join(repr(b) for b in bad[:3])} '
+                             f"— expected true or false.")
+        flag = text.isin(_TRUE)
+    kept = df.loc[~flag.to_numpy()].drop(columns=[col]).reset_index(drop=True)
+    return {"df": kept, "present": True, "dropped": int(flag.sum())}
+
+
 def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
     """
     Parse an Option Omega CSV file.
@@ -121,6 +153,10 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
 
     # Rename columns
     df = df.rename(columns=COLUMN_MAPPING)
+
+    ignored = drop_ignored(df, filename)
+    df = ignored.pop("df")
+    df.attrs["parse_notes"] = {"ignored_dropped": ignored["dropped"]} if ignored["present"] else {}
 
     # Parse dates - use flexible parsing to handle various formats
     df["date_opened"] = pd.to_datetime(df["date_opened"], format="mixed", dayfirst=False)

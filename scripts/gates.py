@@ -151,6 +151,10 @@ GATES = [
     # Python and offline, so it runs on the VPS too.
     _s("check_market_calendar.py", note="NYSE sessions and expected bars",
        vps=True),
+    # Parameter sweeps: several logs as one trade set. What a filename is read
+    # as, which source wins, and every refusal fail quietly; pure Python.
+    _s("check_oo_sweep.py", vps=True,
+       note="sweep variants, filename parsing, refusals, isIgnored, batch endpoint"),
     # It bins in the browser against edges defined in Python; a disagreement
     # about which side of an edge a value falls on is invisible on screen.
     _s("check_oo_backtest.py", can_skip=True,

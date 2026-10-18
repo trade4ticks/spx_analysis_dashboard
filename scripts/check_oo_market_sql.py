@@ -875,6 +875,37 @@ async def check_end_to_end(pool) -> None:
     check("2023-07-04" not in rep["spx_sessions"],
           "but the holiday is not, however many artifact bars it carries")
 
+    # A SWEEP goes through the same join once, over every file's trades: each
+    # trade must get exactly the levels its own file gets loaded alone.
+    print("end to end: a two-file sweep -> one join -> payload")
+    from app.routers.oo_backtest import analyze_batch, _analyze
+    import io as _io
+    hdr = ["Date Opened", "Time Opened", "Date Closed", "Time Closed", "P/L", "Legs", "Premium"]
+    def oo(rows):
+        out = _io.StringIO()
+        pd.DataFrame(rows, columns=hdr).to_csv(out, index=False)
+        return out.getvalue().encode()
+    a = oo([["2023-07-03", "12:30:00", "2023-07-05", "15:59:00", 100, "x", 1],
+            ["2023-07-05", "10:00:00", "2023-07-06", "15:59:00", -40, "x", 1]])
+    b = oo([["2023-07-06", "10:00:00", "2023-07-10", "15:59:00", 60, "x", 1],
+            ["2023-07-03", "12:30:00", "2023-07-06", "15:59:00", 20, "x", 1]])
+    sw = await analyze_batch([("sw_pt50.csv", a), ("sw_pt25.csv", b)], pool)
+    alone = {n: await _analyze(c, n, pool) for n, c in (("sw_pt50.csv", a), ("sw_pt25.csv", b))}
+    sc = sw["columns"]
+    check(sw["market"]["joined"] and sw["n"] == 4 and [v["label"] for v in sw["sweep"]["variants"]] == ["pt=25", "pt=50"],
+          "the sweep joined, 4 trades, variants in numeric order")
+    lv = ("vix_level", "vix3m_level", "vix9d_level", "gap", "vix_bar_time", "vix3m_vix_ratio_entry")
+    ok = True
+    for vid, name in ((0, "sw_pt25.csv"), (1, "sw_pt50.csv")):
+        ac = alone[name]["columns"]
+        mine = [i for i, v in enumerate(sc["variant"]) if v == vid]
+        got = sorted(tuple(sc[k][i] for k in ("date_opened", "pnl") + lv) for i in mine)
+        want = sorted(tuple(ac[k][i] for k in ("date_opened", "pnl") + lv) for i in range(alone[name]["n"]))
+        ok = ok and got == want
+    check(ok, "every sweep trade carries exactly the market values its own file gets alone")
+    check(sc["vix_level"][sc["date_opened"].index("2023-07-03")] == bar_open("vix", EARLY, time(12, 30)),
+          "the early-close 12:30 entry still lands on its own bar inside a sweep")
+
 
 # ── surface metrics ─────────────────────────────────────────────────────────
 #

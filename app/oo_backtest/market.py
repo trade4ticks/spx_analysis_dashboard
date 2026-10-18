@@ -641,13 +641,22 @@ def entry_bar_requests(df: pd.DataFrame) -> tuple[list[date], list[time], pd.Ser
     daily-open proxy while the page looked normal.
     """
     raw = df["time_opened"] if "time_opened" in df.columns else pd.Series([None] * len(df), index=df.index)
-    norm = raw.map(normalize_entry_time)
+    # Distinct values only: a sweep is 240,000 trades over a few hundred entry
+    # times, and strptime per row was 4.5 s of a request the tunnel cuts at 100.
+    memo: dict = {}
+    def _norm(v):
+        k = (type(v), v if isinstance(v, (str, time)) else repr(v))   # NaN, pd.NA: never equal-tested
+        if k not in memo:
+            memo[k] = normalize_entry_time(v)
+        return memo[k]
+    norm = raw.map(_norm)
     found = int(norm.notna().sum())
     used = norm.fillna(SESSION_OPEN.strftime("%H:%M:%S"))
     dates = pd.to_datetime(df["date_opened"]).dt.date
     keys = pd.Series(list(zip(dates, used)), index=df.index)
     distinct = sorted(set(keys))
-    tod = [time.fromisoformat(t) for t in norm.dropna()]
+    tod_of = {t: time.fromisoformat(t) for t in set(norm.dropna())}
+    tod = [tod_of[t] for t in norm.dropna()]
     info = {
         "entry_time_found": found,
         "trades": int(len(df)),
@@ -685,14 +694,17 @@ def apply_market(df: pd.DataFrame, daily: pd.DataFrame, entry_rows: list[dict], 
     df["vix_vix9d_ratio_close"] = [_ratio(a, b) for a, b in zip(vix_c, v9d_c)]
 
     by_key = {(r["trade_date"], r["entry_time"].strftime("%H:%M:%S")): r for r in entry_rows}
+    # Each distinct entry bar's times formatted once, not once per trade.
+    bar_str = {k: {s: (r[f"{s}_bar_time"].strftime("%H:%M:%S") if r.get(f"{s}_bar_time") else None)
+                   for s in _LEVEL_SERIES} for k, r in by_key.items()}
     ent = [by_key.get(k, {}) for k in keys]
+    ent_str = [bar_str.get(k, {}) for k in keys]
     for s in _LEVEL_SERIES:
         # A bar on a day this series has no SESSION is an artifact (the VIX
         # holiday rows): the level is null, never that bar's price.
         in_session = [bool(by_date.get(d, {}).get(f"{s}_session")) for d in dates]
         df[f"{s}_level"] = [_float(r.get(f"{s}_entry")) if ok else None for r, ok in zip(ent, in_session)]
-        df[f"{s}_bar_time"] = [r[f"{s}_bar_time"].strftime("%H:%M:%S") if ok and r.get(f"{s}_bar_time") else None
-                               for r, ok in zip(ent, in_session)]
+        df[f"{s}_bar_time"] = [r.get(s) if ok else None for r, ok in zip(ent_str, in_session)]
     df["vix3m_vix_ratio_entry"] = [_ratio(a, b) for a, b in zip(df["vix3m_level"], df["vix_level"])]
     df["vix_vix9d_ratio_entry"] = [_ratio(a, b) for a, b in zip(df["vix_level"], df["vix9d_level"])]
     return df

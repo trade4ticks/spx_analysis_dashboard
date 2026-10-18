@@ -9,6 +9,11 @@ Endpoints:
   GET  /registry       the metric registry, minDate filled from real coverage
   POST /parse          multipart trade log -> columnar trades payload, joined
                        to market data (app/oo_backtest/market.py)
+  POST /parse-batch    multipart `files` (each may be gzipped by the page) ->
+                       ONE payload for a parameter sweep: every trade tagged
+                       with its variant, plus `sweep` (app/oo_backtest/sweep.py).
+                       Refuses the whole batch, naming the file, when the
+                       files do not form one sweep. /parse is this with one file.
   GET  /market-status  READ-ONLY freshness of main.index_ohlc: latest bar,
                        staleness, per-series coverage, close-fallback counts,
                        bar-label diagnostics
@@ -38,23 +43,28 @@ Thetadata_Raw_SPX pipeline on the VPS; a fetch here would be a second writer.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
-from datetime import datetime
+import time as _time
+import zlib
+from datetime import date, datetime, time
 from pathlib import PurePath
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 from app.db import get_pool
 from app.oo_backtest import (data_loader, market, parsed_cache, store, surface,
-                             surface_stats)
+                             surface_stats, sweep)
 from app.oo_backtest.payload import assert_no_dropped_columns, trades_to_payload
 from app.oo_backtest.registry import registry_with_coverage
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+GZIP_MAGIC = bytes((0x1F, 0x8B))
 
 _VENDOR_NAMES = {v: k for k, v in data_loader.COLUMN_MAPPING.items()}
 
@@ -174,9 +184,137 @@ async def _analyze(content: bytes, name: str, pool, df=None) -> dict:
         raise HTTPException(422, f"Could not build the trade payload for {name}: {type(exc).__name__}: {exc}")
 
 
+def _json_default(o):
+    # What jsonable_encoder would have made of the types a payload holds (the
+    # market report's dates); anything else is a bug, not something to stringify.
+    if isinstance(o, (date, datetime, time)):
+        return o.isoformat()
+    if hasattr(o, "item"):
+        return o.item()
+    if isinstance(o, (set, frozenset)):
+        return list(o)
+    raise TypeError(f"{type(o).__name__} is not JSON serialisable")
+
+
+def encode_json(obj) -> bytes:
+    """The bytes Starlette's JSONResponse would send, without jsonable_encoder."""
+    return json.dumps(obj, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                      default=_json_default).encode("utf-8")
+
+
+def json_gzip_response(obj, request: Request | None, *, what: str = "") -> Response:
+    """A large payload, encoded and compressed HERE.
+
+    A sweep's payload is ~90 MB of JSON. Returned as a dict, FastAPI walks
+    every value through jsonable_encoder (5.8 s for 240,000 trades on the dev
+    box) and GZipMiddleware compresses at level 9 (9.2 s), against a tunnel
+    that ends the request at 100 s and a VPS about half this machine's speed.
+    Level 5 is 0.9 s and ~4 MB. The middleware leaves a response that already
+    has a Content-Encoding alone.
+    """
+    t0 = _time.monotonic()
+    body = encode_json(obj)
+    t1 = _time.monotonic()
+    accepts = request is None or "gzip" in (request.headers.get("accept-encoding") or "").lower()
+    if not accepts:
+        return Response(body, media_type="application/json")
+    z = gzip.compress(body, compresslevel=5)
+    log.info("oo-backtest %s response: %.1f MB json in %.2fs, %.1f MB gzipped in %.2fs",
+             what or "payload", len(body) / 1e6, t1 - t0, len(z) / 1e6, _time.monotonic() - t1)
+    return Response(z, media_type="application/json", headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+
+
+async def _read_upload(f: UploadFile, budget: int) -> tuple[str, bytes]:
+    """A part's bytes, un-gzipped when the page compressed it (it does, so 75
+    CSVs cross the tunnel as ~4 MB instead of ~40). The filename is the
+    original's. Never decompresses past `budget`."""
+    name = f.filename or ""
+    raw = await f.read()
+    if raw[:2] != GZIP_MAGIC:
+        content = raw
+    else:
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            content = d.decompress(raw, budget + 1)
+        except zlib.error as exc:
+            raise HTTPException(400, f"{name}: could not be decompressed ({exc}).")
+        if len(content) > budget or d.unconsumed_tail:
+            raise _TooLarge(name)
+    if len(content) > budget:
+        raise _TooLarge(name)
+    return name, content
+
+
+class _TooLarge(Exception):
+    pass
+
+
+def _too_large(name: str) -> HTTPException:
+    return HTTPException(400, f"The upload is larger than {sweep.MAX_BATCH_BYTES // 2**20} MB uncompressed "
+                              f"(reached at {name}) -- it would not finish inside the tunnel's 100 s. "
+                              f"Load fewer files at once.")
+
+
+async def analyze_batch(files: list[tuple[str, bytes]], pool) -> dict:
+    """Parse every file, combine them into one sweep (or refuse), then the one
+    market join and payload build every load goes through (_analyze)."""
+    t0 = _time.monotonic()
+    multi = len(files) > 1
+    parsed = []
+    for name, content in files:
+        try:
+            parsed.append((name, await _parse_or_400(content, name)))
+        except HTTPException as exc:
+            if multi and name not in str(exc.detail):
+                exc.detail = f"{name}: {exc.detail}"
+            if multi:
+                exc.detail = f"{exc.detail} Nothing was loaded."
+            raise
+    t1 = _time.monotonic()
+    try:
+        df, sw = sweep.combine(parsed)
+    except sweep.SweepError as exc:
+        log.info("oo-backtest sweep refused: %s", exc)
+        raise HTTPException(400, str(exc))
+    name0 = files[0][0]
+    payload = await _analyze(files[0][1] if not multi else b"", name0, pool, df=df)
+    t2 = _time.monotonic()
+    if sw is not None:
+        sources = {_source_of(n) for n, _ in files}
+        payload.update({
+            "filename": name0 if not multi else f"{len(files)} files",
+            "source": sources.pop() if len(sources) == 1 else "mixed",
+            "suggested_name": sw["suggested_name"],
+        })
+        sw["timing"] = {"parse_s": round(t1 - t0, 2), "join_payload_s": round(t2 - t1, 2)}
+    payload["sweep"] = sw
+    log.info("oo-backtest batch: %d file(s), %d trades, %s variant(s); parse %.2fs, join+payload %.2fs",
+             len(files), payload["n"], len(sw["variants"]) if sw else 1, t1 - t0, t2 - t1)
+    return payload
+
+
 @router.post("/parse")
-async def parse_trade_log(file: UploadFile = File(...), pool=Depends(get_pool)):
-    return await _analyze(await file.read(), file.filename or "", pool)
+async def parse_trade_log(request: Request, file: UploadFile = File(...), pool=Depends(get_pool)):
+    try:
+        name, content = await _read_upload(file, sweep.MAX_BATCH_BYTES)
+    except _TooLarge as exc:
+        raise _too_large(exc.args[0])
+    return json_gzip_response(await analyze_batch([(name, content)], pool), request, what="parse")
+
+
+@router.post("/parse-batch")
+async def parse_batch(request: Request, files: list[UploadFile] = File(...), pool=Depends(get_pool)):
+    if len(files) > sweep.MAX_FILES:
+        raise HTTPException(400, f"{len(files)} files is more than the {sweep.MAX_FILES} one batch takes.")
+    read, total = [], 0
+    for f in files:
+        try:
+            name, content = await _read_upload(f, sweep.MAX_BATCH_BYTES - total)
+        except _TooLarge as exc:
+            raise _too_large(exc.args[0])
+        total += len(content)
+        read.append((name, content))
+    return json_gzip_response(await analyze_batch(read, pool), request, what="batch")
 
 
 # ── saved strategies ────────────────────────────────────────────────────────

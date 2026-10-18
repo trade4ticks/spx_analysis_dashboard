@@ -35,6 +35,9 @@ TRADE_COLUMNS = [
     "max_profit", "max_loss", "strategy",
     # Mesosim-only (null for CSV)
     "position_id", "missing_data_at_fill",
+    # Sweeps only: the trade's variant id, into the payload's sweep.variants
+    # (sweep.py). One int column, however many parameters were varied.
+    "variant",
 ]
 
 # The parser keeps every Mesosim EnterPosition Var as entry_var_* on the
@@ -48,7 +51,7 @@ def allowed_column(name: str) -> bool:
 DATE_COLUMNS = ("date_opened", "date_closed")
 TEXT_COLUMNS = ("exit_reason", "legs", "strategy", "time_opened", "time_closed", "missing_data_at_fill",
                 "vix_bar_time", "vix3m_bar_time", "vix9d_bar_time")
-INT_COLUMNS = ("days_in_trade", "day_of_week", "year", "position_id")
+INT_COLUMNS = ("days_in_trade", "day_of_week", "year", "position_id", "variant")
 
 
 def _num(v):
