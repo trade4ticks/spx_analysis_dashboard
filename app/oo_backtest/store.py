@@ -23,11 +23,23 @@ capital_per_position is a DISPLAY input (the page's Avg Annual Return %,
 Avg P/L % and Deployment dollars), stored so a reloaded log keeps it. It does
 not touch the file or anything parsed from it; NULL means the page default.
 Added after the table existed, hence the ADD COLUMN IF NOT EXISTS.
+
+A PARAMETER SWEEP (2026-10-18) is ONE saved strategy holding several files:
+the row carries `sweep` (JSONB: the parameters and the variant list as
+resolved when it was saved) and its files live in oo_backtest_strategy_files,
+each gzipped with its own hash, in upload order. The row's own file_gz is an
+empty gzip and its file_sha256 a hash of the files' names and hashes, so
+`same_file_as` still finds the same sweep saved twice. A load re-parses the
+files exactly as an upload does (sweep.combine); the recorded variant list is
+only compared against, never trusted over the files. Deleting the row deletes
+its files (ON DELETE CASCADE); saving a single file over a sweep's name
+removes them.
 """
 from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 from datetime import date
 
 TABLE = "oo_backtest_strategies"
@@ -54,7 +66,32 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 """
 
 _LIST_COLS = ("id, name, notes, source, filename, file_sha256, file_bytes, trade_count, "
-              "date_min, date_max, capital_per_position, created_at, updated_at")
+              "date_min, date_max, capital_per_position, created_at, updated_at, "
+              # A sweep's variant count; NULL for a single log.
+              "CASE WHEN sweep IS NULL THEN NULL ELSE jsonb_array_length(sweep->'variants') END AS variants")
+
+FILES_TABLE = "oo_backtest_strategy_files"
+CREATE_FILES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {FILES_TABLE} (
+    strategy_id  INTEGER NOT NULL REFERENCES {TABLE}(id) ON DELETE CASCADE,
+    ord          INTEGER NOT NULL,           -- upload order
+    filename     TEXT NOT NULL,
+    file_gz      BYTEA NOT NULL,
+    file_sha256  TEXT NOT NULL,
+    file_bytes   INTEGER NOT NULL,
+    PRIMARY KEY (strategy_id, ord)
+)
+"""
+ADD_SWEEP_SQL = f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS sweep JSONB"
+
+
+class SweepStrategy(Exception):
+    """load_strategy_file was asked for a sweep, which has no single file.
+    Callers that can load a sweep use load_sweep_files; the rest refuse."""
+
+    def __init__(self, meta: dict):
+        super().__init__(f'"{meta["name"]}" is a parameter sweep of {meta.get("variants")} variants.')
+        self.meta = meta
 
 
 class NameTaken(Exception):
@@ -117,6 +154,8 @@ async def ensure_table(conn) -> None:
     await conn.execute(ADD_CAPITAL_SQL)
     for sql in ADD_PARSED_SQL:
         await conn.execute(sql)
+    await conn.execute(ADD_SWEEP_SQL)
+    await conn.execute(CREATE_FILES_SQL)
 
 
 async def read_parsed(pool, strategy_id: int, *, sha: str,
@@ -191,10 +230,12 @@ async def save_strategy(pool, *, name: str, notes: str, source: str, filename: s
                 row = await conn.fetchrow(
                     f"""UPDATE {TABLE} SET notes=$2, source=$3, filename=$4, file_gz=$5, file_sha256=$6,
                             file_bytes=$7, trade_count=$8, date_min=$9, date_max=$10, capital_per_position=$11,
-                            updated_at=now()
+                            sweep=NULL, updated_at=now()
                         WHERE id=$1 RETURNING {_LIST_COLS}""",
                     existing["id"], notes, source, filename, gz, sha, len(content), trade_count, date_min, date_max,
                     capital)
+                # A single file saved over a sweep's name: its files go.
+                await conn.execute(f"DELETE FROM {FILES_TABLE} WHERE strategy_id = $1", existing["id"])
             else:
                 row = await conn.fetchrow(
                     f"""INSERT INTO {TABLE} (name, notes, source, filename, file_gz, file_sha256, file_bytes,
@@ -219,11 +260,93 @@ async def load_strategy_file(pool, strategy_id: int) -> tuple[dict, bytes] | Non
         r = await conn.fetchrow(f"SELECT {_LIST_COLS}, file_gz FROM {TABLE} WHERE id = $1", strategy_id)
     if r is None:
         return None
+    if r["variants"] is not None:
+        raise SweepStrategy(_row({k: r[k] for k in r.keys() if k != "file_gz"}))
     content = gzip.decompress(r["file_gz"])
     if hashlib.sha256(content).hexdigest() != r["file_sha256"]:
         raise ValueError(f'Saved strategy "{r["name"]}" is corrupt: its file no longer matches the stored hash.')
     meta = _row({k: r[k] for k in r.keys() if k != "file_gz"})
     return meta, content
+
+
+def sweep_manifest(files: list[tuple[str, bytes]]) -> str:
+    """The sweep's identity: its files' names and contents, in order."""
+    lines = [f"{name}\t{hashlib.sha256(content).hexdigest()}" for name, content in files]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+async def save_sweep(pool, *, name: str, notes: str, source: str, files: list[tuple[str, bytes]], sweep: dict,
+                     trade_count: int, date_min: date | None, date_max: date | None,
+                     replace: bool, capital_per_position=None) -> dict:
+    """One saved strategy holding every file of a sweep (see the module
+    docstring). Insert, or overwrite an existing name when `replace` is set;
+    either way the files are written in the same transaction as the row."""
+    name, notes, capital = clean_name(name), clean_notes(notes), clean_capital(capital_per_position)
+    if len(files) < 2:
+        raise ValueError("A sweep is two or more files; save a single file as a normal strategy.")
+    sha = sweep_manifest(files)
+    total = sum(len(c) for _, c in files)
+    empty_gz = gzip.compress(b"")
+    meta = json.dumps(sweep)
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        async with conn.transaction():
+            existing = await conn.fetchrow(f"SELECT id FROM {TABLE} WHERE name = $1 FOR UPDATE", name)
+            if existing and not replace:
+                raise NameTaken(name, existing["id"])
+            if existing:
+                row = await conn.fetchrow(
+                    f"""UPDATE {TABLE} SET notes=$2, source=$3, filename=$4, file_gz=$5, file_sha256=$6,
+                            file_bytes=$7, trade_count=$8, date_min=$9, date_max=$10, capital_per_position=$11,
+                            sweep=$12::jsonb, parsed_gz=NULL, parsed_for_sha=NULL, updated_at=now()
+                        WHERE id=$1 RETURNING {_LIST_COLS}""",
+                    existing["id"], notes, source, f"{len(files)} files", empty_gz, sha, total, trade_count,
+                    date_min, date_max, capital, meta)
+                await conn.execute(f"DELETE FROM {FILES_TABLE} WHERE strategy_id = $1", existing["id"])
+            else:
+                row = await conn.fetchrow(
+                    f"""INSERT INTO {TABLE} (name, notes, source, filename, file_gz, file_sha256, file_bytes,
+                            trade_count, date_min, date_max, capital_per_position, sweep)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING {_LIST_COLS}""",
+                    name, notes, source, f"{len(files)} files", empty_gz, sha, total, trade_count,
+                    date_min, date_max, capital, meta)
+            await conn.executemany(
+                f"""INSERT INTO {FILES_TABLE} (strategy_id, ord, filename, file_gz, file_sha256, file_bytes)
+                    VALUES ($1, $2, $3, $4, $5, $6)""",
+                [(row["id"], k, fname, gzip.compress(content, compresslevel=6),
+                  hashlib.sha256(content).hexdigest(), len(content)) for k, (fname, content) in enumerate(files)])
+            same = await conn.fetch(f"SELECT name FROM {TABLE} WHERE file_sha256 = $1 AND id <> $2 ORDER BY name",
+                                    sha, row["id"])
+    out = _row(row)
+    out["same_file_as"] = [r["name"] for r in same]
+    return out
+
+
+async def load_sweep_files(pool, strategy_id: int) -> tuple[dict, list[tuple[str, bytes]], dict] | None:
+    """(metadata, [(filename, bytes)] in upload order, the sweep as recorded
+    when saved), or None if there is no such id. Every file's hash is checked,
+    and the set against the row's manifest: a sweep missing a file, or holding
+    one that changed, is an error, not a smaller sweep to analyse."""
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        r = await conn.fetchrow(f"SELECT {_LIST_COLS}, sweep FROM {TABLE} WHERE id = $1", strategy_id)
+        if r is None:
+            return None
+        rows = await conn.fetch(f"SELECT ord, filename, file_gz, file_sha256 FROM {FILES_TABLE} "
+                                f"WHERE strategy_id = $1 ORDER BY ord", strategy_id)
+    meta = _row({k: r[k] for k in r.keys() if k != "sweep"})
+    if r["sweep"] is None:
+        raise ValueError(f'Saved strategy "{meta["name"]}" is not a sweep.')
+    files = []
+    for f in rows:
+        content = gzip.decompress(f["file_gz"])
+        if hashlib.sha256(content).hexdigest() != f["file_sha256"]:
+            raise ValueError(f'Saved sweep "{meta["name"]}" is corrupt: {f["filename"]} no longer matches its hash.')
+        files.append((f["filename"], content))
+    if sweep_manifest(files) != meta["file_sha256"]:
+        raise ValueError(f'Saved sweep "{meta["name"]}" is corrupt: its files are not the ones it was saved with.')
+    recorded = r["sweep"] if isinstance(r["sweep"], dict) else json.loads(r["sweep"])
+    return meta, files, recorded
 
 
 async def set_capital(pool, strategy_id: int, capital_per_position) -> dict | None:

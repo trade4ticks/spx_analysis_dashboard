@@ -625,12 +625,21 @@ document.addEventListener('alpine:init', () => {
     optionLabel(s) {
       const n = s.trade_count == null ? '' : ` · ${bpFmtInt(s.trade_count)} trades`;
       const d = s.date_min && s.date_max ? ` · ${s.date_min} → ${s.date_max}` : '';
-      return `${s.name}${n}${d}`;
+      return `${s.name}${n}${d}` + (s.variants ? ` · sweep of ${s.variants} variants (not for portfolios)` : '');
     },
 
     add() {
       const s = this.saved.find(x => x.id === this.pick);
       if (!s) return;
+      // A parameter sweep is many trade sets under one name; a portfolio
+      // strategy is one. Refused, with the way round it (the server says the
+      // same words if a saved profile asks for one).
+      if (s.variants) {
+        this.error = `"${s.name}" is a parameter sweep (${s.variants} variants) and cannot be added to a portfolio ` +
+                     `yet: a portfolio strategy is one set of trades. To use one of its variants here, export that ` +
+                     `variant on its own and save it as a normal strategy on the OO Backtest page.`;
+        return;
+      }
       if (this.chosen.length >= this.maxStrategies) {
         this.error = `${this.maxStrategies} strategies is the most this page loads at once.`;
         return;

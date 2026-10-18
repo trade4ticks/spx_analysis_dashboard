@@ -20,8 +20,16 @@ Endpoints:
   GET    /strategies           saved strategies (no file content)
   POST   /strategies           multipart file + name + notes [+ replace]; 409
                                when the name exists and replace is not set
+  POST   /strategies/sweep     multipart `files` (gzipped parts, as /parse-batch)
+                               + name/notes/replace/capital: a parameter sweep
+                               saved as ONE strategy holding every file; refused
+                               as /parse-batch refuses; 409 on a taken name
   GET    /strategies/{id}/load the saved file re-parsed and re-joined -- the
-                               same payload as /parse, plus `saved`
+                               same payload as /parse, plus `saved`. A sweep:
+                               every file through /parse-batch's path, ALL
+                               selected, and `saved_variants_changed` when the
+                               files now resolve to other variants than when
+                               it was saved
   PUT    /strategies/{id}/capital  {"capital_per_position": number|null} --
                                the display input only; no re-parse
   PUT    /strategies/{id}/notes    {"notes": text} -- the notes only; the
@@ -278,10 +286,10 @@ def _too_large(name: str) -> HTTPException:
                               f"Load fewer files at once.")
 
 
-async def analyze_batch(files: list[tuple[str, bytes]], pool) -> dict:
-    """Parse every file, combine them into one sweep (or refuse), then the one
-    market join and payload build every load goes through (_analyze)."""
-    t0 = _time.monotonic()
+async def parse_batch(files: list[tuple[str, bytes]]):
+    """(parsed, df, sweep): every file parsed, then combined into one sweep or
+    refused with a 400 naming the file. The ONE place an upload, a sweep save
+    and a saved sweep's load decide what the files are."""
     multi = len(files) > 1
     parsed = []
     for name, content in files:
@@ -293,12 +301,21 @@ async def analyze_batch(files: list[tuple[str, bytes]], pool) -> dict:
             if multi:
                 exc.detail = f"{exc.detail} Nothing was loaded."
             raise
-    t1 = _time.monotonic()
     try:
         df, sw = sweep.combine(parsed)
     except sweep.SweepError as exc:
         log.info("oo-backtest sweep refused: %s", exc)
         raise HTTPException(400, str(exc))
+    return parsed, df, sw
+
+
+async def analyze_batch(files: list[tuple[str, bytes]], pool) -> dict:
+    """parse_batch, then the one market join and payload build every load goes
+    through (_analyze)."""
+    t0 = _time.monotonic()
+    multi = len(files) > 1
+    parsed, df, sw = await parse_batch(files)
+    t1 = _time.monotonic()
     name0 = files[0][0]
     payload = await _analyze(files[0][1] if not multi else b"", name0, pool, df=df)
     t2 = _time.monotonic()
@@ -326,17 +343,8 @@ async def parse_trade_log(request: Request, file: UploadFile = File(...), pool=D
 
 
 @router.post("/parse-batch")
-async def parse_batch(request: Request, files: list[UploadFile] = File(...), pool=Depends(get_pool)):
-    if len(files) > sweep.MAX_FILES:
-        raise HTTPException(400, f"{len(files)} files is more than the {sweep.MAX_FILES} one batch takes.")
-    read, total = [], 0
-    for f in files:
-        try:
-            name, content = await _read_upload(f, sweep.MAX_BATCH_BYTES - total)
-        except _TooLarge as exc:
-            raise _too_large(exc.args[0])
-        total += len(content)
-        read.append((name, content))
+async def parse_batch_endpoint(request: Request, files: list[UploadFile] = File(...), pool=Depends(get_pool)):
+    read = await _read_parts(files)
     return json_gzip_response(await analyze_batch(read, pool), request, what="batch")
 
 
@@ -382,10 +390,86 @@ async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes:
     return {"strategy": saved}
 
 
+async def _read_parts(files: list[UploadFile]) -> list[tuple[str, bytes]]:
+    """Every part, un-gzipped, against one budget for the whole upload."""
+    if len(files) > sweep.MAX_FILES:
+        raise HTTPException(400, f"{len(files)} files is more than the {sweep.MAX_FILES} one batch takes.")
+    read, total = [], 0
+    for f in files:
+        try:
+            name, content = await _read_upload(f, sweep.MAX_BATCH_BYTES - total)
+        except _TooLarge as exc:
+            raise _too_large(exc.args[0])
+        total += len(content)
+        read.append((name, content))
+    return read
+
+
+def recorded_sweep(sw: dict) -> dict:
+    """What a saved sweep remembers about itself: the parameters, the variant
+    list and each file's reading -- not the per-request timing."""
+    return {k: v for k, v in sw.items() if k != "timing"}
+
+
+@router.post("/strategies/sweep")
+async def save_saved_sweep(files: list[UploadFile] = File(...), name: str = Form(...), notes: str = Form(""),
+                           replace: bool = Form(False), capital_per_position: str = Form(""),
+                           pool=Depends(get_pool)):
+    read = await _read_parts(files)
+    if len(read) < 2:
+        raise HTTPException(400, "A sweep is two or more files; save a single file as a normal strategy.")
+    # The SERVER's reading of these bytes decides the variants and the facts.
+    parsed, df, sw = await parse_batch(read)
+    dates_open, dates_close = df["date_opened"].dropna(), df["date_closed"].dropna()
+    sources = {_source_of(n, f) for n, f in parsed}
+    try:
+        saved = await store.save_sweep(
+            pool, name=name, notes=notes, source=sources.pop() if len(sources) == 1 else "mixed", files=read,
+            sweep=recorded_sweep(sw), trade_count=int(len(df)),
+            date_min=dates_open.min().date() if len(dates_open) else None,
+            date_max=dates_close.max().date() if len(dates_close) else None,
+            replace=replace, capital_per_position=capital_per_position)
+    except store.NameTaken as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc), "existing_id": exc.existing_id})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    log.info("oo-backtest saved sweep %r (id %s, %d files, %d variants, %d trades, replace=%s)",
+             saved["name"], saved["id"], len(read), len(sw["variants"]), saved["trade_count"], replace)
+    return {"strategy": saved}
+
+
+async def _load_saved_sweep(pool, strategy_id: int) -> dict:
+    try:
+        found = await store.load_sweep_files(pool, strategy_id)
+    except ValueError as exc:
+        log.error("oo-backtest saved sweep %s unreadable: %s", strategy_id, exc)
+        raise HTTPException(500, str(exc))
+    if found is None:
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    meta, files, recorded = found
+    payload = await analyze_batch(files, pool)
+    payload["saved"] = meta
+    payload["parse"] = {"source": "parse", "files": len(files)}
+    payload["suggested_name"] = meta["name"]
+    if payload["n"] != meta["trade_count"]:
+        payload["saved_count_changed"] = {"when_saved": meta["trade_count"], "now": payload["n"]}
+    # The files are re-read every load; the recorded list is only compared.
+    # A parser change since the save can resolve them differently -- said, so
+    # the page never quietly shows another set of variants under the old name.
+    now = [(v["label"], v["n"]) for v in (payload.get("sweep") or {}).get("variants", [])]
+    then = [(v["label"], v["n"]) for v in recorded.get("variants", [])]
+    if now != then:
+        payload["saved_variants_changed"] = {"when_saved": [f"{lab} ({n})" for lab, n in then],
+                                             "now": [f"{lab} ({n})" for lab, n in now]}
+    return payload
+
+
 @router.get("/strategies/{strategy_id}/load")
-async def load_saved(strategy_id: int, pool=Depends(get_pool)):
+async def load_saved(strategy_id: int, request: Request, pool=Depends(get_pool)):
     try:
         found = await store.load_strategy_file(pool, strategy_id)
+    except store.SweepStrategy:
+        return json_gzip_response(await _load_saved_sweep(pool, strategy_id), request, what="saved sweep")
     except ValueError as exc:
         log.error("oo-backtest saved strategy %s unreadable: %s", strategy_id, exc)
         raise HTTPException(500, str(exc))

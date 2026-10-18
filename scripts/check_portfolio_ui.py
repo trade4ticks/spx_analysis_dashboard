@@ -156,7 +156,9 @@ window.fetch = async (u) => ({ok: true, json: async () => {
   if (String(u).includes('/strategies')) return {strategies: [
     {id:1,name:'monthly',trade_count:40,capital_per_position:25000},
     {id:2,name:'weekly',trade_count:40,capital_per_position:10000},
-    {id:3,name:'since2013',trade_count:84,capital_per_position:20000}],
+    {id:3,name:'since2013',trade_count:84,capital_per_position:20000},
+    // A parameter sweep saved on the OO page: listed, marked, refused.
+    {id:4,name:'dte sweep',trade_count:240,capital_per_position:10000,variants:4}],
     colors:['#3498db','#e84393'], max:12};
   if (String(u).includes('/registry')) return {metrics: %s};
   // THE OO PAGE'S SURFACE ENDPOINTS, reused rather than duplicated.
@@ -278,6 +280,15 @@ window.addEventListener('load', () => setTimeout(async () => {
   await choose(2);
   await choose(3);
   ok('three strategies added', c.chosen.length, 3);
+
+  // A SWEEP is listed, marked, and refused with the way round it.
+  const sweepOpt = [...selectBy('Add a saved strategy').options].find(o => o.value === '4');
+  ok('a saved sweep is marked in the list', !!sweepOpt && /sweep of 4 variants \(not for portfolios\)/.test(sweepOpt.textContent), true);
+  await choose(4);
+  ok('adding it is refused: still three strategies', c.chosen.length, 3);
+  ok('and the refusal says how to use one variant',
+     /"dte sweep" is a parameter sweep \(4 variants\).*export that variant on its own and save it as a normal strategy/.test(c.error), true);
+  c.error = '';
 
   // THE BUTTON WORKS BEFORE A LOAD. It was disabled here, which is the
   // regression this file exists for.

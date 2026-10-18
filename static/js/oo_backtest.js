@@ -560,7 +560,8 @@ function obOLS(xs, ys) {
 function obSavedLabel(s) {
   if (!s) return '';
   const n = Number(s.trade_count || 0).toLocaleString('en-US');
-  return `${s.name} (${n} trade${s.trade_count === 1 ? '' : 's'}, ${s.date_min || '—'} – ${s.date_max || '—'})`;
+  const sweep = s.variants ? `, sweep of ${Number(s.variants).toLocaleString('en-US')} variants` : '';
+  return `${s.name} (${n} trade${s.trade_count === 1 ? '' : 's'}${sweep}, ${s.date_min || '—'} – ${s.date_max || '—'})`;
 }
 
 /* Snap a data extent outward to the slider's step, so the untouched slider
@@ -1090,18 +1091,24 @@ document.addEventListener('alpine:init', () => {
     },
 
     async saveStrategy(replace = false) {
-      if (!OB_DATA.file) return;
+      const files = OB_DATA.files || [];
+      const sweepSave = files.length > 1;
+      if (!OB_DATA.file && !sweepSave) return;
       this.saveBusy = true;
       this.saveError = '';
       this.saveMsg = '';
       try {
         const fd = new FormData();
-        fd.append('file', OB_DATA.file);
+        // A sweep is saved as ONE strategy holding every file; the server
+        // re-reads them (and refuses exactly as the upload would).
+        if (sweepSave) for (const f of files) fd.append('files', await obGzipFile(f), f.name);
+        else fd.append('file', OB_DATA.file);
         fd.append('name', this.saveName);
         fd.append('notes', this.saveNotes);
         fd.append('capital_per_position', this.capital() === null ? '' : String(this.capital()));
         fd.append('replace', replace ? 'true' : 'false');
-        const r = await fetch('/api/oo-backtest/strategies', { method: 'POST', body: fd });
+        const r = await fetch(sweepSave ? '/api/oo-backtest/strategies/sweep' : '/api/oo-backtest/strategies',
+                              { method: 'POST', body: fd });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && !replace) {
           this.saveBusy = false;
@@ -2560,7 +2567,14 @@ document.addEventListener('alpine:init', () => {
       const out = [];
       const sv = this.meta && this.meta.saved;
       if (sv && !this.hasUploadFile) {
-        out.push({ warn: false, text: `Saved strategy, saved ${String(sv.updated_at || '').slice(0, 10)}` });
+        out.push({ warn: false, text: (sv.variants ? `Saved parameter sweep, ${sv.variants} variants` : 'Saved strategy') +
+                                      `, saved ${String(sv.updated_at || '').slice(0, 10)}` });
+      }
+      const vc = this.meta && this.meta.saved_variants_changed;
+      if (vc) {
+        out.push({ warn: true, text: `The files now resolve to other variants than when this sweep was saved ` +
+                                     `(${vc.when_saved.length} then: ${vc.when_saved.slice(0, 3).join(', ')}${vc.when_saved.length > 3 ? '…' : ''}; ` +
+                                     `${vc.now.length} now: ${vc.now.slice(0, 3).join(', ')}${vc.now.length > 3 ? '…' : ''}) — the parser has changed since` });
       }
       const ch = this.meta && this.meta.saved_count_changed;
       if (ch) {

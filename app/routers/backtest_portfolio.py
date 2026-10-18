@@ -42,6 +42,14 @@ from app.oo_backtest import market, portfolio_store, store
 from app.oo_backtest.registry import registry_with_coverage
 from app.routers.oo_backtest import _analyze, load_parsed
 
+
+def sweep_refusal(name: str, variants) -> str:
+    """Why a parameter sweep cannot join a portfolio (yet), and what to do.
+    The same words here and on the page (backtest_portfolio.js)."""
+    return (f'"{name}" is a parameter sweep ({variants} variants) and cannot be added to a portfolio yet: '
+            f"a portfolio strategy is one set of trades. To use one of its variants here, export that "
+            f"variant on its own and save it as a normal strategy on the OO Backtest page.")
+
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest-portfolio", tags=["backtest-portfolio"])
@@ -109,6 +117,10 @@ async def load_portfolio(body: dict = Body(...), pool=Depends(get_pool)):
     for n, sid in enumerate(ids):
         try:
             found = await store.load_strategy_file(pool, sid)
+        except store.SweepStrategy as exc:
+            # The page refuses to add one; a profile saved before the name
+            # was re-saved as a sweep can still ask, and is told the same.
+            raise HTTPException(400, sweep_refusal(exc.meta["name"], exc.meta.get("variants")))
         except ValueError as exc:                         # sha mismatch
             log.error("portfolio: saved strategy %s unreadable: %s", sid, exc)
             raise HTTPException(500, str(exc))

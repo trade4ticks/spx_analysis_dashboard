@@ -20,7 +20,10 @@ with payloads the REAL router built (analyze_batch, no database):
   * Export CSV carries param_* columns
   * the surface ranking marks no significance over pooled variants, and does
     for one variant
-  * a multi-file sweep offers no Save (P4); a single file still does
+  * saving (P4): a multi-file sweep's Save sends EVERY file, gzipped, to
+    /strategies/sweep as one strategy; a single file saves as before; a
+    saved sweep loads back with ALL selected, and a changed variant list is
+    said
   * the parameter grid (P3): default axes, all six metrics, swapped and
     single-row axes, every cell against stats.py on the variants it holds --
     on a three-parameter sweep, where a cell pools across the hidden one and
@@ -181,7 +184,25 @@ window.fetch = async (u, init) => {
   const url = String(u);
   const reply = (status, body) => ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(body)) });
   if (/\/registry$/.test(url)) return reply(200, { metrics: FIX.registry, coverage_error: null });
-  if (/\/strategies$/.test(url)) return reply(200, { strategies: [] });
+  if (/\/strategies\/sweep$/.test(url)) {
+    const parts = init.body.getAll('files');
+    const heads = [];
+    for (const f of parts) { const b = new Uint8Array(await f.slice(0, 2).arrayBuffer()); heads.push(b[0] === 0x1f && b[1] === 0x8b); }
+    window.__saved = { names: parts.map(f => f.name), gz: heads, name: init.body.get('name'), single: init.body.get('file') };
+    window.__savedList = [{ id: 9, name: init.body.get('name'), notes: '', trade_count: FIX.sweep.n, variants: 4,
+                            date_min: FIX.sweep.date_min, date_max: FIX.sweep.date_max, capital_per_position: null,
+                            updated_at: '2026-10-18T00:00:00+00:00' }];
+    return reply(200, { strategy: window.__savedList[0] });
+  }
+  if (/\/strategies\/9\/load$/.test(url)) {
+    return reply(200, { ...FIX.sweep, saved: window.__savedList[0], parse: { source: 'parse', files: 4 },
+                        saved_variants_changed: { when_saved: ['dte=30 · pt=25 (61)'], now: ['dte=30 · pt=25 (60)'] } });
+  }
+  if (/\/strategies$/.test(url) && init && init.method === 'POST') {
+    window.__saved = { single: init.body.get('file') && init.body.get('file').name, name: init.body.get('name') };
+    return reply(200, { strategy: { id: 10, name: init.body.get('name'), trade_count: 60 } });
+  }
+  if (/\/strategies$/.test(url)) return reply(200, { strategies: window.__savedList || [] });
   if (/\/market-status$/.test(url)) return reply(200, { ok: false, error: 'stub' });
   if (/\/parse-batch$/.test(url)) {
     const parts = init.body.getAll('files');
@@ -220,7 +241,6 @@ window.addEventListener('load', () => setTimeout(async () => {
     .find(b => b.querySelector('.stat-label').childNodes[0].textContent.trim() === label);
   const boxVal = label => txt(box(label) && box(label).querySelector('.stat-value'));
   const boxTag = label => { const t = box(label) && box(label).querySelector('.stat-tag'); return t && shown(t) ? txt(t) : ''; };
-  const saveNote = () => [...document.querySelectorAll('.ob-parse-note')].find(e => /cannot be saved yet/.test(txt(e)));
   const LABELS = ['# Trades', 'Win %', 'Total P/L', 'Avg P/L', 'Avg P/L %', 'Avg Win', 'Avg Loss', 'Max Win', 'Max Loss',
                   'Profit Factor', 'Avg Annual P/L', 'Avg Annual Return %', 'Max DD', 'Calmar', 'Avg Days'];
   const snapshot = (c) => ({
@@ -397,20 +417,42 @@ window.addEventListener('load', () => setTimeout(async () => {
     const alone = snapshot(c);
     ok('the comparison has something to compare: sections with subtitles, a deployment title',
        [alone.subs.length >= 3, !!alone.deploy, Object.values(alone.stats).every(v => v !== '')], [true, true, true]);
-    ok('and the single file shows no saved-sweep note', shown(saveNote()), false);
     for (const k of Object.keys(alone.stats)) ok(`variant view == its file alone: ${k}`, asVariant.stats[k], alone.stats[k]);
     ok('variant view == its file alone: status line', asVariant.status, alone.status);
     ok('variant view == its file alone: every section subtitle', asVariant.subs, alone.subs);
     ok('variant view == its file alone: date bounds, auto-bin steps, drawdown and deployment titles',
        [asVariant.bounds, asVariant.steps, asVariant.dd, asVariant.deploy], [alone.bounds, alone.steps, alone.dd, alone.deploy]);
     ok('a single uploaded file can be saved', await until(() => shown(document.querySelector('.ob-save'))), true);
+    ok('labelled as a log, not a sweep', txt(document.querySelector('.ob-save .ob-lbl')), 'Save this log');
 
     // ── a refused batch leaves the page alone ───────────────────────────
     window.__next = 'sweep';
     drop(FIX.names);
     await until(() => !!c.sweep);
-    ok('a multi-file sweep offers no Save, and says why',
-       [await until(() => !shown(document.querySelector('.ob-save'))), await until(() => shown(saveNote()))], [true, true]);
+    // ── saving a sweep: every file, gzipped, one strategy ───────────────
+    ok('a multi-file sweep offers Save, labelled for the sweep',
+       [await until(() => shown(document.querySelector('.ob-save'))),
+        txt(document.querySelector('.ob-save .ob-lbl'))], [true, 'Save this sweep (every file, one strategy)']);
+    const nameBox = document.querySelector('.ob-save input[type=text]');
+    nameBox.value = 'dte sweep'; nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(50);
+    [...document.querySelectorAll('.ob-save button')].find(b => txt(b) === 'Save').click();
+    await until(() => !!window.__saved);
+    ok('Save sends every file, gzipped, with the name, to /strategies/sweep',
+       [window.__saved.names, window.__saved.gz, window.__saved.name, window.__saved.single], [FIX.names, [true, true, true, true], 'dte sweep', null]);
+    ok('and says it was saved, as a sweep', await until(() => /Saved as dte sweep \(240 trades, sweep of 4 variants/.test(c.saveMsg)), true);
+    // ── loading a saved sweep: ALL, the record, a changed list said ─────
+    c.setVariant('2'); await wait(150);
+    c.selectedSavedId = '9';
+    await c.loadSelected();
+    await until(() => c.meta && c.meta.saved && c.meta.saved.id === 9);
+    await wait(200);
+    ok('a saved sweep loads with ALL selected and the selector back', [c.variantSel, c.sweep && c.sweep.variants.length, shown(sel)], ['all', 4, true]);
+    const notes = [...document.querySelectorAll('.ob-loaded .ob-parse-note')].map(txt);
+    ok('the sidebar says it is a saved sweep', notes.some(t => /^Saved parameter sweep, 4 variants/.test(t)), true);
+    ok('and that its files now resolve to other variants than when saved',
+       notes.some(t => /now resolve to other variants than when this sweep was saved/.test(t)), true);
+    ok('a loaded saved sweep offers no Save (it is saved)', shown(document.querySelector('.ob-save')), false);
     window.__next = 'refuse';
     drop(['sweep_x.csv'].concat(FIX.names.slice(1)).map(n => FIX.files[n] ? n : FIX.names[0]));
     await until(() => !!c.uploadError);

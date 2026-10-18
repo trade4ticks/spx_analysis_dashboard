@@ -310,6 +310,7 @@ async def run(dsn: str) -> None:
         await check_planted(pool)
         await check_end_to_end(pool)
         await check_saved_strategies(pool)
+        await check_saved_sweeps(pool)
         await check_portfolio_profiles(pool)
         await check_surface(pool)
     finally:
@@ -575,6 +576,135 @@ async def check_planted(pool) -> None:
     check(df.loc[6, "vix_level"] != bar_close, "the entry join is not reading the bar's close (5 min lookahead)")
 
 
+async def check_saved_sweeps(pool) -> None:
+    """A parameter sweep saved as ONE strategy (P4), through the real
+    endpoints on this database: saved with every file, listed with its
+    variant count, loaded back as the same payload an upload of the same
+    files gives, a changed variant list said, a corrupt or missing file
+    refused, a single file saved over it taking its files away, deleted with
+    its files, and refused by the portfolio with the way round it."""
+    print("saved sweeps (endpoints, this database)")
+    import gzip as _gz
+    import io as _io
+    import json as _json
+
+    import httpx
+    from fastapi import FastAPI
+
+    from app.db import get_pool
+    from app.oo_backtest import store
+    from app.routers import backtest_portfolio as BP
+    from app.routers import oo_backtest as R
+
+    app = FastAPI()
+    app.include_router(R.router, prefix="/api/oo-backtest")
+    app.include_router(BP.router)               # it carries its own /api/backtest-portfolio prefix
+    app.dependency_overrides[get_pool] = lambda: pool
+    hdr = ["Date Opened", "Time Opened", "Date Closed", "Time Closed", "P/L", "Legs", "Premium"]
+
+    def oo(rows):
+        out = _io.StringIO()
+        pd.DataFrame(rows, columns=hdr).to_csv(out, index=False)
+        return out.getvalue().encode()
+    files = {
+        "sw_dte7_pt25.csv": oo([["2023-07-03", "12:30:00", "2023-07-05", "15:59:00", 100, "x", 1],
+                               ["2023-07-05", "10:00:00", "2023-07-06", "15:59:00", -40, "x", 1]]),
+        "sw_dte7_pt50.csv": oo([["2023-07-06", "10:00:00", "2023-07-10", "15:59:00", 60, "x", 1]]),
+        "sw_dte14_pt25.csv": oo([["2023-07-05", "10:00:00", "2023-07-12", "15:59:00", -10, "x", 1],
+                                ["2023-07-10", "10:00:00", "2023-07-12", "15:59:00", 30, "x", 1]]),
+    }
+    parts = [("files", (n, _gz.compress(c))) for n, c in files.items()]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=60) as c:
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts,
+                         data={"name": "dte sweep", "notes": "three files", "capital_per_position": "25000"})
+        sv = r.json().get("strategy", {}) if r.status_code == 200 else {}
+        check(r.status_code == 200 and sv.get("variants") == 3 and sv.get("trade_count") == 5
+              and sv.get("filename") == "3 files" and sv.get("capital_per_position") == 25000,
+              f"a 3-file sweep saves as ONE strategy: 3 variants, 5 trades ({r.status_code} {sv})")
+        sid = sv.get("id")
+        async with pool.acquire() as conn:
+            stored = await conn.fetch("SELECT ord, filename, file_bytes FROM oo_backtest_strategy_files "
+                                      "WHERE strategy_id = $1 ORDER BY ord", sid)
+        check([(x["filename"], x["file_bytes"]) for x in stored] == [(n, len(b)) for n, b in files.items()],
+              "every file stored, in upload order, at its original size")
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts, data={"name": "dte sweep"})
+        check(r.status_code == 409 and r.json().get("existing_id") == sid, "the same name again: 409 with its id")
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts[:1], data={"name": "one"})
+        check(r.status_code == 400 and "two or more files" in r.json().get("detail", ""),
+              "one file is not a sweep: refused, pointing at a normal save")
+        bad = parts + [("files", ("sw_dte7_sl100.csv", _gz.compress(files["sw_dte7_pt50.csv"])))]
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=bad, data={"name": "bad"})
+        check(r.status_code == 400 and "sw_dte7_sl100.csv" in r.json().get("detail", ""),
+              "a batch that is not one sweep is refused as the upload refuses it, naming the file")
+        lst = (await c.get("/api/oo-backtest/strategies")).json()["strategies"]
+        check(any(s["id"] == sid and s["variants"] == 3 for s in lst), "the list carries the variant count")
+
+        # Load: the same payload as uploading the same files, ALL, saved meta.
+        r = await c.get(f"/api/oo-backtest/strategies/{sid}/load")
+        got = r.json()
+        up = (await c.post("/api/oo-backtest/parse-batch", files=parts)).json()
+        strip = lambda p: {k: v for k, v in p.items() if k not in ("saved", "parse", "suggested_name", "sweep", "market")}  # noqa: E731
+        check(r.status_code == 200 and r.headers.get("content-encoding") == "gzip" and strip(got) == strip(up)
+              and got["sweep"]["variants"] == up["sweep"]["variants"],
+              "loading it back gives exactly the upload's trades and variants")
+        check(got["saved"]["id"] == sid and got["saved"]["variants"] == 3 and "saved_variants_changed" not in got
+              and got["suggested_name"] == "dte sweep", "with its saved record, and nothing said to have changed")
+
+        # The recorded list no longer matches what the files resolve to.
+        async with pool.acquire() as conn:
+            rec = _json.loads(await conn.fetchval("SELECT sweep FROM oo_backtest_strategies WHERE id = $1", sid))
+            rec["variants"][0]["label"] = "dte=7 · pt=99"
+            await conn.execute("UPDATE oo_backtest_strategies SET sweep = $2::jsonb WHERE id = $1", sid, _json.dumps(rec))
+        got = (await c.get(f"/api/oo-backtest/strategies/{sid}/load")).json()
+        ch = got.get("saved_variants_changed") or {}
+        check("dte=7 · pt=99 (2)" in ch.get("when_saved", []) and "dte=7 · pt=25 (2)" in ch.get("now", []),
+              "a variant list that no longer matches the files is said, then and now")
+
+        # Corruption: a changed file, a missing file.
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE oo_backtest_strategy_files SET file_gz = $3 WHERE strategy_id = $1 AND ord = $2",
+                               sid, 1, _gz.compress(b"changed"))
+        r = await c.get(f"/api/oo-backtest/strategies/{sid}/load")
+        check(r.status_code == 500 and "sw_dte7_pt50.csv no longer matches its hash" in r.json().get("detail", ""),
+              "a stored file that changed is refused, naming it")
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE oo_backtest_strategy_files SET file_gz = $3 WHERE strategy_id = $1 AND ord = $2",
+                               sid, 1, _gz.compress(files["sw_dte7_pt50.csv"]))
+            await conn.execute("DELETE FROM oo_backtest_strategy_files WHERE strategy_id = $1 AND ord = 2", sid)
+        r = await c.get(f"/api/oo-backtest/strategies/{sid}/load")
+        check(r.status_code == 500 and "not the ones it was saved with" in r.json().get("detail", ""),
+              "a sweep missing a file is refused, not analysed smaller")
+
+        # Replace with a full sweep again, then the portfolio's refusal.
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts, data={"name": "dte sweep", "replace": "true"})
+        check(r.status_code == 200 and r.json()["strategy"]["id"] == sid, "replace=true re-saves the sweep under its id")
+        r = await c.post("/api/backtest-portfolio/load", json={"ids": [sid]})
+        det = r.json().get("detail", "")
+        check(r.status_code == 400 and '"dte sweep" is a parameter sweep (3 variants)' in det
+              and "export that variant on its own and save it as a normal strategy" in det,
+              "the portfolio refuses a sweep and says how to use one variant")
+
+        # A single file saved over the name takes the sweep's files with it.
+        r = await c.post("/api/oo-backtest/strategies", files={"file": ("one.csv", files["sw_dte7_pt25.csv"])},
+                         data={"name": "dte sweep", "replace": "true"})
+        async with pool.acquire() as conn:
+            left = await conn.fetchval("SELECT count(*) FROM oo_backtest_strategy_files WHERE strategy_id = $1", sid)
+        lst = {s["id"]: s for s in (await c.get("/api/oo-backtest/strategies")).json()["strategies"]}
+        check(r.status_code == 200 and left == 0 and lst[sid]["variants"] is None and lst[sid]["trade_count"] == 2,
+              "a single file saved over the sweep's name: a normal strategy, its files gone")
+        r = await c.get(f"/api/oo-backtest/strategies/{sid}/load")
+        check(r.status_code == 200 and r.json().get("sweep") is None and r.json()["n"] == 2, "and it loads as one log")
+
+        # Delete takes the files with it.
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts, data={"name": "to delete"})
+        did = r.json()["strategy"]["id"]
+        await c.delete(f"/api/oo-backtest/strategies/{did}")
+        async with pool.acquire() as conn:
+            left = await conn.fetchval("SELECT count(*) FROM oo_backtest_strategy_files WHERE strategy_id = $1", did)
+        check(left == 0, "deleting a sweep deletes its files")
+        await c.delete(f"/api/oo-backtest/strategies/{sid}")
+
+
 async def check_saved_strategies(pool) -> None:
     """Saved strategies: the stored record is the original file, byte for byte,
     and a load goes through the same parse + join as an upload."""
@@ -679,7 +809,9 @@ async def check_saved_strategies(pool) -> None:
     check(await store.set_notes(pool, 999999, "x") is None, "set_notes on a missing id returns None (404)")
 
     # Migration: a table created before the column existed gains it on first use.
+    # (A table from before sweeps has no files table either: drop that first.)
     async with pool.acquire() as conn:
+        await conn.execute(f"DROP TABLE IF EXISTS {store.FILES_TABLE}")
         await conn.execute(f"DROP TABLE {store.TABLE}")
         await conn.execute(store.CREATE_SQL.replace("    capital_per_position DOUBLE PRECISION,\n", ""))
         before = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
@@ -688,6 +820,10 @@ async def check_saved_strategies(pool) -> None:
     async with pool.acquire() as conn:
         after = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
                                     "AND column_name = 'capital_per_position'", store.TABLE)
+        sweep_col = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                        "AND column_name = 'sweep'", store.TABLE)
+        files_tbl = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", store.FILES_TABLE)
+    check(sweep_col == 1 and files_tbl, "a pre-sweep table gains the sweep column and the files table on first use")
     check(before == 0 and after == 1, f"an existing table without the column gains it (before {before}, after {after})")
     a = await store.save_strategy(pool, name="allantis v2", notes="", content=raw, trade_count=4, replace=False, **common)
 

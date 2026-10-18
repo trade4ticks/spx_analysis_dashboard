@@ -228,11 +228,8 @@
 
           <!-- Save what was just uploaded. Only an upload can be saved: the
                server re-parses the file bytes, never page-supplied rows. -->
-          <div class="ob-parse-note" x-show="loaded && multiFile()">
-            A sweep of several files cannot be saved yet. One file — an MCP export holding several variants
-            in its param_* columns — saves as usual.</div>
-          <div class="ob-save" x-show="loaded && hasUploadFile && !multiFile()">
-            <div class="ob-lbl">Save this log</div>
+          <div class="ob-save" x-show="loaded && hasUploadFile">
+            <div class="ob-lbl" x-text="multiFile() ? 'Save this sweep (every file, one strategy)' : 'Save this log'"></div>
             <input class="ob-input" type="text" x-model="saveName" maxlength="200" placeholder="Name">
             <textarea class="ob-input" rows="2" x-model="saveNotes" maxlength="4000" placeholder="Notes (optional)"></textarea>
             <div class="ob-row" style="margin-top:4px;">

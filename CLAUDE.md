@@ -39,9 +39,10 @@ with varied parameters, loaded as ONE trade set — the same client-side
 filtering over more rows (75 variants ≈ 240,000 trades), not a new
 architecture. Phases: **P1** server (batch parse, variants, isIgnored) —
 done; **P2** page (multi-file drop, load report, variant selector, BH
-suppression when pooled, surface-rank memory fix) — done; **P3** parameter grid + (done)
-per-parameter sections; **P4** save/load sweeps (child table of files),
-docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
+suppression when pooled, surface-rank memory fix) — done; **P3** parameter grid +
+per-parameter sections — done; **P4** save/load sweeps (child table of files),
+docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
+`POST /parse-batch`, `POST /strategies/sweep`.
 - **Variant source, per file:** `param_*` columns (discovered; one MCP file
   can hold several variants) beat the filename (`dte45`, `dte_45`, `dte=45`;
   keys lower-cased; unread tokens REPORTED per file). A single file's NAME is
@@ -167,6 +168,31 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   where every variant could have traded. The UI gate holds every cell of a
   2- and a 3-parameter sweep to stats.py per variant file, with and without
   a filter, and fails when a cell's total is summed instead of averaged.
+- **P4: a sweep saves as ONE strategy (done 2026-10-18).** The row in
+  `oo_backtest_strategies` gains `sweep` (JSONB: params, variants, each
+  file's reading — recorded at save, minus timing) and its files live in
+  `oo_backtest_strategy_files` (FK ON DELETE CASCADE, upload order, each
+  gzipped with its sha). The row's `file_gz` is an empty gzip and its
+  `file_sha256` the MANIFEST hash (names + shas in order), so `same_file_as`
+  still finds a duplicate sweep and a load checks the set is complete.
+  `list_strategies` returns `variants` (NULL for a single log).
+  `POST /strategies/sweep` takes the same gzipped parts as /parse-batch and
+  decides the variants with the same `parse_batch` (so it refuses exactly as
+  an upload does); one file is refused there (save it normally). A load
+  re-parses every file through `analyze_batch` — the recorded list is only
+  COMPARED (`saved_variants_changed`, said in the sidebar), never trusted
+  over the files — and returns ALL selected. A changed or missing file is a
+  500 naming it, not a smaller sweep. Saving a single file over a sweep's
+  name removes its files and its `sweep`. `load_strategy_file` raises
+  `SweepStrategy` for a sweep: the OO load handles it; the PORTFOLIO
+  refuses — marked "(not for portfolios)" in its list, refused on Add with
+  the way round it (export one variant on its own and save it as a normal
+  strategy), and the same words from `/load` for a profile that names one.
+  No parse cache for sweep files (CSVs parse in ~35 ms each; revisit for
+  MesoSim-JSON sweeps). Gates: `check_saved_sweeps` in
+  check_oo_market_sql drives the real endpoints on the temp Postgres;
+  check_oo_sweep_ui clicks Save and the saved-load; check_portfolio_ui the
+  refusal.
 - **Scatter tails (2026-10-18, the user's ask).** Above `OB_SCATTER_MAX`
   the sample ALWAYS holds the `OB_SCATTER_TAIL` (200) highest and lowest
   P/L, then every k-th of the rest up to the cap (`obScatterPick`; edges by
