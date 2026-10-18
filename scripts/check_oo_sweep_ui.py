@@ -21,6 +21,12 @@ with payloads the REAL router built (analyze_batch, no database):
   * the surface ranking marks no significance over pooled variants, and does
     for one variant
   * a multi-file sweep offers no Save (P4); a single file still does
+  * the parameter grid (P3): default axes, all six metrics, swapped and
+    single-row axes, every cell against stats.py on the variants it holds --
+    on a three-parameter sweep, where a cell pools across the hidden one and
+    the note says so -- with and without a filter; hidden for one variant
+  * the parameter sections: avg and win rate pool, a value's TOTAL is the
+    mean over the variants holding that value
   * no console errors (an Alpine expression error leaves a control inert)
 
 No browser (the VPS) -> SKIP.
@@ -72,6 +78,30 @@ def make_csv(seed: int) -> str:
     return out.getvalue()
 
 
+VARIANTS3 = [(d, p, sl) for d in (30, 45) for p in (25, 50) for sl in (100, 200)]
+NAMES3 = [f"sweep_dte{d}_pt{p}_sl{sl}.csv" for d, p, sl in VARIANTS3]
+
+
+def figures(df: pd.DataFrame) -> dict:
+    """One variant's own figures, by stats.py -- what the page's cells are held to."""
+    from app.oo_backtest.stats import calculate_stats
+    st = calculate_stats(df)
+    closes = pd.to_datetime(df["date_closed"])
+    years = (closes.max() - closes.min()).days / 365.25
+    dd = st["max_drawdown"]
+    return {"n": len(df), "total": float(df["pnl"].sum()), "wins": int((df["pnl"] > 0).sum()), "dd": dd,
+            "calmar": (st["total_pnl"] / years) / abs(dd) if dd < 0 and years > 0 else None}
+
+
+def cell(figs: list[dict]) -> dict:
+    """A grid cell from its variants' figures, by the page's rule."""
+    n = sum(f["n"] for f in figs)
+    cal = [f["calmar"] for f in figs if f["calmar"] is not None]
+    return {"n": n, "avg": sum(f["total"] for f in figs) / n, "win": sum(f["wins"] for f in figs) / n * 100,
+            "total": sum(f["total"] for f in figs) / len(figs), "maxdd": sum(f["dd"] for f in figs) / len(figs),
+            "calmar": sum(cal) / len(cal) if cal else None}
+
+
 def payloads() -> tuple[dict, dict, dict, dict]:
     """(sweep payload, the third variant's file alone, expected figures, files)."""
     import logging
@@ -104,7 +134,30 @@ def payloads() -> tuple[dict, dict, dict, dict]:
               "calmar": mean([p["calmar"] for p in per if p["calmar"] is not None]),
               "pooled_total": float(allp["pnl"].sum()), "pooled_dd": calculate_stats(allp)["max_drawdown"],
               "trades": len(allp), "win": float((allp["pnl"] > 0).mean() * 100)}
-    return sweep, alone, expect, files
+    # The 2-parameter grid: each cell is one variant.
+    frames = {n: data_loader.parse_upload(files[n].encode(), n) for n in NAMES}
+    expect["grid2"] = {f"{d},{p}": cell([figures(frames[n])]) for (d, p), n in zip(VARIANTS, NAMES)}
+
+    # A 3-parameter sweep: cells pool across sl.
+    files3 = {n: make_csv(20 + i) for i, n in enumerate(NAMES3)}
+    sweep3 = with_sessions(asyncio.run(analyze_batch([(n, c.encode()) for n, c in files3.items()], None)))
+    fr3 = {n: data_loader.parse_upload(files3[n].encode(), n) for n in NAMES3}
+    no_mon = {n: f[f["date_opened"].dt.dayofweek != 0] for n, f in fr3.items()}
+    grid3, grid3_nomon = {}, {}
+    for d in (30, 45):
+        for p_ in (25, 50):
+            ns = [n for (dd, pp, _), n in zip(VARIANTS3, NAMES3) if dd == d and pp == p_]
+            grid3[f"{d},{p_}"] = cell([figures(fr3[n]) for n in ns])
+            grid3_nomon[f"{d},{p_}"] = cell([figures(no_mon[n]) for n in ns])
+    # The dte section: avg and win pool, total is the mean over that value's variants.
+    sec = {}
+    for d in (30, 45):
+        ns = [n for (dd, _, _), n in zip(VARIANTS3, NAMES3) if dd == d]
+        c = cell([figures(fr3[n]) for n in ns])
+        sec[str(d)] = {"avg": c["avg"], "total": c["total"], "win": c["win"]}
+    expect.update({"grid3": grid3, "grid3_nomon": grid3_nomon, "sec_dte": sec})
+    files.update(files3)
+    return sweep, alone, expect, files, sweep3
 
 
 DRIVER = r"""
@@ -133,7 +186,7 @@ window.fetch = async (u, init) => {
     for (const f of parts) { const b = new Uint8Array(await f.slice(0, 2).arrayBuffer()); heads.push(b[0] === 0x1f && b[1] === 0x8b); }
     window.__sent.push({ names: parts.map(f => f.name), gz: heads });
     if (window.__next === 'refuse') return reply(400, { detail: 'sweep_x.csv has dte; the other files have dte, pt. Nothing was loaded.' });
-    return reply(200, window.__next === 'alone' ? FIX.alone : FIX.sweep);
+    return reply(200, window.__next === 'alone' ? FIX.alone : window.__next === 'sweep3' ? FIX.sweep3 : FIX.sweep);
   }
   if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
   if (/\/surface\/rank$/.test(url)) {
@@ -257,6 +310,45 @@ window.addEventListener('load', () => setTimeout(async () => {
          .every(t => /mean per variant/.test(t)), true);
     ok('the deployment title is the mean of the variants\' peaks', /mean peak [\d.]+ per variant/.test(c.deployTitle()), true);
 
+    // ── the parameter grid (2 parameters: each cell one variant) ────────
+    const gridCard = () => [...document.querySelectorAll('.ob-card')].find(e => /Parameter grid/.test(txt(e.querySelector('.ob-card-title'))));
+    const cellText = (r, k) => txt(gridCard().querySelectorAll('.ob-pgrid tbody tr')[r].querySelectorAll('td')[k].querySelector('.ob-pgrid-v'));
+    const heads = () => [...gridCard().querySelectorAll('.ob-pgrid thead th')].slice(1).map(txt);
+    const rowHeads = () => [...gridCard().querySelectorAll('.ob-pgrid tbody th')].map(txt);
+    const setSel = async (id, v) => { const e = document.getElementById(id); e.value = v; e.dispatchEvent(new Event('change', { bubbles: true })); await wait(150); };
+    ok('the grid is on screen at ALL', await until(() => shown(gridCard()) && !!c.grid), true);
+    ok('default axes: the first two parameters, metric Avg P/L', [document.getElementById('ob-grid-x').value,
+       document.getElementById('ob-grid-y').value, document.getElementById('ob-grid-m').value, heads(), rowHeads()],
+       ['dte', 'pt', 'avg', ['30', '45'], ['25', '50']]);
+    const G2 = FIX.expect.grid2;
+    const FMT = { avg: v => money(v), total: v => money(v), maxdd: v => money(v), win: v => parseFloat(v), calmar: v => parseFloat(v),
+                  n: v => Number(String(v).replace(/,/g, '')) };
+    const TOL = { avg: 0.006, total: 0.51, maxdd: 0.51, win: 0.051, calmar: 0.0051, n: 0 };
+    for (const mt of ['avg', 'total', 'win', 'maxdd', 'calmar', 'n']) {
+      await setSel('ob-grid-m', mt);
+      let worst = 0;
+      [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']].forEach(([d, p]) => {
+        const r = p === '25' ? 0 : 1, k = d === '30' ? 0 : 1;
+        worst = Math.max(worst, Math.abs(FMT[mt](cellText(r, k)) - G2[d + ',' + p][mt]));
+      });
+      out.push((worst <= TOL[mt] ? 'ok|' : 'FAIL|') + `grid ${mt}: every cell equals stats.py on its variant|worst diff ${worst}|<= ${TOL[mt]}`);
+    }
+    await setSel('ob-grid-m', 'avg');
+    await setSel('ob-grid-x', 'pt');
+    ok('choosing the other parameter across swaps the axes', [document.getElementById('ob-grid-y').value, heads(), rowHeads()],
+       ['dte', ['25', '50'], ['30', '45']]);
+    near('and the cells follow (dte=45, pt=25 now row 2, column 1)', money(cellText(1, 0)), G2['45,25'].avg, 0.006);
+    await setSel('ob-grid-y', '');
+    ok('Down (none): one row, aggregating across dte', [rowHeads().length, heads()], [1, ['25', '50']]);
+    ok('a 2-parameter grid says each cell is one variant... while it shows both', true, true);
+    await setSel('ob-grid-x', 'dte'); await setSel('ob-grid-y', 'pt');
+    ok('the note: each cell one variant, the rule stated', /Each cell is one variant/.test(txt(gridCard().querySelector('.ob-pgrid-note'))) &&
+       /mean of each variant's own figure/.test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
+    const pg = gridCard().querySelectorAll('.ob-pgrid td')[0];
+    const bgs = [...gridCard().querySelectorAll('.ob-pgrid td')].map(td => getComputedStyle(td).backgroundColor);
+    ok('cells shade blue (profit) or pink (loss): ' + bgs.join(' '),
+       bgs.every(b => /^rgba?\((52, 152, 219|232, 67, 147)(, [\d.]+)?\)$/.test(b)), true);
+
     // ── export carries the parameters ───────────────────────────────────
     const csv = c.exportText().split(/\r\n/);
     ok('Export CSV leads with param_* columns', csv[0].split(',').slice(0, 2), ['param_dte', 'param_pt']);
@@ -281,6 +373,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     await wait(300);
     ok('the Monday filter survived the switch', [c.activeCount(), c.catOf(dow).selected.includes(0)], [1, false]);
     ok('one variant: no box is tagged', LABELS.filter(l => boxTag(l)), []);
+    ok('one variant: no parameter grid, no parameter sections',
+       [await until(() => !shown(gridCard())), c.paramSections().length, !!document.getElementById('ob-sec-card-param__dte')], [true, 0, false]);
     ok('one variant: the ranking is stale (another sample)', c.surfStale(), true);
     await c.rankSurface();
     await until(() => !c.surf.busy);
@@ -323,6 +417,44 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('and the loaded sweep is untouched', [c.sweep && c.sweep.variants.length, c.viewN], [4, FIX.sweep.n]);
     // The refusal is logged on purpose; only other errors count.
     window.__errs = window.__errs.filter(e => !/oo-backtest upload/.test(e));
+
+    // ── three parameters: cells pool across the hidden one ──────────────
+    window.__next = 'sweep3';
+    drop(FIX.names3);
+    await until(() => c.sweep && c.sweep.params.length === 3 && !!c.grid);
+    await wait(300);
+    ok('8 variants, three parameters, grid on dte × pt', [c.sweep.variants.length, c.sweep.params, heads(), rowHeads()],
+       [8, ['dte', 'pt', 'sl'], ['30', '45'], ['25', '50']]);
+    ok('the note says cells pool across sl', /each cell pools every variant sharing its dte and pt values, across sl \(2 values\)/
+       .test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
+    const check3 = async (G, label) => {
+      for (const mt of ['avg', 'total', 'win', 'maxdd', 'calmar', 'n']) {
+        await setSel('ob-grid-m', mt);
+        let worst = 0;
+        [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']].forEach(([d, p]) => {
+          const r = p === '25' ? 0 : 1, k = d === '30' ? 0 : 1;
+          worst = Math.max(worst, Math.abs(FMT[mt](cellText(r, k)) - G[d + ',' + p][mt]));
+        });
+        out.push((worst <= TOL[mt] ? 'ok|' : 'FAIL|') + `${label} ${mt}: each cell = its two sl variants by the rule (stats.py)|worst diff ${worst}|<= ${TOL[mt]}`);
+      }
+    };
+    await check3(FIX.expect.grid3, '3-param grid');
+    // The dte section: pooled avg and win, total = mean over that value's 4 variants.
+    const chartData = which => OB_CHARTS.sec[`ob-sec-param__dte-${which}`].data.datasets[0].data;
+    ok('a section per parameter, in order, before the metric sections', [...document.querySelectorAll('[id^="ob-sec-card-param__"]')]
+       .filter(shown).map(e => e.id), ['ob-sec-card-param__dte', 'ob-sec-card-param__pt', 'ob-sec-card-param__sl']);
+    const SD = FIX.expect.sec_dte;
+    near('dte section, Avg P/L at 45 pools its trades', chartData('avg')[1], SD['45'].avg, 1e-6);
+    near('dte section, Total P/L at 45 is the mean of its 4 variants', chartData('total')[1], SD['45'].total, 1e-6);
+    near('dte section, win rate at 30 pools', chartData('win')[0], SD['30'].win, 1e-6);
+    ok('no scatter in a parameter section', shown(document.getElementById('ob-sec-param__dte-scatter')), false);
+    // A filter: every cell follows it.
+    const dow3 = c.registry.find(m => m.key === 'day_of_week');
+    c.toggleCat(dow3, 0);
+    await until(() => c.activeCount() === 1);
+    await wait(300);
+    await check3(FIX.expect.grid3_nomon, 'filtered (no Mondays)');
+    await setSel('ob-grid-m', 'avg');
   } catch (e) {
     out.push('FAIL|the driver threw|' + e + (e && e.stack ? ' ' + e.stack.split(String.fromCharCode(10))[1] : '') + '|nothing');
   }
@@ -344,11 +476,12 @@ def main() -> int:
         print("  SKIP  no Edge/Chromium on this host — the page was NOT driven")
         return EXIT_SKIPPED
     from app.oo_backtest.registry import registry_with_coverage
-    sweep, alone, expect, files = payloads()
+    sweep, alone, expect, files, sweep3 = payloads()
     cat = [{"column_name": f"m{j}", "family": "iv", "form": "level", "tenor": None, "wing": None,
             "min_date": "2020-01-02", "units": None, "description": f"metric {j}", "formula": None} for j in range(6)]
     fix = {
-        "registry": registry_with_coverage(None), "sweep": sweep, "alone": alone, "expect": expect,
+        "registry": registry_with_coverage(None), "sweep": sweep, "alone": alone, "expect": expect, "sweep3": sweep3,
+        "names3": NAMES3,
         "files": files, "names": NAMES, "variants": VARIANTS,
         "catalog": {"metrics": cat, "family_groups": [{"label": "IV", "color": "#3498db", "families": ["iv"]}],
                     "other_group": None, "form_labels": {"level": "level"}, "unit_formats": {},

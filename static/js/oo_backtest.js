@@ -396,6 +396,46 @@ function obMeanEquity(cols, idx, figures) {
   return { points, maxDD, k };
 }
 
+/* The parameter grid: one parameter across, one down (or none), a metric in
+ * each cell. A cell is every variant sharing that pair of values -- across
+ * every value of the parameters NOT on an axis. Its figures follow the page's
+ * rule: avg P/L, win rate and trade count POOL the cell's trades; total P/L,
+ * Max DD and Calmar are the MEAN OF EACH VARIANT'S OWN figure (a cell
+ * holding more variants must not read bigger for that).
+ *   variants  sweep.variants ([{id, params}])
+ *   figures   Map id -> {stats, calmar} for the variants with a trade in view
+ *   x, y      parameter names (y '' for one row)
+ * Returns {xs, ys, cells[row][col]} with per cell {variants, inView, n, wins,
+ * avg, win, total, maxdd, calmar} (n 0 and the figures null when empty). */
+function obParamGrid(variants, values, figures, x, y) {
+  const xs = values[x] || [], ys = y ? (values[y] || []) : [null];
+  const cells = ys.map(yv => xs.map(xv => {
+    const vs = variants.filter(v => v.params[x] === xv && (!y || v.params[y] === yv));
+    const fs = vs.map(v => figures.get(v.id)).filter(Boolean);
+    let n = 0, wins = 0, sum = 0;
+    for (const f of fs) {
+      n += f.stats.num_trades;
+      wins += Math.round(f.stats.win_pct * f.stats.num_trades / 100);
+      sum += f.stats.total_pnl;
+    }
+    return { variants: vs.length, inView: fs.length, n, wins,
+             avg: n ? sum / n : null, win: n ? wins / n * 100 : null,
+             total: fs.length ? obMeanOf(fs.map(f => f.stats.total_pnl)) : null,
+             maxdd: fs.length ? obMeanOf(fs.map(f => f.stats.max_drawdown)) : null,
+             calmar: fs.length ? obMeanOf(fs.map(f => f.calmar)) : null };
+  }));
+  return { xs, ys, cells };
+}
+
+const OB_GRID_METRICS = [
+  { key: 'avg', label: 'Avg P/L', fmt: v => obMoney(v, 2), signed: true },
+  { key: 'total', label: 'Total P/L (mean per variant)', fmt: v => obMoney(v), signed: true },
+  { key: 'win', label: 'Win rate', fmt: v => v.toFixed(1) + '%', signed: false },
+  { key: 'maxdd', label: 'Max DD (mean per variant)', fmt: v => obMoney(v), signed: true },
+  { key: 'calmar', label: 'Calmar (mean per variant)', fmt: v => v.toFixed(2), signed: true },
+  { key: 'n', label: 'Trade count', fmt: v => v.toLocaleString(), signed: false },
+];
+
 /* Bar opacity from a bin's trade count relative to the largest bin in that
  * chart: floor + (1 - floor) * (count / max) ^ gamma. Relative only -- a chart
  * whose bins are all small still spreads across the full range. Tuning knobs:
@@ -591,6 +631,13 @@ document.addEventListener('alpine:init', () => {
     // trades in view (1 unless ALL pools several); viewN the trades in view.
     sweep: null,
     variantSel: 'all',
+    // The parameter grid (P3): axes, metric, and the rendered cells; and the
+    // per-parameter sections, registry-shaped, built once per sweep.
+    gridX: '',
+    gridY: '',
+    gridMetric: 'avg',
+    grid: null,
+    paramRows: [],
     vk: 1,
     viewN: 0,
     filesOpen: false,
@@ -753,6 +800,7 @@ document.addEventListener('alpine:init', () => {
       this.sweep = payload.sweep && payload.sweep.variants && payload.sweep.variants.length ? payload.sweep : null;
       this.variantSel = 'all';
       this.filesOpen = false;
+      this.buildParams();
       this.applyView();
       const { columns, ...meta } = payload;
       OB_DATA.sessions = (payload.market && payload.market.spx_sessions) || [];
@@ -837,6 +885,94 @@ document.addEventListener('alpine:init', () => {
     },
 
     variantK() { return this.vk; },
+
+    /* Each parameter as a per-trade column (param__<name>, from the variant
+     * table) and as a categorical section, registry-shaped, so the section
+     * code draws it like any other. Built once per load, on the FULL set. */
+    buildParams() {
+      const sw = this.sweep, full = OB_DATA.full;
+      OB_DATA.vparams = new Map((sw ? sw.variants : []).map(v => [v.id, v.params]));
+      this.paramRows = [];
+      this.grid = null;
+      if (!sw) return;
+      const vid = full.columns.variant || [];
+      for (const p of sw.params) {
+        full.columns[`param__${p}`] = vid.map(id => (OB_DATA.vparams.get(id) || {})[p] ?? null);
+        const vals = sw.values[p] || [];
+        this.paramRows.push({
+          key: `param__${p}`, label: p, column: `param__${p}`, param: true,
+          description: `sweep parameter · ${vals.length} value${vals.length === 1 ? '' : 's'}`,
+          type: 'categorical', categories: vals.map(v => ({ value: v, label: String(v) })),
+          section: true, filter: false, hasScatter: false, winRate: true, binning: null, bins: null,
+          basis: null, series: [], pane: null, format: null, removable: false,
+        });
+      }
+      this.gridX = sw.params[0] || '';
+      this.gridY = sw.params[1] || '';
+      this.gridMetric = 'avg';
+    },
+
+    /* The parameter sections and grid compare variants, so they show at ALL. */
+    paramSections() { return this.sweep && this.variantSel === 'all' ? this.paramRows : []; },
+    gridShown() { return !!this.sweep && this.variantSel === 'all'; },
+    gridMetrics() { return OB_GRID_METRICS; },
+    gridYOptions() { return this.sweep ? this.sweep.params.filter(p => p !== this.gridX) : []; },
+
+    setGridX(p) {
+      if (p === this.gridY) this.gridY = this.gridX;     // the two axes swap, never coincide
+      this.gridX = p;
+      this.computeGrid();
+    },
+    setGridY(p) { this.gridY = p; this.computeGrid(); },
+    setGridMetric(k) { this.gridMetric = k; this.computeGrid(); },
+
+    computeGrid() {
+      const sw = this.sweep;
+      if (!this.gridShown() || !this.gridX) { this.grid = null; return; }
+      const per = OB_DATA.per || [];
+      const figures = new Map(per.map(f => {
+        if (f.calmar === undefined) f.calmar = obExtraStats(OB_DATA.columns, f.rows, f.stats, null, 0).calmar;
+        return [f.id, f];
+      }));
+      const g = obParamGrid(sw.variants, sw.values, figures, this.gridX, this.gridY);
+      const metric = OB_GRID_METRICS.find(m => m.key === this.gridMetric) || OB_GRID_METRICS[0];
+      const maxN = Math.max(0, ...g.cells.flat().map(c => c.n));
+      const lab = (k, v) => `${k}=${v}`;
+      const rows = g.cells.map((row, r) => row.map((c, k) => {
+        const v = c[metric.key];
+        const where = lab(this.gridX, g.xs[k]) + (this.gridY ? ' · ' + lab(this.gridY, g.ys[r]) : '');
+        if (!c.variants) return { text: '', sub: '', bg: 'transparent', title: `${where}: no variant has this combination`, empty: true };
+        if (!c.n || v === null) {
+          return { text: '—', sub: c.n ? `${c.n.toLocaleString()} trades` : 'no trades', bg: 'transparent', empty: true,
+                   title: `${where}: ${c.n ? 'no ' + metric.label + ' (no drawdown, or too short a span)' : 'no trades under the filters'}` };
+        }
+        const hue = metric.signed && v < 0 ? OB_PINK : OB_BLUE;
+        const f = OB_GRID_METRICS;
+        const fig = (key, val) => (val === null ? '—' : f.find(m => m.key === key).fmt(val));
+        return {
+          text: metric.fmt(v), sub: `${c.n.toLocaleString()} trades`, empty: false,
+          bg: obRgba(hue, obBarAlpha(c.n, maxN)),
+          title: `${where}: ${c.inView} of ${c.variants} variant${c.variants === 1 ? '' : 's'} with trades, ` +
+                 `${c.n.toLocaleString()} trades · Avg ${fig('avg', c.avg)} · Total ${fig('total', c.total)} per variant · ` +
+                 `Win ${fig('win', c.win)} · Max DD ${fig('maxdd', c.maxdd)} · Calmar ${fig('calmar', c.calmar)}`,
+        };
+      }));
+      this.grid = { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label };
+    },
+
+    /* Said under the grid: what a cell is when it holds several variants. */
+    gridNote() {
+      const sw = this.sweep;
+      if (!sw || !this.grid) return '';
+      const others = sw.params.filter(p => p !== this.gridX && p !== this.gridY);
+      const rule = 'Avg P/L, win rate and trade count pool the cell\'s trades; total P/L, Max DD and Calmar are the ' +
+                   'mean of each variant\'s own figure. Shade: blue profit, pink loss (win rate and count always blue); ' +
+                   'opacity by the cell\'s trades against the busiest cell. All filters apply.';
+      if (!others.length) return 'Each cell is one variant. ' + rule;
+      const what = others.map(p => `${p} (${(sw.values[p] || []).length} values)`).join(', ');
+      return `More than two parameters: each cell pools every variant sharing its ${this.gridX}` +
+             (this.gridY ? ` and ${this.gridY}` : '') + ` values, across ${what}. ` + rule;
+    },
 
     variantNote() {
       if (!this.sweep) return '';
@@ -1150,6 +1286,7 @@ document.addEventListener('alpine:init', () => {
       // of each variant's own (see obVariantFigures).
       const per = this.sweep && this.variantSel === 'all' ? obVariantFigures(cols, idx, OB_DATA.sessions) : [];
       OB_DATA.vm = per.length > 1 ? per : null;
+      OB_DATA.per = per;            // every variant with a trade in view, even one alone (the grid)
       this.vk = OB_DATA.vm ? per.length : (per.length || 1);
       this.stats = OB_DATA.vm
         ? { ...pooled, total_pnl: obMeanOf(per.map(f => f.stats.total_pnl)),
@@ -1160,6 +1297,7 @@ document.addEventListener('alpine:init', () => {
       this.renderPerformance(OB_DATA.eq);
       this.renderSections(idx);
       this.recomputeCapital();
+      this.computeGrid();
     },
 
 
@@ -1652,7 +1790,7 @@ document.addEventListener('alpine:init', () => {
              (this.meta && this.meta.market && !this.meta.market.joined ? ' (market data not joined)' : '');
     },
 
-    columnLabel(m) { return m.removable ? m.label : this.metricColumn(m); },
+    columnLabel(m) { return m.param ? `parameter ${m.label}` : m.removable ? m.label : this.metricColumn(m); },
 
 
     /* ── per-row filters (P6d) ─────────────────────────────────────────── */
@@ -2022,7 +2160,7 @@ document.addEventListener('alpine:init', () => {
     /* ── registry-driven views ─────────────────────────────────────────── */
 
     filterMetrics() { return this.registry.filter(m => m.filter); },
-    sectionMetrics() { return [...this.registry.filter(m => m.section), ...this.surfRows]; },
+    sectionMetrics() { return [...this.paramSections(), ...this.registry.filter(m => m.section), ...this.surfRows]; },
 
     /* The column a metric reads now: its basis column where it has more than
      * one (the ratios), else its only column. */
@@ -2170,6 +2308,17 @@ document.addEventListener('alpine:init', () => {
           rowIdx = idx.filter(i => vals[i] !== null && vals[i] >= f.lo && vals[i] <= f.hi);
         }
         const d = obSectionData(OB_DATA.columns, rowIdx, mm, this.metricColumn(m));
+        if (m.param) {
+          // A parameter value's TOTAL is the mean over the variants holding
+          // that value (and a trade in view) -- not over every variant, as a
+          // metric bin's is: only those variants can be in this bar.
+          const k = new Map();
+          for (const f of OB_DATA.per || []) {
+            const v = String((OB_DATA.vparams.get(f.id) || {})[m.label]);
+            k.set(v, (k.get(v) || 0) + 1);
+          }
+          for (const r of d.rows) r.k = k.get(r.label) || 1;
+        }
         const fit = m.hasScatter ? obOLS(d.xs, d.ys) : null;
         sections[m.key] = { valued: d.valued, bins: d.rows.filter(r => r.count).length, fit };
         // drawSection says what its scatter drew (the sample), for the title.
@@ -2190,9 +2339,10 @@ document.addEventListener('alpine:init', () => {
       // At ALL over several variants the bin's TOTAL is the mean per variant
       // (it grows with the variant count); its average and win rate pool.
       const kv = this.variantK();
-      const tot = r => (r.total === null ? null : r.total / kv);
+      const kOf = r => r.k || kv;         // a parameter section's bar: its own variants
+      const tot = r => (r.total === null ? null : r.total / kOf(r));
       const rowTip = r => [`${r.count.toLocaleString()} trade${r.count === 1 ? '' : 's'}`,
-                           `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(tot(r))}` + (kv > 1 ? ` (mean of ${kv} variants)` : ''),
+                           `Avg ${obMoney(r.avg, 2)} · Total ${obMoney(tot(r))}` + (kOf(r) > 1 ? ` (mean of ${kOf(r)} variants)` : ''),
                            `Win ${r.win.toFixed(1)}%`];
       const bar = (values, yTick, color) => ({
         type: 'bar',

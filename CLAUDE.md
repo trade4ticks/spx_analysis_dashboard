@@ -39,7 +39,7 @@ with varied parameters, loaded as ONE trade set — the same client-side
 filtering over more rows (75 variants ≈ 240,000 trades), not a new
 architecture. Phases: **P1** server (batch parse, variants, isIgnored) —
 done; **P2** page (multi-file drop, load report, variant selector, BH
-suppression when pooled, surface-rank memory fix) — done; **P3** parameter grid +
+suppression when pooled, surface-rank memory fix) — done; **P3** parameter grid + (done)
 per-parameter sections; **P4** save/load sweeps (child table of files),
 docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
 - **Variant source, per file:** `param_*` columns (discovered; one MCP file
@@ -142,6 +142,26 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   every bin lookup went through Alpine's proxy — `renderSections` passes
   `Alpine.raw` copies. Any per-trade loop over a registry object needs the
   raw object.
+- **P3: the parameter grid and parameter sections (done 2026-10-18).** Both
+  show at ALL only (one variant has nothing to compare). The GRID
+  (`obParamGrid`, a DOM table): one parameter across, one down or "(none)",
+  choosing the other parameter across swaps them; metrics avg P/L, total P/L,
+  win rate, Max DD, Calmar, trade count. A cell is every variant sharing its
+  pair of values, across all values of the parameters on no axis (the note
+  under it says which, with counts); avg/win/count POOL its trades, total/
+  Max DD/Calmar are the MEAN OF EACH VARIANT'S OWN figure — the summary's
+  rule. A combination no variant has is blank; one the filters emptied reads
+  "—". Shade: hue by sign (win rate and count always blue), opacity
+  `obBarAlpha(cell trades, busiest cell)` as the user specified — which in a
+  BALANCED sweep is uniform, so the shade then shows only the sign (raised
+  with the user, 2026-10-18). PARAMETER SECTIONS: each parameter is a
+  per-trade column `param__<name>` (built once from the variant table on the
+  full set) and a registry-shaped categorical entry (`paramRows`) drawn by
+  the ordinary section code, no scatter, win rate on. A value's TOTAL is the
+  mean over the variants HOLDING that value (`r.k`), unlike a metric bin's,
+  where every variant could have traded. The UI gate holds every cell of a
+  2- and a 3-parameter sweep to stats.py per variant file, with and without
+  a filter, and fails when a cell's total is summed instead of averaged.
 - **Scatter tails (2026-10-18, the user's ask).** Above `OB_SCATTER_MAX`
   the sample ALWAYS holds the `OB_SCATTER_TAIL` (200) highest and lowest
   P/L, then every k-th of the rest up to the cap (`obScatterPick`; edges by

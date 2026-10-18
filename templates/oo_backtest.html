@@ -125,6 +125,19 @@
     .ob-variant-bar .ob-card-body { padding:8px 12px; }
     .ob-variant-sel { flex:1; min-width:0; }
     .ob-variant-note { margin-top:4px; font-size:12px; line-height:1.4; }
+    .ob-pgrid-ctl { flex-wrap:wrap; gap:6px 10px; margin-bottom:8px; }
+    .ob-pgrid-ctl .ob-sel { width:auto; min-width:90px; }
+    .ob-pgrid-wrap { overflow-x:auto; }
+    .ob-pgrid { border-collapse:separate; border-spacing:3px; font-size:12px; }
+    .ob-pgrid th { color:var(--dim); font-weight:600; padding:4px 8px; text-align:center; white-space:nowrap; }
+    .ob-pgrid tbody th { text-align:right; }
+    .ob-pgrid-corner { font-weight:400 !important; font-size:11px; }
+    .ob-pgrid td { min-width:84px; padding:6px 8px; text-align:center; border-radius:4px;
+                   border:1px solid var(--border); font-variant-numeric:tabular-nums; }
+    .ob-pgrid td.empty { color:var(--dim); }
+    .ob-pgrid-v { font-weight:600; }
+    .ob-pgrid-n { font-size:10px; opacity:.75; }
+    .ob-pgrid-note { margin-top:6px; font-size:12px; line-height:1.4; }
     .ob-rank-pooled { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px;
                       border:1px solid var(--border); color:var(--dim); }
 
@@ -530,6 +543,68 @@
           </div>
         </div>
       {% endmacro %}
+
+      <!-- Parameter sweeps (P3): the grid, then one section per parameter. ALL
+           only -- with one variant selected there is nothing to compare. -->
+      <div class="ob-card" x-show="loaded && filteredCount > 0 && gridShown()">
+        <div class="ob-card-hdr">
+          <span class="ob-card-title">Parameter grid</span>
+          <span class="ob-card-sub" x-text="grid ? grid.metric : ''"></span>
+        </div>
+        <div class="ob-card-body">
+          <div class="ob-row ob-pgrid-ctl">
+            <label class="ob-lbl" for="ob-grid-x">Across</label>
+            <select id="ob-grid-x" class="ob-sel" @change="setGridX($event.target.value)">
+              <template x-for="p in (sweep ? sweep.params : [])" :key="p">
+                <option :value="p" :selected="gridX === p" x-text="p"></option>
+              </template>
+            </select>
+            <label class="ob-lbl" for="ob-grid-y">Down</label>
+            <select id="ob-grid-y" class="ob-sel" @change="setGridY($event.target.value)">
+              <option value="" :selected="gridY === ''">(none)</option>
+              <template x-for="p in gridYOptions()" :key="p">
+                <option :value="p" :selected="gridY === p" x-text="p"></option>
+              </template>
+            </select>
+            <label class="ob-lbl" for="ob-grid-m">Metric</label>
+            <select id="ob-grid-m" class="ob-sel" @change="setGridMetric($event.target.value)">
+              <template x-for="mt in gridMetrics()" :key="mt.key">
+                <option :value="mt.key" :selected="gridMetric === mt.key" x-text="mt.label"></option>
+              </template>
+            </select>
+          </div>
+          <div class="ob-pgrid-wrap" x-show="grid">
+            <table class="ob-pgrid">
+              <thead>
+                <tr>
+                  <th class="ob-pgrid-corner" x-text="(gridY ? gridY + ' ↓ / ' : '') + gridX + ' →'"></th>
+                  <template x-for="xv in (grid ? grid.xs : [])" :key="xv"><th x-text="xv"></th></template>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(row, r) in (grid ? grid.rows : [])" :key="r">
+                  <tr>
+                    <th x-text="grid ? grid.ys[r] : ''"></th>
+                    <template x-for="(cell, k) in row" :key="k">
+                      <td :class="{ empty: cell.empty }" :style="{ background: cell.bg }" :title="cell.title">
+                        <div class="ob-pgrid-v" x-text="cell.text"></div>
+                        <div class="ob-pgrid-n" x-text="cell.sub"></div>
+                      </td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="ob-dim ob-pgrid-note" x-text="gridNote()"></div>
+        </div>
+      </div>
+
+      <template x-for="m in paramSections()" :key="m.key">
+        <div class="ob-sec-row" x-show="loaded && filteredCount > 0">
+        {{ metric_section_card() }}
+        </div>
+      </template>
 
       <!-- One card per registry entry with section: true, in registry order.
            The canvases stay in the DOM (x-show) so a chart survives a section
