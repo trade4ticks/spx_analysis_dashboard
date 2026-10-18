@@ -681,7 +681,8 @@ async def check_saved_sweeps(pool) -> None:
         r = await c.post("/api/backtest-portfolio/load", json={"ids": [sid]})
         det = r.json().get("detail", "")
         check(r.status_code == 400 and '"dte sweep" is a parameter sweep (3 variants)' in det
-              and "export that variant on its own and save it as a normal strategy" in det,
+              and "re-export that variant from Option Omega (or re-run it through the MCP API) and save it as a "
+                  "normal strategy" in det,
               "the portfolio refuses a sweep and says how to use one variant")
 
         # A single file saved over the name takes the sweep's files with it.

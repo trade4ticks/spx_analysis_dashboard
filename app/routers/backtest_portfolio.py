@@ -47,8 +47,9 @@ def sweep_refusal(name: str, variants) -> str:
     """Why a parameter sweep cannot join a portfolio (yet), and what to do.
     The same words here and on the page (backtest_portfolio.js)."""
     return (f'"{name}" is a parameter sweep ({variants} variants) and cannot be added to a portfolio yet: '
-            f"a portfolio strategy is one set of trades. To use one of its variants here, export that "
-            f"variant on its own and save it as a normal strategy on the OO Backtest page.")
+            f"a portfolio strategy is one set of trades. To use one of its variants here, re-export that "
+            f"variant from Option Omega (or re-run it through the MCP API) and save it as a normal strategy "
+            f"on the OO Backtest page.")
 
 log = logging.getLogger(__name__)
 

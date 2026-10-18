@@ -186,10 +186,14 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   name removes its files and its `sweep`. `load_strategy_file` raises
   `SweepStrategy` for a sweep: the OO load handles it; the PORTFOLIO
   refuses — marked "(not for portfolios)" in its list, refused on Add with
-  the way round it (export one variant on its own and save it as a normal
-  strategy), and the same words from `/load` for a profile that names one.
-  No parse cache for sweep files (CSVs parse in ~35 ms each; revisit for
-  MesoSim-JSON sweeps). Gates: `check_saved_sweeps` in
+  the way round it (re-export that variant from Option Omega, or re-run it
+  through the MCP API, and save it as a normal strategy), and the same words
+  from `/load` for a profile that names one. The first wording said "export
+  that variant", which pointed at this page's Export CSV — a dead end (see
+  below). **No one-click "save this variant"**, by decision: the user would
+  rather have a fresh single-variant log. **No parse cache for sweep files**
+  (CSVs parse in ~35 ms each), by decision — the user does not save MesoSim
+  sweeps; revisit if that changes. Gates: `check_saved_sweeps` in
   check_oo_market_sql drives the real endpoints on the temp Postgres;
   check_oo_sweep_ui clicks Save and the saved-load; check_portfolio_ui the
   refusal.
@@ -247,6 +251,13 @@ Gates: `check_oo_market_sql` (store) and `check_oo_notes_ui` (clicked, Edge).
 time runs no frames, and Alpine SHOWS an x-show element from a frame (it
 hides synchronously), so without the shim every x-show stayed hidden while
 x-text updated, and the gate failed or passed by luck.
+
+**Export CSV is NOT re-importable.** It writes the page's INTERNAL column
+names (`date_opened`, `pnl`, `param_dte`…), not any of the three input
+formats (Option Omega's website CSV, its MCP export, MesoSim JSON), so the
+file it produces cannot be uploaded or saved as a strategy. Never point a
+user at it as a way to get trades back INTO the app — that advice was given
+once (the portfolio's sweep refusal, 2026-10-18) and led nowhere.
 
 **Export CSV** (status line, 2026-10-04) writes exactly the trades the page shows — the same
 `activeSpecs()` as `recompute()`. Columns: the log's own (`OB_EXPORT_BASE`, minus any empty in

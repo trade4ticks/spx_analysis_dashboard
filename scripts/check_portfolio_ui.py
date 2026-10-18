@@ -287,7 +287,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   await choose(4);
   ok('adding it is refused: still three strategies', c.chosen.length, 3);
   ok('and the refusal says how to use one variant',
-     /"dte sweep" is a parameter sweep \(4 variants\).*export that variant on its own and save it as a normal strategy/.test(c.error), true);
+     /"dte sweep" is a parameter sweep \(4 variants\).*re-export that variant from Option Omega \(or re-run it through the MCP API\) and save it as a normal strategy/.test(c.error), true);
   c.error = '';
 
   // THE BUTTON WORKS BEFORE A LOAD. It was disabled here, which is the

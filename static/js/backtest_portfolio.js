@@ -636,8 +636,9 @@ document.addEventListener('alpine:init', () => {
       // same words if a saved profile asks for one).
       if (s.variants) {
         this.error = `"${s.name}" is a parameter sweep (${s.variants} variants) and cannot be added to a portfolio ` +
-                     `yet: a portfolio strategy is one set of trades. To use one of its variants here, export that ` +
-                     `variant on its own and save it as a normal strategy on the OO Backtest page.`;
+                     `yet: a portfolio strategy is one set of trades. To use one of its variants here, re-export that ` +
+                     `variant from Option Omega (or re-run it through the MCP API) and save it as a normal strategy ` +
+                     `on the OO Backtest page.`;
         return;
       }
       if (this.chosen.length >= this.maxStrategies) {
