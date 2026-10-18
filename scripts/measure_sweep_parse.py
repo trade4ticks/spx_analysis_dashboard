@@ -15,6 +15,10 @@ synthetic Option Omega CSVs and prints each stage.
                          time -- a sweep of exit parameters (default)
   --entries random       every variant its own entry days and times: the
                          worst case for the entry-bar lookup
+  --format mcp           Option Omega MCP exports -- camelCase header,
+                         param_delta / param_pt columns, ~2% isIgnored: the
+                         files a real sweep arrives as (default)
+  --format site          the website CSV export, variants in the filenames
 
     sudo -u gates .venv/bin/python scripts/measure_sweep_parse.py
     sudo -u gates .venv/bin/python scripts/measure_sweep_parse.py --entries random
@@ -39,17 +43,33 @@ HEADER = ["Date Opened", "Time Opened", "Opening Price", "Legs", "Premium", "Clo
           "No. of Contracts", "Funds at Close", "Margin Req.", "Strategy", "Gap", "Movement"]
 
 
-def make_csv(seed: int, n: int, sessions: list, shared: bool) -> bytes:
+MCP_HEADER = ("param_delta,param_pt,dateOpened,timeOpened,dateClosed,timeClosed,daysInTrade,underlying,legs,"
+              "numberOfContracts,premiumPerContract,averageClosingCostPerContract,openingUnderlyingPrice,"
+              "closingUnderlyingPrice,reasonClosed,profit,profitPercentage,fundsAtClose,buyingPowerRequired,"
+              "openingFees,closingFees,shortLongRatio,closingShortLongRatio,gap,intradayMovement,"
+              "highestProfitPercentage,highestLossPercentage,isIgnored")
+
+
+def make_csv(seed: int, n: int, sessions: list, shared: bool, mcp: bool) -> bytes:
     entry = random.Random(0 if shared else seed)
     other = random.Random(seed)
     out = io.StringIO()
-    out.write(",".join(HEADER) + "\n")
+    out.write((MCP_HEADER if mcp else ",".join(HEADER)) + "\n")
+    delta, pt = 5 + seed % 15, 25 + seed // 15 * 5
     for _ in range(n):
         i = entry.randrange(len(sessions) - 10)
         m = 9 * 60 + 35 + 5 * entry.randrange(0, 70)
         d0, d1 = sessions[i], sessions[i + other.randrange(0, 8)]
+        pnl = round(other.gauss(30, 400), 2)
+        if mcp:
+            # ~2% isIgnored, as the MCP export keeps its wide-bid-ask trades.
+            out.write(f"{delta},{pt},{d0},{m // 60:02d}:{m % 60:02d}:00,{d1},15:59:00,2,SPX,"
+                      f"\"1 Mar 8 P 5000 STO | 1 Mar 8 P 4950 BTO\",1,12.5,0.0,4500.12,4510.3,Profit Target,"
+                      f"{pnl},12.3,101200,5000,1.3,1.3,0.5,0.5,0.35,20,{round(other.uniform(0, 100), 1)},"
+                      f"{round(-other.uniform(0, 200), 1)},{'true' if other.random() < 0.02 else 'false'}\n")
+            continue
         out.write(f"{d0},{m // 60:02d}:{m % 60:02d}:00,4500.12,\"1 Mar 8 P 5000 STO | 1 Mar 8 P 4950 BTO\","
-                  f"12.5,4510.3,{d1},15:59:00,0.0,Profit Target,{round(other.gauss(30, 400), 2)},12.3,1,"
+                  f"12.5,4510.3,{d1},15:59:00,0.0,Profit Target,{pnl},12.3,1,"
                   f"101200,5000,IC 45,0.35,20\n")
     return out.getvalue().encode()
 
@@ -59,6 +79,7 @@ async def main() -> int:
     ap.add_argument("--files", type=int, default=75)
     ap.add_argument("--trades", type=int, default=3200)
     ap.add_argument("--entries", choices=("shared", "random"), default="shared")
+    ap.add_argument("--format", choices=("mcp", "site"), default="mcp")
     args = ap.parse_args()
 
     from dotenv import load_dotenv
@@ -79,9 +100,12 @@ async def main() -> int:
              for i in range(args.files)]
     if len(set(names)) < len(names):
         names = [f"sweep_v{i}.csv" for i in range(args.files)]
-    files = [(n, make_csv(i, args.trades, sessions, args.entries == "shared")) for i, n in enumerate(names)]
+    mcp = args.format == "mcp"
+    if mcp:     # the variants are in the param_* columns, not the names
+        names = [f"mcp_export_{i}.csv" for i in range(args.files)]
+    files = [(n, make_csv(i, args.trades, sessions, args.entries == "shared", mcp)) for i, n in enumerate(names)]
     parts = [(n, gzip.compress(c, 6)) for n, c in files]
-    print(f"{args.files} files x {args.trades:,} trades, entries {args.entries}: "
+    print(f"{args.files} {args.format} files x {args.trades:,} trades, entries {args.entries}: "
           f"{sum(len(c) for _, c in files) / 1e6:.1f} MB raw, {sum(len(z) for _, z in parts) / 1e6:.1f} MB "
           f"as the page uploads it (built in {time.monotonic() - t:.1f}s, not part of the request)")
 

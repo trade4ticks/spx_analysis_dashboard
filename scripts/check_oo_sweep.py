@@ -214,6 +214,105 @@ def check_ignored() -> None:
           and len(df) == 3, "a sweep sums the dropped count, and each file reports its own")
 
 
+# ── the MCP export: a third format ──────────────────────────────────────────
+
+# Exactly as exported (2026-10-18), and the website export's header beside it.
+MCP_HEADER = ("param_delta,param_pt,dateOpened,timeOpened,dateClosed,timeClosed,daysInTrade,underlying,legs,"
+              "numberOfContracts,premiumPerContract,averageClosingCostPerContract,openingUnderlyingPrice,"
+              "closingUnderlyingPrice,reasonClosed,profit,profitPercentage,fundsAtClose,buyingPowerRequired,"
+              "openingFees,closingFees,shortLongRatio,closingShortLongRatio,gap,intradayMovement,"
+              "highestProfitPercentage,highestLossPercentage,isIgnored").split(",")
+SITE_HEADER = ["Date Opened", "Time Opened", "Opening Price", "Legs", "Premium", "Closing Price", "Date Closed",
+               "Time Closed", "Days in Trade", "Avg. Closing Cost", "Reason For Close", "P/L", "P/L %",
+               "No. of Contracts", "Funds at Close", "Margin Req.", "Underlying", "Strategy",
+               "Opening Commissions + Fees", "Closing Commissions + Fees", "Opening Short/Long Ratio",
+               "Closing Short/Long Ratio", "Gap", "Movement", "Max Profit", "Max Loss"]
+# The same three trades, as each export would carry them: open date, time,
+# close date, time, legs, contracts, premium, closing cost, open px, close px,
+# reason, P/L, P/L %, funds, margin, open fee, close fee, s/l, closing s/l,
+# gap, movement, highest profit %, highest loss %.
+TRADES = [
+    ("2024-03-04", "10:00:00", "2024-03-06", "15:59:00", "1 Mar 8 P 5000 STO", 2, 125.0, 20.0, 5100.5, 5120.25,
+     "Profit Target", 210.0, 84.0, 100210, 5000, 2.6, 2.6, 0.5, 0.4, 0.31, 20.1, 90.0, -15.0),
+    ("2024-03-05", "10:00:00", "2024-03-08", "11:00:00", "1 Mar 8 P 4980 STO", 1, 90.0, 210.0, 5080, 5010,
+     "Stop Loss", -120.0, -133.3, 100090, 4000, 1.3, 1.3, 0.5, 0.6, -0.62, -70, 10.0, -140.0),
+    ("2024-03-07", "10:30:00", "2024-03-08", "15:59:00", "1 Mar 8 P 4990 STO", 1, 70.0, 0.0, 5110, 5130,
+     "Expired", 70.0, 100.0, 100160, 3500, 1.3, 0, 0.5, 0.5, 0.1, 10, 100.0, -5.0),
+]
+
+
+def mcp_csv(params=((16, 50),) * 3, ignored=("false",) * 3, dates=None, drop: str | None = None) -> bytes:
+    rows = []
+    for i, t in enumerate(TRADES):
+        (d0, t0, d1, t1, legs, n, prem, cc, opx, cpx, why, pl, plp, funds, bp, of, cf, sl, csl, gap, mv, hi, lo) = t
+        if dates:
+            d0, d1 = dates[i]
+        rows.append([params[i][0], params[i][1], d0, t0, d1, t1, 2, "SPX", legs, n, prem, cc, opx, cpx, why, pl,
+                     plp, funds, bp, of, cf, sl, csl, gap, mv, hi, lo, ignored[i]])
+    df = pd.DataFrame(rows, columns=MCP_HEADER)
+    if drop:
+        df = df.drop(columns=[drop])
+    out = io.StringIO()
+    df.to_csv(out, index=False)
+    return out.getvalue().encode()
+
+
+def site_csv() -> bytes:
+    rows = []
+    for (d0, t0, d1, t1, legs, n, prem, cc, opx, cpx, why, pl, plp, funds, bp, of, cf, sl, csl, gap, mv, hi, lo) in TRADES:
+        rows.append([d0, t0, opx, legs, prem, cpx, d1, t1, 2, cc, why, pl, plp, n, funds, bp, "SPX", "IC", of, cf,
+                     sl, csl, gap, mv, "", ""])
+    out = io.StringIO()
+    pd.DataFrame(rows, columns=SITE_HEADER).to_csv(out, index=False)
+    return out.getvalue().encode()
+
+
+def check_mcp() -> None:
+    print("MCP export format")
+    from app.routers.oo_backtest import _parse
+    mapped = set(data_loader.MCP_COLUMN_MAPPING)
+    unread = [c for c in MCP_HEADER if c not in mapped and not c.startswith("param_") and c != "isIgnored"]
+    check(unread == ["daysInTrade", "underlying"],
+          f"every MCP column is mapped, a sweep parameter, isIgnored, or deliberately unread ({unread})")
+    check(data_loader.csv_format(MCP_HEADER) == "oo_mcp_csv" and data_loader.csv_format(SITE_HEADER) == "oo_csv",
+          "the header decides the format: MCP vs the website's")
+
+    df = parse(mcp_csv(), "mcp.csv")
+    check(df.attrs["source_format"] == "oo_mcp_csv", "an MCP file parses as oo_mcp_csv")
+    p = _parse(mcp_csv(), "mcp.csv")
+    c = p["columns"]
+    check(p["source"] == "oo_mcp_csv" and p["n"] == 3, "payload source oo_mcp_csv, 3 trades")
+    check(c["highest_profit_pct"] == [90.0, 10.0, 100.0] and c["highest_loss_pct"] == [-15.0, -140.0, -5.0],
+          "highestProfitPercentage / highestLossPercentage reach the payload")
+    check(c["margin_req"] == [5000.0, 4000.0, 3500.0], "buyingPowerRequired is the trade's margin_req")
+    check("gap" not in c and "csv_gap" not in c and "csv_gap" in df.columns,
+          "the vendor's gap is csv_gap and reaches the payload under no name -- never as our SPX gap")
+
+    # The same trades through both exports agree on every shared field.
+    w = _parse(site_csv(), "site.csv")["columns"]
+    shared = ["date_opened", "time_opened", "date_closed", "time_closed", "days_in_trade", "legs", "contracts",
+              "premium", "pnl", "pnl_pct", "margin_req", "exit_reason", "spx_open_price", "spx_close_price",
+              "is_win", "day_of_week", "year"]
+    diff = [k for k in shared if c.get(k) != w.get(k)]
+    check(not diff, f"the same trades from the website CSV and the MCP export: identical shared columns {diff or ''}")
+    check(_parse(site_csv(), "site.csv")["source"] == "oo_csv" and "highest_profit_pct" not in w,
+          "the website export (its full current header) still parses as oo_csv, with no excursion columns")
+
+    df = parse(mcp_csv(dates=[("2024-03-04T00:00:00Z", "2024-03-06T00:00:00Z")] * 3), "mcp.csv")
+    check([str(d.date()) for d in df["date_opened"]] == ["2024-03-04"] * 3,
+          "a zoned midnight-UTC date keeps its written date (not shifted to the day before)")
+    df = parse(mcp_csv(ignored=("false", "true", "false")), "mcp.csv")
+    check(len(df) == 2 and df.attrs["parse_notes"]["ignored_dropped"] == 1, "isIgnored applies to the MCP export")
+    raises(lambda: parse(mcp_csv(drop="profit"), "mcp.csv"), 'mcp.csv: missing column "profit"',
+           "an MCP header missing a required column names it in the MCP's own spelling")
+
+    # One MCP file, two variants, an ignored row: a sweep.
+    df, sw = combine(("mcp.csv", mcp_csv(params=((16, 50), (30, 50), (16, 50)), ignored=("false", "false", "true"))))
+    check(bool(sw) and [v["label"] for v in sw["variants"]] == ["delta=16 · pt=50", "delta=30 · pt=50"]
+          and sw["files"][0]["ignored_dropped"] == 1 and len(df) == 2,
+          "an MCP file carrying two variants loads as a sweep, its ignored row dropped")
+
+
 # ── payload and endpoints ───────────────────────────────────────────────────
 
 def check_endpoints() -> None:
@@ -252,6 +351,11 @@ def check_endpoints() -> None:
     check(body.get("filename") == "4 files" and body.get("source") == "oo_csv" and body.get("suggested_name") == "sweep",
           "batch filename / source / suggested name")
     check(set(sw.get("timing", {})) == {"parse_s", "join_payload_s"}, "the sweep reports its own server timing")
+    r = post([("m1.csv", mcp_csv(params=((16, 50),) * 3)), ("m2.csv", gzip.compress(mcp_csv(params=((30, 50),) * 3))),
+              ("site_delta45_pt50.csv", site_csv())])
+    b = r.json() if r.status_code == 200 else {}
+    check(r.status_code == 200 and b.get("source") == "mixed" and len((b.get("sweep") or {}).get("variants", [])) == 3,
+          f"two MCP files and a website CSV in one batch: source 'mixed', 3 variants ({r.status_code})")
     check(body.get("market", {}).get("joined") is False, "no pool here: the join reports itself not joined")
 
     # /parse is the batch path with one file: today's payload plus `sweep: null`.
@@ -296,12 +400,13 @@ def main() -> int:
     check_filenames()
     check_combine()
     check_ignored()
+    check_mcp()
     check_endpoints()
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")
         return 1
-    print("PASS: OO sweeps — filenames, precedence, refusals, isIgnored, variant payload, batch endpoints")
+    print("PASS: OO sweeps — filenames, precedence, refusals, isIgnored, MCP format, variant payload, batch endpoints")
     return 0
 
 

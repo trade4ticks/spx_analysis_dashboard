@@ -33,6 +33,9 @@ TRADE_COLUMNS = [
     # CSV-only extras (null for Mesosim)
     "spx_open_price", "spx_close_price", "contracts", "pnl_pct",
     "max_profit", "max_loss", "strategy",
+    # MCP-export-only (null for the website CSV and Mesosim): the trade's
+    # best / worst point as a % of premium, as Option Omega states it.
+    "highest_profit_pct", "highest_loss_pct",
     # Mesosim-only (null for CSV)
     "position_id", "missing_data_at_fill",
     # Sweeps only: the trade's variant id, into the payload's sweep.variants

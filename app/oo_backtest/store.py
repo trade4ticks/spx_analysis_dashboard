@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     id           SERIAL PRIMARY KEY,
     name         TEXT NOT NULL UNIQUE,
     notes        TEXT NOT NULL DEFAULT '',
-    source       TEXT NOT NULL,              -- 'oo_csv' | 'mesosim_json'
+    source       TEXT NOT NULL,              -- 'oo_csv' | 'oo_mcp_csv' | 'mesosim_json'
     filename     TEXT NOT NULL,
     file_gz      BYTEA NOT NULL,
     file_sha256  TEXT NOT NULL,

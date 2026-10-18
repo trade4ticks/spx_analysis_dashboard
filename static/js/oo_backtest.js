@@ -380,8 +380,8 @@ function obFmt(v, fmt) {
  * and the reverse) is left out by the caller. */
 const OB_EXPORT_BASE = [
   'date_opened', 'time_opened', 'date_closed', 'time_closed', 'days_in_trade', 'strategy', 'position_id',
-  'legs', 'contracts', 'premium', 'margin_req', 'pnl', 'pnl_pct', 'max_profit', 'max_loss', 'exit_reason',
-  'spx_open_price', 'spx_close_price', 'missing_data_at_fill',
+  'legs', 'contracts', 'premium', 'margin_req', 'pnl', 'pnl_pct', 'max_profit', 'max_loss',
+  'highest_profit_pct', 'highest_loss_pct', 'exit_reason', 'spx_open_price', 'spx_close_price', 'missing_data_at_fill',
 ];
 
 function obCsvCell(v) {
@@ -1967,7 +1967,8 @@ document.addEventListener('alpine:init', () => {
 
     sourceLabel() {
       if (!this.meta) return '';
-      return this.meta.source === 'mesosim_json' ? 'Mesosim JSON' : 'Option Omega CSV';
+      return { mesosim_json: 'Mesosim JSON', oo_mcp_csv: 'Option Omega MCP CSV', mixed: 'mixed formats' }[this.meta.source]
+        || 'Option Omega CSV';
     },
 
     loadedLabel() {

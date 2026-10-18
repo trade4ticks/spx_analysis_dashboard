@@ -56,6 +56,22 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
 - **`isIgnored`** (MCP exports keep the wide-bid-ask trades the website's
   CSV omits) is dropped in `parse_csv`, for single files too; counted in
   `parse_notes.ignored_dropped`; a value neither true nor false is refused.
+- **The MCP export is a THIRD input format** (`oo_mcp_csv`), camelCase and
+  nothing like the website's header — detected by the header
+  (`csv_format`: `dateOpened` and no `Date Opened`), both being .csv, and
+  mapped by `MCP_COLUMN_MAPPING` onto the same names, never normalised away
+  at export. It carries what the website does not:
+  `highestProfitPercentage` / `highestLossPercentage` → `highest_profit_pct`
+  / `highest_loss_pct` (max favourable / adverse excursion, % of premium, in
+  the payload, wanted as metrics later) and `buyingPowerRequired` →
+  `margin_req` (the trade's own margin; no statistic uses `margin_req` yet —
+  capital is still the typed figure). Its `gap` is mapped to `csv_gap`, NOT
+  `gap` (the vendor gap must never sit under our SPX gap heading).
+  `daysInTrade` and `underlying` are deliberately unread. A zoned date keeps
+  its WRITTEN date. The format travels as `df.attrs["source_format"]` →
+  payload/store `source` (`mixed` for a batch of several). **Unconfirmed:**
+  that `premiumPerContract` means what the website's `Premium` means, and
+  the units of the two percentages — awaiting one trade in both exports.
 - **Payload:** one int `variant` column (whitelisted) + `sweep: {params,
   values, variants: [{id, params, label, file, n}], files: [report],
   timing}`. Ids follow numeric order (5 < 10 < 45).
@@ -67,7 +83,8 @@ docs. Code: `app/oo_backtest/sweep.py`, `POST /parse-batch`.
   `jsonable_encoder` (5.8 s) and GZipMiddleware's level 9 (9.2 s) — the
   parse endpoints now return `json_gzip_response` (level 5; the middleware
   skips an encoded response; `encode_json` is gated byte-identical to
-  JSONResponse). The page gzips each part before upload (~3.4 MB for 75).
+  JSONResponse). The page gzips each part before upload (~3.4 MB for 75;
+  ~5 MB as MCP exports, which measure 15–20 s).
   `MAX_BATCH_BYTES` 300 MB uncompressed: ~5 MesoSim JSONs, not 75.
 - **Settled with the user (2026-10-18) for P2/P3 — every stat that SCALES
   with the number of variants is the MEAN across the selected variants**:

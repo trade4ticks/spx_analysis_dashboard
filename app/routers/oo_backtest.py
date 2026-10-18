@@ -99,7 +99,7 @@ def _payload(df, filename: str, market_report: dict) -> dict:
     named = payload["notes"].get("backtest_name") or named
     payload.update({
         "filename": filename,
-        "source": "mesosim_json" if filename.lower().endswith(".json") else "oo_csv",
+        "source": _source_of(filename, df),
         "suggested_name": named or PurePath(filename).stem,
         "market": market_report,
     })
@@ -280,7 +280,7 @@ async def analyze_batch(files: list[tuple[str, bytes]], pool) -> dict:
     payload = await _analyze(files[0][1] if not multi else b"", name0, pool, df=df)
     t2 = _time.monotonic()
     if sw is not None:
-        sources = {_source_of(n) for n, _ in files}
+        sources = {_source_of(n, f) for n, f in parsed}
         payload.update({
             "filename": name0 if not multi else f"{len(files)} files",
             "source": sources.pop() if len(sources) == 1 else "mixed",
@@ -319,8 +319,12 @@ async def parse_batch(request: Request, files: list[UploadFile] = File(...), poo
 
 # ── saved strategies ────────────────────────────────────────────────────────
 
-def _source_of(filename: str) -> str:
-    return "mesosim_json" if filename.lower().endswith(".json") else "oo_csv"
+def _source_of(filename: str, df=None) -> str:
+    """'oo_csv' | 'oo_mcp_csv' | 'mesosim_json'. The parser says which (both
+    Option Omega formats are .csv); a frame cached before it did falls back
+    to the extension."""
+    fmt = getattr(df, "attrs", {}).get("source_format") if df is not None else None
+    return fmt or ("mesosim_json" if filename.lower().endswith(".json") else "oo_csv")
 
 
 @router.get("/strategies")
@@ -341,7 +345,7 @@ async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes:
     dates_close = df["date_closed"].dropna()
     try:
         saved = await store.save_strategy(
-            pool, name=name, notes=notes, source=_source_of(filename), filename=filename, content=content,
+            pool, name=name, notes=notes, source=_source_of(filename, df), filename=filename, content=content,
             trade_count=int(len(df)),
             date_min=dates_open.min().date() if len(dates_open) else None,
             date_max=dates_close.max().date() if len(dates_close) else None,

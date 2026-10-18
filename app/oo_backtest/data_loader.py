@@ -100,6 +100,59 @@ def _decode_upload_contents(contents: str | bytes) -> str:
     return contents
 
 
+# Option Omega's MCP API export: the same trades as the website CSV under
+# camelCase names, plus columns the website does not export. A THIRD format,
+# detected by its header (both are .csv), mapped onto the same names so
+# everything downstream sees one shape. Header as exported, 2026-10-18:
+#   param_delta,param_pt,dateOpened,timeOpened,dateClosed,timeClosed,
+#   daysInTrade,underlying,legs,numberOfContracts,premiumPerContract,
+#   averageClosingCostPerContract,openingUnderlyingPrice,closingUnderlyingPrice,
+#   reasonClosed,profit,profitPercentage,fundsAtClose,buyingPowerRequired,
+#   openingFees,closingFees,shortLongRatio,closingShortLongRatio,gap,
+#   intradayMovement,highestProfitPercentage,highestLossPercentage,isIgnored
+# param_* are the sweep's parameters (sweep.py), isIgnored is drop_ignored's.
+MCP_COLUMN_MAPPING = {
+    "dateOpened": "date_opened",
+    "timeOpened": "time_opened",
+    "dateClosed": "date_closed",
+    "timeClosed": "time_closed",
+    "legs": "legs",
+    "numberOfContracts": "contracts",
+    "premiumPerContract": "premium",
+    "averageClosingCostPerContract": "avg_closing_cost",
+    "openingUnderlyingPrice": "spx_open_price",
+    "closingUnderlyingPrice": "spx_close_price",
+    "reasonClosed": "exit_reason",
+    "profit": "pnl",
+    "profitPercentage": "pnl_pct",
+    "fundsAtClose": "funds_at_close",
+    # The trade's own margin -- the website's "Margin Req.".
+    "buyingPowerRequired": "margin_req",
+    "openingFees": "open_fees",
+    "closingFees": "close_fees",
+    "shortLongRatio": "open_sl_ratio",
+    "closingShortLongRatio": "close_sl_ratio",
+    # The vendor's gap, NEVER our `gap` (open vs prior close, from market.py):
+    # left as "gap" it would sit under the SPX gap heading whenever the market
+    # join failed, which is exactly what removing the website's Gap prevented.
+    "gap": "csv_gap",
+    "intradayMovement": "movement",
+    # Path data the website export does not carry: the trade's best and worst
+    # point, as Option Omega states them (a percentage of premium).
+    "highestProfitPercentage": "highest_profit_pct",
+    "highestLossPercentage": "highest_loss_pct",
+    # daysInTrade and underlying are not mapped: days_in_trade is derived from
+    # the dates for every format, and the website's Underlying is unused too.
+}
+MCP_REQUIRED = ("dateOpened", "dateClosed", "profit")
+
+
+def csv_format(columns) -> str:
+    """'oo_mcp_csv' for the MCP export's header, else 'oo_csv' (the website's)."""
+    cols = set(map(str, columns))
+    return "oo_mcp_csv" if "dateOpened" in cols and "Date Opened" not in cols else "oo_csv"
+
+
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f", ""}
 
@@ -151,16 +204,30 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
     if len(df.columns) <= 1:
         df = pd.read_csv(io.StringIO(contents), sep=",")
 
-    # Rename columns
-    df = df.rename(columns=COLUMN_MAPPING)
+    # Rename columns -- by the format the header says this is.
+    fmt = csv_format(df.columns)
+    if fmt == "oo_mcp_csv":
+        missing = [c for c in MCP_REQUIRED if c not in df.columns]
+        if missing:
+            raise ValueError(f'{filename}: missing column "{missing[0]}" — the header reads as an Option Omega '
+                             f"MCP export, which always has it.")
+        df = df.rename(columns=MCP_COLUMN_MAPPING)
+    else:
+        df = df.rename(columns=COLUMN_MAPPING)
 
     ignored = drop_ignored(df, filename)
     df = ignored.pop("df")
     df.attrs["parse_notes"] = {"ignored_dropped": ignored["dropped"]} if ignored["present"] else {}
+    df.attrs["source_format"] = fmt
 
-    # Parse dates - use flexible parsing to handle various formats
-    df["date_opened"] = pd.to_datetime(df["date_opened"], format="mixed", dayfirst=False)
-    df["date_closed"] = pd.to_datetime(df["date_closed"], format="mixed", dayfirst=False)
+    # Parse dates - use flexible parsing to handle various formats. A stamp
+    # with a zone ("2024-03-05T00:00:00Z") keeps its WRITTEN date: converting
+    # a midnight-UTC date to Eastern would move every trade a day earlier.
+    for c in ("date_opened", "date_closed"):
+        d = pd.to_datetime(df[c], format="mixed", dayfirst=False)
+        if getattr(d.dt, "tz", None) is not None:
+            d = d.dt.tz_localize(None)
+        df[c] = d
 
     # Calculate derived fields
     df["day_of_week"] = df["date_opened"].dt.dayofweek
@@ -176,7 +243,8 @@ def parse_csv(contents: str | bytes, filename: str = "") -> pd.DataFrame:
         "spx_open_price", "premium", "spx_close_price", "avg_closing_cost",
         "pnl", "pnl_pct", "contracts", "funds_at_close", "margin_req",
         "open_fees", "close_fees", "open_sl_ratio", "close_sl_ratio",
-        "csv_gap", "movement", "max_profit", "max_loss"
+        "csv_gap", "movement", "max_profit", "max_loss",
+        "highest_profit_pct", "highest_loss_pct",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -422,6 +490,7 @@ def parse_mesosim_json(contents: str | bytes, filename: str = "") -> pd.DataFram
     notes["pnl_field"] = " + ".join(sorted(pnl_fields))
     notes["premium_field"] = " + ".join(sorted(premium_fields))
     df.attrs["parse_notes"] = notes
+    df.attrs["source_format"] = "mesosim_json"
     return df
 
 
