@@ -191,9 +191,9 @@ window.fetch = async (u, init) => {
   const url = String(u);
   if (url.includes('/surface/values')) {
     const body = JSON.parse(init.body);
-    window.__surfCalls.push({column: body.column, n: body.trades.length});
+    window.__surfCalls.push({column: body.column, n: body.bars.length});
     const from = body.column === 'z_iv_30d_atm' ? '2021-04-05' : '2020-01-02';
-    const values = body.trades.map((t, i) =>
+    const values = body.bars.map((t, i) =>
       (t[0] < from ? null : (i %% 13 === 4 ? null : 0.10 + (i %% 17) * 0.002)));
     return {ok: true, status: 200, json: async () => ({
       column: body.column, values,

@@ -232,7 +232,7 @@ window.fetch = async (u, init) => {
   if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
   if (/\/surface\/rank$/.test(url)) {
     const body = JSON.parse(init.body);
-    return reply(200, { rows: FIX.rankRows, report: { no_bar: 0, with_bar: body.trades.length, distinct_entries: 50 },
+    return reply(200, { rows: FIX.rankRows, report: { no_bar: 0, with_bar: body.pnl.length, distinct_entries: body.bars.length },
                         lookahead_confirmed: true });
   }
   return reply(404, { detail: 'stub' });

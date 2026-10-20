@@ -843,25 +843,31 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       const cols = p.columns;
-      const trades = cols.date_opened.map((d, i) => [d, (cols.time_opened || [])[i] ?? null]);
+      // Each distinct entry bar once (obEntryBars); values come back per bar.
+      const eb = obEntryBars(cols, cols.date_opened.map((_, i) => i));
       try {
         const r = await fetch('/api/oo-backtest/surface/values', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ column: entry.surfColumn, trades }),
+          body: JSON.stringify({ column: entry.surfColumn, bars: eb.bars }),
         });
         const b = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
         // A LOAD SINCE THIS WAS ASKED FOR, or the row removed meanwhile:
         // writing now would put a column on the wrong trades.
         if (token !== BP_DATA.loadToken || !(c.surface || []).includes(entry)) return;
-        if (!Array.isArray(b.values) || b.values.length !== p.n) {
+        if (!Array.isArray(b.values) || b.values.length !== eb.bars.length) {
           throw new Error(`server returned ${(b.values || []).length} values `
-                        + `for ${p.n} trades`);
+                        + `for ${eb.bars.length} entry bars`);
         }
-        const vals = b.values.map(v => (v === null || v === undefined ? null : v * entry.scale));
+        const perBar = b.values.map(v => (v === null || v === undefined ? null : v * entry.scale));
+        const vals = eb.barOf.map(k => perBar[k]);
+        const bt = b.bar_times || [];
+        // The report is per TRADE, as the page states it.
+        const report = { ...(b.report || {}), bars: eb.bars.length,
+                         no_bar: eb.barOf.reduce((n, k) => n + (bt[k] == null ? 1 : 0), 0) };
         p.columns[entry.column] = vals;
-        BP_DATA.surface[cacheKey] = { values: vals, n: p.n, report: b.report || {} };
-        this.finishSurface(c, entry, b.report || {});
+        BP_DATA.surface[cacheKey] = { values: vals, n: p.n, report };
+        this.finishSurface(c, entry, report);
       } catch (e) {
         if (token !== BP_DATA.loadToken) return;
         entry.loading = false;

@@ -211,10 +211,48 @@ async def get_catalog(pool) -> dict:
 
 # ── requests from the page ──────────────────────────────────────────────────
 
-MAX_TRADES = 20000
+# WHAT A REQUEST MAY CARRY (2026-10-19). A surface value is a function of
+# the entry (date, time) alone, so the page sends DISTINCT ENTRY BARS -- a
+# 90-variant sweep's 288,498 trades are ~3,400 bars, and that count does not
+# grow with the variants. The old cap, 20,000 TRADES per request, refused
+# exactly that sweep. Measured on a synthetic 85,800-bar x 452-metric table
+# (dev machine; the VPS ran a sweep load ~1.75x slower):
+#   /surface/values  one column: 85,800 bars looked up in 0.61 s. Nothing
+#                    here is heavy; the bound is the request itself, ~28
+#                    bytes a bar -> 250,000 bars is ~7 MB of JSON. The table
+#                    holds ~110,000 five-minute bars in all.
+#   /surface/rank    every metric: memory is the bar matrix (452 x 8 bytes a
+#                    bar, filled in chunks -- QUERY_CHUNK_BARS) plus the
+#                    stats' blocks: 195 MB at 3,400 bars, 537 MB at 83,000;
+#                    ~630 MB at 100,000. The query was 7 s at 83,000 bars.
+#                    STATS TIME scales with TRADES, not bars: 10.7 s at
+#                    300,000, 22.3 s at 600,000 -- so trades get their own
+#                    cap, set so the worst case (100,000 bars, 400,000
+#                    trades) stays near 30 s here, ~55 s on the VPS, inside
+#                    the tunnel's 100 s.
+MAX_VALUE_BARS = 250_000
+MAX_RANK_BARS = 100_000
+MAX_RANK_TRADES = 400_000
 
 
-def parse_trades(raw, with_pnl: bool) -> tuple[list[tuple], dict]:
+def _too_many_bars(n: int, cap: int) -> ValueError:
+    return ValueError(f"at most {cap:,} distinct entry bars (date, time) per request ({n:,} sent)")
+
+
+def parse_bars(raw, cap: int) -> tuple[list[tuple], dict]:
+    """[[date, time], ...] -- the page's DISTINCT entry bars -- -> [(date|None,
+    time|None)] in order (the response aligns to them), or ValueError over
+    `cap` distinct bars. A bar that does not parse is kept with None and
+    counted, as a trade was."""
+    rows, rep = parse_trades(raw, with_pnl=False, max_rows=None)
+    distinct = len(set(rows))
+    if distinct > cap:
+        raise _too_many_bars(distinct, cap)
+    return rows, {"bars": len(rows), "bad_date": rep["bad_date"], "bad_time": rep["bad_time"]}
+
+
+def parse_trades(raw, with_pnl: bool, max_rows: int | None = MAX_RANK_TRADES,
+                 max_bars: int | None = None) -> tuple[list[tuple], dict]:
     """[[date, time, pnl?], ...] from the page -> [(date|None, time|None, pnl?)].
 
     Rows are kept in order (the response aligns to them). A row whose date or
@@ -223,8 +261,8 @@ def parse_trades(raw, with_pnl: bool) -> tuple[list[tuple], dict]:
     from app.oo_backtest.market import normalize_entry_time
     if not isinstance(raw, list):
         raise ValueError("trades must be a list of [date, time" + (", pnl]" if with_pnl else "]"))
-    if len(raw) > MAX_TRADES:
-        raise ValueError(f"at most {MAX_TRADES} trades per request ({len(raw)} sent)")
+    if max_rows is not None and len(raw) > max_rows:
+        raise ValueError(f"at most {max_rows:,} trades per request ({len(raw):,} sent)")
     out, bad_date, bad_time, bad_pnl = [], 0, 0, 0
     for row in raw:
         if not isinstance(row, (list, tuple)) or len(row) < (3 if with_pnl else 2):
@@ -247,7 +285,40 @@ def parse_trades(raw, with_pnl: bool) -> tuple[list[tuple], dict]:
             out.append((d, tt, p))
         else:
             out.append((d, tt))
+    if max_bars is not None:
+        distinct = len({(r[0], r[1]) for r in out})
+        if distinct > max_bars:
+            raise _too_many_bars(distinct, max_bars)
     return out, {"trades": len(out), "bad_date": bad_date, "bad_time": bad_time, "bad_pnl": bad_pnl}
+
+
+def parse_rank_request(body: dict) -> tuple[list[tuple], dict]:
+    """[(date, time, pnl)] per TRADE, from either request form:
+      {"bars": [[date, time], ...], "bar_of": [i, ...], "pnl": [p, ...]}  -- the
+          page's: distinct bars once, each trade an index into them
+      {"trades": [[date, time, pnl], ...]}                              -- the old one
+    Capped on distinct bars and on trades (see MAX_RANK_BARS / _TRADES)."""
+    if "bars" not in body:
+        return parse_trades(body.get("trades"), with_pnl=True, max_rows=MAX_RANK_TRADES, max_bars=MAX_RANK_BARS)
+    bars, brep = parse_bars(body.get("bars"), MAX_RANK_BARS)
+    bar_of, pnl = body.get("bar_of"), body.get("pnl")
+    if not isinstance(bar_of, list) or not isinstance(pnl, list) or len(bar_of) != len(pnl):
+        raise ValueError("bar_of and pnl must be lists of the same length, one entry per trade")
+    if len(bar_of) > MAX_RANK_TRADES:
+        raise ValueError(f"at most {MAX_RANK_TRADES:,} trades per request ({len(bar_of):,} sent)")
+    out, bad_pnl = [], 0
+    for b, p in zip(bar_of, pnl):
+        if not isinstance(b, int) or isinstance(b, bool) or not 0 <= b < len(bars):
+            raise ValueError(f"bar_of holds {b!r}, not an index into the {len(bars):,} bars")
+        try:
+            p = float(p)
+            if p != p or p in (float("inf"), float("-inf")):
+                raise ValueError
+        except (TypeError, ValueError):
+            p, bad_pnl = None, bad_pnl + 1
+        out.append((bars[b][0], bars[b][1], p))
+    return out, {"trades": len(out), "bars": len(bars), "bad_date": brep["bad_date"], "bad_time": brep["bad_time"],
+                 "bad_pnl": bad_pnl}
 
 
 async def entry_matrix(pool, trades: list[tuple], columns: list[str]):
@@ -259,6 +330,44 @@ async def entry_matrix(pool, trades: list[tuple], columns: list[str]):
     return bar_times, distinct[gather], report
 
 
+# The entry-bar query runs this many distinct bars at a time, each chunk's
+# rows copied into the float matrix and dropped. Fetched whole, the driver
+# holds every value as a Python float first: ~19 KB a bar at 452 metrics,
+# measured -- 424 MB at 22,000 bars, ~1.6 GB at 86,000. Chunked, the cost is
+# the matrix itself (3.6 KB a bar) plus one chunk.
+QUERY_CHUNK_BARS = 2000
+
+
+async def bars_matrix(pool, keys: list[tuple], columns: list[str]):
+    """(bar_time per key with a leading None, float matrix (len(keys)+1) x
+    len(columns) with row 0 all NaN, query seconds) for DISTINCT (date, time)
+    keys, in their order. Row i+1 is keys[i]; a key with no bar stays NaN."""
+    import numpy as np
+    distinct = np.full((len(keys) + 1, len(columns)), np.nan)
+    bar_of = [None] * (len(keys) + 1)
+    pos = {key: i for i, key in enumerate(keys, start=1)}
+    sql = entry_sql(columns)
+    t0 = _time.monotonic()
+    if keys:
+        async with pool.acquire() as conn:
+            for a in range(0, len(keys), QUERY_CHUNK_BARS):
+                chunk = keys[a:a + QUERY_CHUNK_BARS]
+                rows = await conn.fetch(sql, [k[0] for k in chunk], [k[1] for k in chunk])
+                idx, vals = [], []
+                for r in rows:
+                    i = pos[(r["entry_date"], r["entry_time"])]
+                    bar_of[i] = r["bar_time"]
+                    if r["bar_time"] is not None:
+                        idx.append(i)
+                        vals.append(tuple(r)[3:])
+                if idx:
+                    v = np.array(vals, dtype=object)
+                    v[v == None] = np.nan                       # noqa: E711 -- elementwise, on an object array
+                    distinct[idx] = v.astype(float)
+                del rows, vals
+    return bar_of, distinct, round(_time.monotonic() - t0, 3)
+
+
 async def entry_matrix_gathered(pool, trades: list[tuple], columns: list[str]):
     """(bar_times, distinct, gather, report): entry_matrix without the gather,
     so X = distinct[gather]. The ranking takes this form: a sweep's 240,000
@@ -266,21 +375,8 @@ async def entry_matrix_gathered(pool, trades: list[tuple], columns: list[str]):
     would be ~870 MB (surface_stats.correlations_gathered)."""
     import numpy as np
     keys = sorted({(t[0], t[1]) for t in trades if t[0] is not None and t[1] is not None})
-    t0 = _time.monotonic()
-    rows = []
-    if keys:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(entry_sql(columns), [k[0] for k in keys], [k[1] for k in keys])
-    query_s = round(_time.monotonic() - t0, 3)
-    k = len(columns)
-    # Row 0 of `distinct` is the all-NaN row for trades with no lookup at all.
-    distinct = np.full((len(rows) + 1, k), np.nan)
-    pos, bar_of = {}, [None]
-    for i, r in enumerate(rows, start=1):
-        pos[(r["entry_date"], r["entry_time"])] = i
-        bar_of.append(r["bar_time"])
-        if r["bar_time"] is not None:
-            distinct[i] = [np.nan if v is None else v for v in tuple(r)[3:]]
+    bar_of, distinct, query_s = await bars_matrix(pool, keys, columns)
+    pos = {key: i for i, key in enumerate(keys, start=1)}
     gather = np.fromiter((pos.get((t[0], t[1]), 0) for t in trades), dtype=np.int64, count=len(trades))
     bar_times = [bar_of[g] for g in gather.tolist()]
     no_bar = sum(1 for b in bar_times if b is None)

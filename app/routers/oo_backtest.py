@@ -37,10 +37,14 @@ Endpoints:
   DELETE /strategies/{id}
   GET    /surface/catalog      ranked surface metrics: catalog fields + min_date
                                (first non-null date, read from the table)
-  POST   /surface/rank         {"trades": [[date, time, pnl], ...]} -> per metric
-                               n, bars, Pearson/Spearman r + p + BH-adjusted p
-  POST   /surface/values       {"column": name, "trades": [[date, time], ...]} ->
-                               that metric at each trade's entry bar, in order
+  POST   /surface/rank         {"bars": [[date, time], ...] (distinct), "bar_of":
+                               [bar index per trade], "pnl": [per trade]} (or the
+                               old {"trades": [[date, time, pnl], ...]}) -> per
+                               metric n, bars, Pearson/Spearman r + p + BH p
+  POST   /surface/values       {"column": name, "bars": [[date, time], ...]} ->
+                               that metric at each bar, in order ("trades" is
+                               accepted as the same list). Caps: distinct bars,
+                               and trades for rank -- see surface.MAX_*
 
 A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
 today's market data; see app/oo_backtest/store.py.
@@ -567,7 +571,7 @@ async def surface_rank(body: dict = Body(...), pool=Depends(get_pool)):
     import time as _t
     _check_bar_rule(body)
     try:
-        trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=True)
+        trades, parse_report = surface.parse_rank_request(body)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     cat = await _surface_catalog(pool)
@@ -595,7 +599,9 @@ async def surface_values(body: dict = Body(...), pool=Depends(get_pool)):
     if column not in {m["column_name"] for m in cat["metrics"]}:
         raise HTTPException(400, f"Unknown or unranked surface metric: {column!r}.")
     try:
-        trades, parse_report = surface.parse_trades(body.get("trades"), with_pnl=False)
+        # Distinct entry bars from the page; "trades" (the old field) is the
+        # same [[date, time], ...] list, and is held to the same bar cap.
+        trades, parse_report = surface.parse_bars(body.get("bars", body.get("trades")), surface.MAX_VALUE_BARS)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     rows, join_report = await surface.entry_values(pool, trades, [column])

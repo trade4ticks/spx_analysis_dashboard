@@ -227,17 +227,14 @@ function obCommonCoverage(dates, idx, minDates) {
   return out;
 }
 
-/* The request body's trades: [entry date, entry time, P/L] for each row in
- * idx, optionally only those entered on/after `from`. */
-function obRankTrades(cols, idx, from) {
-  const out = [];
-  const t = cols.time_opened || [];
-  for (const i of idx) {
-    const d = cols.date_opened[i];
-    if (from && (!d || d < from)) continue;
-    out.push([d, t[i] ?? null, cols.pnl[i]]);
-  }
-  return out;
+/* The /surface/rank body for the trades in idx, optionally only those
+ * entered on/after `from`: each DISTINCT entry bar once, and per trade its
+ * bar's index and its P/L -- { bars, bar_of, pnl } (obEntryBars). The P/L
+ * stays per trade; only the bar lookup is shared. */
+function obRankBody(cols, idx, from) {
+  const sel = from ? idx.filter(i => cols.date_opened[i] && cols.date_opened[i] >= from) : idx;
+  const eb = obEntryBars(cols, sel);
+  return { bars: eb.bars, bar_of: eb.barOf, pnl: sel.map(i => cols.pnl[i]) };
 }
 
 /* Wrap a long catalog description for a canvas tooltip. */
@@ -1457,7 +1454,8 @@ document.addEventListener('alpine:init', () => {
       await this.loadSurfaceCatalog();
       const cov = this.surfCoverage();
       const from = this.surf.common && cov ? cov.commonStart : null;
-      const trades = obRankTrades(OB_DATA.columns, OB_DATA.idx, from);
+      const body0 = obRankBody(OB_DATA.columns, OB_DATA.idx, from);
+      const trades = body0.pnl;              // one per trade sent (for the counts below)
       const sig = this.surfSignature();
       const beforeEarliest = cov ? obCommonCoverage(OB_DATA.columns.date_opened,
         OB_DATA.idx.filter(i => !from || (OB_DATA.columns.date_opened[i] || '') >= from),
@@ -1467,7 +1465,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const t0 = performance.now();
         const r = await fetch('/api/oo-backtest/surface/rank', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trades }) });
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body0) });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
         OB_DATA.rank = body.rows;
@@ -1804,22 +1802,28 @@ document.addEventListener('alpine:init', () => {
       row.error = '';
       // Every trade of the LOAD, every variant: the view is re-sliced from it.
       const cols = (OB_DATA.full || { columns: OB_DATA.columns }).columns;
-      const trades = cols.date_opened.map((d, i) => [d, (cols.time_opened || [])[i] ?? null]);
+      // Each DISTINCT entry bar once; the values come back per bar and are
+      // given to every trade at that bar.
+      const eb = obEntryBars(cols, cols.date_opened.map((_, i) => i));
       try {
         const r = await fetch('/api/oo-backtest/surface/values', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ column: row.surfColumn, trades }) });
+          body: JSON.stringify({ column: row.surfColumn, bars: eb.bars }) });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
         if (token !== OB_DATA.logToken || !this.surfRows.includes(row)) return;   // another log, or removed meanwhile
-        if (body.values.length !== cols.date_opened.length) {
-          throw new Error(`server returned ${body.values.length} values for ${cols.date_opened.length} trades`);
+        if (body.values.length !== eb.bars.length) {
+          throw new Error(`server returned ${body.values.length} values for ${eb.bars.length} entry bars`);
         }
-        const vals = body.values.map(v => (v === null || v === undefined ? null : v * row.scale));
+        const perBar = body.values.map(v => (v === null || v === undefined ? null : v * row.scale));
+        const vals = eb.barOf.map(b => perBar[b]);
+        const barTimes = body.bar_times || [];
+        const noBarTrades = eb.barOf.reduce((n, b) => n + (barTimes[b] === null || barTimes[b] === undefined ? 1 : 0), 0);
         cols[row.column] = vals;
         this.applyView();
         const inView = OB_DATA.columns[row.column];
-        row.report = { withValue: inView.filter(v => v !== null).length, trades: inView.length, noBar: body.report.no_bar };
+        row.report = { withValue: inView.filter(v => v !== null).length, trades: inView.length, noBar: noBarTrades,
+                       bars: eb.bars.length };
         this.computeAutoBins();
         this.initRowFilter(row);
       } catch (e) {

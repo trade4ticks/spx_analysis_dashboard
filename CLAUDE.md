@@ -260,6 +260,28 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   block AFTER the timings and ends PASS/OVER against `--budget` (20 s),
   exit 1 when over — the known 2026 ingestion gaps must not mask a timing
   regression.
+- **Surface requests carry DISTINCT ENTRY BARS (2026-10-19).** A surface
+  value depends on the entry (date, time) alone, so the page sends each bar
+  once (`obEntryBars`, in backtest_core.js, used by the OO page and the
+  portfolio): `/surface/values` `{column, bars}` answers per bar and the page
+  maps back to trades (and counts no-bar per TRADE itself);
+  `/surface/rank` `{bars, bar_of, pnl}` — P/L stays per trade. Both still
+  accept the old `trades` form. A 90-variant sweep's 288,498 trades failed
+  at the old cap, **20,000 TRADES**, which no gate reached (every check ran
+  below it). Bars do not grow with variants (gate: 30 and 90 variants send
+  the same count). **The caps, each from what it protects** (measured on a
+  synthetic 85,800-bar × 452-metric table): `MAX_VALUE_BARS` 250,000 — one
+  column of 85,800 bars looks up in 0.61 s; the bound is request size
+  (~28 B a bar, ~7 MB). `MAX_RANK_BARS` 100,000 — memory: the bar matrix
+  (3.6 KB a bar) plus the stats' blocks, 195 MB at 3,400 bars, 537 MB at
+  83,000, ~630 MB at 100,000; the query is now CHUNKED
+  (`QUERY_CHUNK_BARS` 2,000, `bars_matrix`) because fetched whole the driver
+  held ~19 KB a bar of Python floats (424 MB at 22,000, ~1.6 GB at 86,000).
+  `MAX_RANK_TRADES` 400,000 — TIME: stats scale with trades, not bars
+  (10.7 s at 300,000, 22.3 s at 600,000). Messages name what they count.
+  Gate: `check_surface_sweep_scale` (check_oo_market_sql) posts the page's
+  own obEntryBars output for 288,540 trades to both routes, compares with
+  the per-trade form, and trips every cap.
 - **Surface ranking memory.** `/surface/rank` no longer builds trades × 452
   (~870 MB at 240k): `entry_matrix_gathered` returns the distinct bars +
   a per-trade index, `correlations_gathered` materialises at most
@@ -1575,6 +1597,14 @@ sudo useradd --system --create-home --shell /bin/bash gates
 sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
 sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
 ```
+
+**`check_oo_backtest` needs `surface_metrics_catalog.csv` at the repo
+root**, which is UNTRACKED (un-tracked in 586a44a with other swept-in files).
+Without it the gate stops at its surface-ranking step and reports FAIL, and
+every check after that point -- the surface ranking and added-row UI tests,
+the parsers -- silently never runs; it read as "a pre-existing failure" for
+a whole feature's worth of sessions (2026-10-18/19). Restore it with
+`git show 586a44a^:surface_metrics_catalog.csv > surface_metrics_catalog.csv`.
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

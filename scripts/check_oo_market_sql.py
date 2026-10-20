@@ -313,6 +313,7 @@ async def run(dsn: str) -> None:
         await check_saved_sweeps(pool)
         await check_portfolio_profiles(pool)
         await check_surface(pool)
+        await check_surface_sweep_scale(pool)
     finally:
         await pool.close()
 
@@ -1213,6 +1214,98 @@ async def check_surface(pool) -> None:
     check(before["vrp_3m"] == "2024-03-08" and after["vrp_3m"] == "2024-03-06"
           and after_cat["first_date"] == "2024-03-01" and after_cat["last_date"] == "2024-03-08",
           f"a mid-range insert (dates unchanged) still rebuilds coverage: vrp_3m {before['vrp_3m']} -> {after['vrp_3m']}")
+
+
+async def check_surface_sweep_scale(pool) -> None:
+    """Both surface routes at SWEEP SCALE -- 90 variants, 288,540 trades -- with
+    the request built by the page's own obEntryBars (the shipped JS, in node).
+    The old cap, 20,000 TRADES, refused exactly this; every earlier check here
+    ran below it, which is how that went unseen."""
+    print("surface metrics at sweep scale: distinct bars, not trades")
+    import json as _json
+    import random as _random
+    import subprocess as _sp
+
+    from fastapi import HTTPException
+    from app.oo_backtest import surface
+    from app.routers import oo_backtest as routes
+
+    # Every minute 09:35..16:00 on the fixture's sessions: the entry times a
+    # sweep's variants share. Each variant: 3,206 trades over those times.
+    minutes = [time(m // 60, m % 60) for m in range(9 * 60 + 35, 16 * 60 + 1)]
+    keys = [(d.isoformat(), t.strftime("%H:%M:%S")) for d in S_DAYS for t in minutes]
+    rng = _random.Random(7)
+
+    def sweep(variants):
+        rows = [(*keys[rng.randrange(len(keys))], round(rng.gauss(20, 300), 2)) for _ in range(variants * 3206)]
+        return {"date_opened": [r[0] for r in rows], "time_opened": [r[1] for r in rows], "pnl": [r[2] for r in rows]}
+    cols90, cols30 = sweep(90), sweep(30)
+
+    core = (ROOT / "static" / "js" / "backtest_core.js").read_text(encoding="utf-8")
+    driver = core + """
+const fs = require('fs'); const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = {};
+for (const [k, cols] of Object.entries(job)) {
+  const idx = cols.pnl.map((_, i) => i);
+  const eb = obEntryBars(cols, idx);
+  out[k] = { bars: eb.bars, bar_of: eb.barOf };
+}
+process.stdout.write(JSON.stringify(out));"""
+    p = _sp.run(["node", "-e", driver], input=_json.dumps({"v90": cols90, "v30": cols30}), capture_output=True,
+                text=True, encoding="utf-8", timeout=180)
+    if p.returncode:
+        check(False, f"the page's obEntryBars ran in node ({p.stderr.strip()[:300]})")
+        return
+    eb = _json.loads(p.stdout)
+    n90, n30 = len(cols90["pnl"]), len(cols30["pnl"])
+    b90, b30 = len(eb["v90"]["bars"]), len(eb["v30"]["bars"])
+    check(n90 == 288_540 and b90 == len({(d, t) for d, t in zip(cols90["date_opened"], cols90["time_opened"])}) and b90 <= len(keys),
+          f"90 variants: {n90:,} trades -> {b90:,} distinct entry bars sent (the page's obEntryBars)")
+    check(b30 == b90, f"the bar count does not grow with the variants: 30 variants -> {b30:,}, 90 -> {b90:,}")
+    body_bytes = len(_json.dumps({"column": "iv_30d_atm", "bars": eb["v90"]["bars"]}))
+    old_bytes = len(_json.dumps({"column": "iv_30d_atm", "trades": [[d, t] for d, t in zip(cols90["date_opened"], cols90["time_opened"])]}))
+    check(n90 > 20_000 and body_bytes < old_bytes / 50,
+          f"/surface/values request: {body_bytes / 1e3:,.0f} KB as bars, against {old_bytes / 1e6:.1f} MB as trades "
+          f"(which the old 20,000-trade cap refused)")
+
+    # /surface/values: the page's bars, answered per bar, mapped back per trade.
+    v = await routes.surface_values({"column": "iv_30d_atm", "bars": eb["v90"]["bars"]}, pool=pool)
+    per_trade = [v["values"][k] for k in eb["v90"]["bar_of"]]
+    sub = list(range(0, n90, 61))[:5000]
+    legacy = await routes.surface_values({"column": "iv_30d_atm",
+                                          "trades": [[cols90["date_opened"][i], cols90["time_opened"][i]] for i in sub]},
+                                         pool=pool)
+    check(len(v["values"]) == b90 and [per_trade[i] for i in sub] == legacy["values"],
+          f"values: one per bar sent, and per trade identical to the per-trade request ({len(sub):,} compared)")
+
+    # /surface/rank: the page's form at 288,540 trades == the old form on the same trades.
+    rb = {"bars": eb["v90"]["bars"], "bar_of": eb["v90"]["bar_of"], "pnl": cols90["pnl"]}
+    r_new = await routes.surface_rank(rb, pool=pool)
+    r_old = await routes.surface_rank({"trades": [[d, t, x] for d, t, x in
+                                                  zip(cols90["date_opened"], cols90["time_opened"], cols90["pnl"])]}, pool=pool)
+    rep = r_new["report"]
+    check(rep["trades"] == n90 and rep["bars"] == b90 and rep["with_bar"] + rep["no_bar"] == n90,
+          f"rank: {n90:,} trades over {b90:,} bars accepted; with/without a bar counted per trade ({rep['with_bar']:,} / {rep['no_bar']:,})")
+    check(r_new["rows"] == r_old["rows"], "rank: the bar form gives exactly the per-trade form's result, every metric")
+
+    # The caps, worded for what they count.
+    many = lambda n: [[(date(2000, 1, 1) + timedelta(days=i)).isoformat(), "10:00:00"] for i in range(n)]  # noqa: E731
+    for call, body, want in (
+        (routes.surface_values, {"column": "iv_30d_atm", "bars": many(surface.MAX_VALUE_BARS + 1)},
+         f"at most {surface.MAX_VALUE_BARS:,} distinct entry bars (date, time) per request ({surface.MAX_VALUE_BARS + 1:,} sent)"),
+        (routes.surface_rank, {"bars": many(surface.MAX_RANK_BARS + 1), "bar_of": [0], "pnl": [1.0]},
+         f"at most {surface.MAX_RANK_BARS:,} distinct entry bars (date, time) per request ({surface.MAX_RANK_BARS + 1:,} sent)"),
+        (routes.surface_rank, {"bars": [["2024-03-04", "10:00:00"]], "bar_of": [0] * (surface.MAX_RANK_TRADES + 1),
+                               "pnl": [1.0] * (surface.MAX_RANK_TRADES + 1)},
+         f"at most {surface.MAX_RANK_TRADES:,} trades per request ({surface.MAX_RANK_TRADES + 1:,} sent)"),
+        (routes.surface_rank, {"bars": [["2024-03-04", "10:00:00"]], "bar_of": [3], "pnl": [1.0]},
+         "bar_of holds 3, not an index into the 1 bars"),
+    ):
+        try:
+            await call(body, pool=pool)
+            check(False, f"refused: {want}")
+        except HTTPException as exc:
+            check(exc.status_code == 400 and exc.detail == want, f"refused (400): {exc.detail}")
 
 
 def main() -> int:

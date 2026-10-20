@@ -1079,11 +1079,16 @@ out.cov = obCommonCoverage(dates, [0, 1, 2, 3, 4, 5, 6], ['2020-01-02', '2021-04
 out.covOne = obCommonCoverage(dates, [0, 1, 2], ['2020-01-02', '2020-01-02']);
 const cols = { date_opened: dates, time_opened: ['10:00:00', '15:30:00', null, '09:30:00', '12:00:00', '15:55:00', '10:00:00'],
                pnl: [1, 2, 3, 4, 5, 6, 7] };
-out.tradesAll = obRankTrades(cols, [0, 1, 2, 3, 4, 5], null);
+// The request carries each distinct bar once; expand it back to per-trade
+// rows so the assertions below read what was asked about each trade.
+const expand = b => b.bar_of.map((k, j) => [b.bars[k][0], b.bars[k][1], b.pnl[j]]);
+out.tradesAll = expand(obRankBody(cols, [0, 1, 2, 3, 4, 5], null));
+out.dupBody = obRankBody({ date_opened: ['2024-01-02', '2024-01-02', '2024-01-03'], time_opened: ['10:00:00', '10:00:00', null],
+                           pnl: [1, 2, 3] }, [0, 1, 2], null);
 const sv = a => a.map(x => ({ survives: x }));
 out.bh = { prefix: obBhBoundary(sv([true, true, false, false])), gap: obBhBoundary(sv([true, false, true, false, false])),
            none: obBhBoundary(sv([false, false])), all: obBhBoundary(sv([true, true])) };
-out.tradesFrom = obRankTrades(cols, [0, 1, 2, 3, 4, 5, 6], '2021-04-06');
+out.tradesFrom = expand(obRankBody(cols, [0, 1, 2, 3, 4, 5, 6], '2021-04-06'));
 
 // Component, with the server stubbed.
 const sent = [];
@@ -1094,8 +1099,8 @@ global.fetch = async (url, init) => {
                                                     form_labels: job.formLabels });
   if (url.endsWith('/surface/rank')) {
     const body = JSON.parse(init.body);
-    sent.push(body.trades);
-    return j({ rows: sent.length > 3 ? job.rows2 : rows, report: { with_bar: 3, no_bar: body.trades.length - 3, distinct_entries: 3 },
+    sent.push(expand(body));
+    return j({ rows: sent.length > 3 ? job.rows2 : rows, report: { with_bar: 3, no_bar: body.pnl.length - 3, distinct_entries: 3 },
                lookahead_confirmed: true });
   }
   throw new Error('unexpected ' + url);
@@ -1220,7 +1225,10 @@ def check_surface_ranking_ui() -> None:
           "one shared start: common coverage costs nothing")
     check(o["tradesAll"][0] == ["2019-06-03", "10:00:00", 1] and o["tradesAll"][2] == ["2020-06-01", None, 3]
           and [t[0] for t in o["tradesFrom"]] == ["2021-04-06", "2022-01-03"],
-          "request trades: [date, time, pnl], null time kept; common coverage sends only trades on/after its start")
+          "request: per trade [date, time, pnl] once expanded, null time kept; common coverage sends only trades "
+          "on/after its start")
+    check(o["dupBody"] == {"bars": [["2024-01-02", "10:00:00"], ["2024-01-03", None]], "bar_of": [0, 0, 1], "pnl": [1, 2, 3]},
+          f"two trades on one entry bar send that bar ONCE; each keeps its own P/L ({o['dupBody']})")
 
     check(o["catalogLoaded"] and "entered before the metrics in view start (2020-01-02)" in o["headBefore"]
           and o["headBefore"].startswith("2 of 6"),
@@ -1270,10 +1278,13 @@ global.fetch = async (url, init) => {
   if (url.endsWith('/surface/catalog')) return j(job.catalogBody);
   if (url.endsWith('/surface/values')) {
     const body = JSON.parse(init.body);
-    out.valuesCalls.push({ column: body.column, n: body.trades.length, first: body.trades[0] });
+    // Values are per BAR. This fixture's trades each have their own bar, so
+    // the per-trade fixture values serve as per-bar ones.
+    out.valuesCalls.push({ column: body.column, n: body.bars.length, first: body.bars[0] });
     if (body.column === 'broken') return j({ detail: 'Unknown or unranked surface metric' }, false);
-    const vals = job.values[body.column].slice(0, body.trades.length);
-    return j({ values: vals, report: { no_bar: vals.filter(v => v === null).length } });
+    const vals = job.values[body.column].slice(0, body.bars.length);
+    return j({ values: vals, bar_times: vals.map(v => (v === null ? null : '09:35:00')),
+               report: { no_bar: vals.filter(v => v === null).length } });
   }
   if (url.endsWith('/surface/rank')) return j({ rows: job.rankRows, report: { with_bar: 1, no_bar: 0, distinct_entries: 1 } });
   throw new Error('unexpected ' + url);

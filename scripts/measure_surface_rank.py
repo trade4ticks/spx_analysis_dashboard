@@ -80,7 +80,7 @@ async def main() -> int:
     from app.oo_backtest import surface, surface_stats
 
     raw = log_trades(args.log) if args.log else synthetic_trades()
-    trades, prep = surface.parse_trades([[d.isoformat(), t, p] for d, t, p in raw], with_pnl=True)
+    trades, prep = surface.parse_trades([[d.isoformat(), t, p] for d, t, p in raw], with_pnl=True, max_rows=None)
     print(f"trades: {len(trades)} ({'log ' + args.log if args.log else 'synthetic, from 2018-01-02'}); parse {prep}")
 
     # Every session read-only at the server: a write here is refused, not trusted to be absent.
@@ -120,12 +120,14 @@ async def main() -> int:
 
         for rnd in (1, 2):
             t0 = time.monotonic()
-            bar_times, X, jrep = await surface.entry_matrix(pool, trades, cols)
+            # The route's own path: distinct bars + a per-trade index, never
+            # the trades x metrics matrix (~870 MB for a 240,000-trade sweep).
+            bar_times, distinct, gather, jrep = await surface.entry_matrix_gathered(pool, trades, cols)
             lap("join + matrix (all ranked columns)", t0)
             t0 = time.monotonic()
             ids: dict = {}
             bar_ids = [ids.setdefault((t[0], bt), len(ids)) for t, bt in zip(trades, bar_times)]
-            result = surface_stats.rank(ranked, X, [t[2] for t in trades], bar_ids)
+            result = surface_stats.rank(ranked, distinct, [t[2] for t in trades], bar_ids, gather)
             lap("stats (pearson+spearman+BH)", t0)
         print(f"join: {jrep['distinct_entries']} distinct entries; {jrep['with_bar']} trades with a bar, "
               f"{jrep['no_bar']} without")

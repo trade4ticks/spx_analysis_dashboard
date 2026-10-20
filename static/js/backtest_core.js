@@ -283,6 +283,26 @@ function obExtraStats(cols, idx, stats, capital, peak) {
 }
 
 
+/* The DISTINCT entry bars (date, time) of the trades in idx, in first-seen
+ * order, and each trade's index into them: { bars: [[date, time], ...],
+ * barOf: [one per idx position] }. A surface value depends on the entry bar
+ * alone, so the page asks for each bar ONCE -- a 90-variant sweep's 288,498
+ * trades are ~3,400 bars, a number the variant count does not change. A
+ * missing date or time stays null, as the server expects. */
+function obEntryBars(cols, idx) {
+  const d = cols.date_opened || [], t = cols.time_opened || [];
+  const at = new Map(), bars = [], barOf = new Array(idx.length);
+  for (let k = 0; k < idx.length; k++) {
+    const i = idx[k], dd = d[i] ?? null, tt = t[i] ?? null;
+    const key = dd + '|' + tt;
+    let b = at.get(key);
+    if (b === undefined) { b = bars.length; at.set(key, b); bars.push([dd, tt]); }
+    barOf[k] = b;
+  }
+  return { bars, barOf };
+}
+
+
 /* Days since the epoch for an ISO date, for a linear x axis (no date adapter). */
 function obDay(iso) { return Date.parse(iso + 'T00:00:00Z') / 86400000; }
 
