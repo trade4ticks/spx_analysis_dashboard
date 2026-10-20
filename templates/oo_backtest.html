@@ -346,7 +346,7 @@
 
       <!-- One card per registry entry with filter: true. -->
       <template x-for="m in filterMetrics()" :key="m.key">
-        <div class="ob-card" :class="{ 'ob-active': loaded && isActive(m), 'ob-param-off': m.param && !paramFiltersLive() }">
+        <div class="ob-card" :class="{ 'ob-active': loaded && isActive(m), 'ob-param-off': paramLocked(m) }">
           <div class="ob-card-hdr">
             <span class="ob-card-title" x-text="m.label"></span>
             <span class="ob-card-sub" x-show="m.param">sweep parameter</span>
@@ -380,7 +380,7 @@
                   <template x-for="o in catOf(m).options" :key="String(o.value)">
                     <label class="ob-check">
                       <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)"
-                             :disabled="m.param && !paramFiltersLive()">
+                             :disabled="paramLocked(m)">
                       <span x-text="o.label"></span>
                       <span class="ob-dim" x-text="o.count"></span>
                     </label>
@@ -394,7 +394,7 @@
             </template>
 
             <div class="ob-parse-note" :class="{ warn: isActive(m) }" x-show="loaded && coverageNote(m)" x-text="coverageNote(m)"></div>
-            <div class="ob-dim ob-param-off-note" x-show="m.param && !paramFiltersLive()">
+            <div class="ob-dim ob-param-off-note" x-show="paramLocked(m)">
               A single variant is selected: parameter filters apply at ALL, and your ticks are kept for it.</div>
           </div>
         </div>

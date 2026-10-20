@@ -185,6 +185,20 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   The grid lists only TICKED values on each axis (pt filtered to 75 → one
   column), and its note counts the hidden parameters' ticked values. The UI
   gate holds the slice to stats.py and fails when the grid stops collapsing.
+- **Regression in 43312b4, fixed the next day: Day of Week and Exit Reason
+  were DISABLED for good** — at ALL, with a variant picked, and on plain
+  single logs. The checkbox bound `:disabled="m.param && !paramFiltersLive()"`;
+  for a registry card `m.param` is undefined, so the expression is
+  `undefined`, and **Alpine 3.14 SETS a boolean attribute for `undefined`**
+  (the `:class` object treated the same value as off, so nothing looked
+  greyed). Now `paramLocked(m)`, which always returns a boolean. **Any
+  boolean-attribute binding (`:disabled`, `:checked`, `:selected`…) must
+  evaluate to a real boolean — `!!` it.** 120 clicked assertions passed
+  with the bug live, because every one drove those filters by calling
+  `toggleCat`; the gate now CLICKS Day of Week and Exit Reason (enabled,
+  narrows, counts, restores) at ALL, with a variant picked, with a
+  parameter slice and on a single log, and asserts only the sweep-parameter
+  cards grey out. Planted back, the bug fails 8 of them.
 - **P4: a sweep saves as ONE strategy (done 2026-10-18).** The row in
   `oo_backtest_strategies` gains `sweep` (JSONB: params, variants, each
   file's reading — recorded at save, minus timing) and its files live in

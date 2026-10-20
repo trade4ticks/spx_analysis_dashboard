@@ -27,6 +27,11 @@ with payloads the REAL router built (analyze_batch, no database):
     "mean / variant" tags and brings the BH line back; picking a variant
     greys the cards and keeps the slice for ALL; unticking every value is the
     no-trades state; "reset all filters" clears them
+  * THE ORDINARY CATEGORICAL FILTERS STAY LIVE: Day of Week and Exit Reason
+    enabled and filtering BY CLICK at ALL, with a variant picked, and on a
+    single log -- only sweep-parameter cards ever grey out. (43312b4 disabled
+    them for good and 120 assertions passed: every one drove them by calling
+    toggleCat, never by clicking.)
   * saving (P4): a multi-file sweep's Save sends EVERY file, gzipped, to
     /strategies/sweep as one strategy; a single file saves as before; a
     saved sweep loads back with ALL selected, and a changed variant list is
@@ -253,6 +258,28 @@ window.addEventListener('load', () => setTimeout(async () => {
     .find(b => b.querySelector('.stat-label').childNodes[0].textContent.trim() === label);
   const boxVal = label => txt(box(label) && box(label).querySelector('.stat-value'));
   const boxTag = label => { const t = box(label) && box(label).querySelector('.stat-tag'); return t && shown(t) ? txt(t) : ''; };
+  // An ORDINARY categorical filter card (not a sweep parameter), driven by
+  // clicking: enabled, and the click filters. Returns [enabled, narrowed,
+  // counted, restored]; the page is left as it was found.
+  const regCard = t => [...document.querySelectorAll('.ob-side .ob-card')].find(e =>
+    txt(e.querySelector('.ob-card-title')) === t && ![...e.querySelectorAll('.ob-card-sub')].some(x => shown(x) && txt(x) === 'sweep parameter'));
+  const clickWorks = async (title) => {
+    const c = Alpine.$data(document.body);
+    const card = regCard(title);
+    const boxes = card ? [...card.querySelectorAll('.ob-checks input')] : [];
+    const enabled = boxes.length > 0 && boxes.every(b => !b.disabled) && !card.classList.contains('ob-param-off');
+    const before = c.filteredCount, active = c.activeCount();
+    // A TICKED box: unticking it must narrow (one the test already unticked would widen).
+    const box = boxes.find(x => x.checked);
+    if (!box) return [false, false, false, false];
+    const wasActive = c.isActive(c.filterDefs().find(m => m.label === title));
+    box.click();
+    await until(() => c.filteredCount !== before);
+    const narrowed = c.filteredCount < before, counted = c.activeCount() === active + (wasActive ? 0 : 1);
+    box.click();
+    await until(() => c.filteredCount === before);
+    return [enabled, narrowed, counted, c.filteredCount === before];
+  };
   const LABELS = ['# Trades', 'Win %', 'Total P/L', 'Avg P/L', 'Avg P/L %', 'Avg Win', 'Avg Loss', 'Max Win', 'Max Loss',
                   'Profit Factor', 'Avg Annual P/L', 'Avg Annual Return %', 'Max DD', 'Calmar', 'Avg Days'];
   const snapshot = (c) => ({
@@ -321,6 +348,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('it lists ALL and every variant', [...sel.options].map(o => txt(o).replace(/ \(\d+ trades\)$/, '')),
        ['ALL — 4 variants', 'dte=30 · pt=25', 'dte=30 · pt=50', 'dte=45 · pt=25', 'dte=45 · pt=50']);
     ok('ALL is selected on load', sel.value, 'all');
+    ok('ALL: Day of Week enabled, and a click filters (narrows, counts, restores)', await clickWorks('Day of Week'), [true, true, true, true]);
+    ok('ALL: Exit Reason enabled, and a click filters', await clickWorks('Exit Reason'), [true, true, true, true]);
 
     // ── ALL: the mean per variant, against stats.py per file ────────────
     const E = FIX.expect;
@@ -408,6 +437,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     await wait(300);
     ok('the Monday filter survived the switch', [c.activeCount(), c.catOf(dow).selected.includes(0)], [1, false]);
     ok('one variant: no box is tagged', LABELS.filter(l => boxTag(l)), []);
+    ok('one variant: Day of Week still enabled, and a click still filters', await clickWorks('Day of Week'), [true, true, true, true]);
+    ok('one variant: Exit Reason still enabled, and a click still filters', await clickWorks('Exit Reason'), [true, true, true, true]);
     ok('one variant: no parameter grid, no parameter sections',
        [await until(() => !shown(gridCard())), c.paramSections().length, !!document.getElementById('ob-sec-card-param__dte')], [true, 0, false]);
     ok('one variant: the ranking is stale (another sample)', c.surfStale(), true);
@@ -426,6 +457,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     await until(() => c.loaded && !c.sweep && window.__sent.length === 2);
     await wait(400);
     ok('a single file: one part, no selector', [window.__sent[1].names, shown(sel)], [[FIX.names[2]], false]);
+    ok('a single log: Day of Week enabled, and a click filters', await clickWorks('Day of Week'), [true, true, true, true]);
     const alone = snapshot(c);
     ok('the comparison has something to compare: sections with subtitles, a deployment title',
        [alone.subs.length >= 3, !!alone.deploy, Object.values(alone.stats).every(v => v !== '')], [true, true, true]);
@@ -580,12 +612,17 @@ window.addEventListener('load', () => setTimeout(async () => {
     await wait(300);
     ok('a picked variant greys the parameter cards and says why',
        [pbox('pt', 25).disabled, shown(pcard('pt').querySelector('.ob-param-off-note')), c.activeCount()], [true, true, 0]);
+    const greyed = [...document.querySelectorAll('.ob-side .ob-card')].filter(e =>
+      e.classList.contains('ob-param-off') || [...e.querySelectorAll('.ob-checks input')].some(b => b.disabled));
+    ok('ONLY the sweep-parameter cards grey out', greyed.map(e => txt(e.querySelector('.ob-card-title'))), ['dte', 'pt', 'sl']);
+    ok('and with them greyed, Day of Week still filters by click', await clickWorks('Day of Week'), [true, true, true, true]);
     sel.value = 'all';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
     await until(() => c.variantSel === 'all');
     await wait(300);
     ok('back at ALL the slice is as it was', [c.catOf(c.paramRows[1]).selected, boxVal('# Trades'), pbox('pt', 25).disabled],
        [[25], SO.n.toLocaleString(), false]);
+    ok('ALL with a parameter slice: Exit Reason enabled and filtering by click', await clickWorks('Exit Reason'), [true, true, true, true]);
     // Every value of one parameter unticked: the no-trades state.
     pbox('pt', 25).click();
     await until(() => c.filteredCount === 0);

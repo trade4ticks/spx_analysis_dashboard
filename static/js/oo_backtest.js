@@ -937,6 +937,13 @@ document.addEventListener('alpine:init', () => {
      * to a click elsewhere (agreed with the user, 2026-10-19). */
     paramFiltersLive() { return this.variantSel === 'all'; },
 
+    /* A sweep-parameter card while one variant is picked. ALWAYS A BOOLEAN:
+     * the template's first version bound `m.param && ...`, which is
+     * `undefined` for every registry card, and Alpine 3.14 SETS `disabled`
+     * for undefined -- Day of Week and Exit Reason were disabled for good
+     * (43312b4). */
+    paramLocked(m) { return !!(m && m.param) && !this.paramFiltersLive(); },
+
     paramTicked(p, v) {
       const c = this.filters.cats[`param__${p}`];
       return !c || c.selected.includes(v);
