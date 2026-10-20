@@ -921,13 +921,38 @@ document.addEventListener('alpine:init', () => {
           key: `param__${p}`, label: p, column: `param__${p}`, param: true,
           description: `sweep parameter · ${vals.length} value${vals.length === 1 ? '' : 's'}`,
           type: 'categorical', categories: vals.map(v => ({ value: v, label: String(v) })),
-          section: true, filter: false, hasScatter: false, winRate: true, binning: null, bins: null,
+          section: true, filter: true, hasScatter: false, winRate: true, binning: null, bins: null,
           basis: null, series: [], pane: null, format: null, removable: false,
         });
       }
       this.gridX = sw.params[0] || '';
       this.gridY = sw.params[1] || '';
       this.gridMetric = 'avg';
+    },
+
+    /* The parameter filters decide which variants exist; the selector chooses
+     * among those. With one variant picked the parameter cards are greyed and
+     * do not apply, keeping their ticks for the return to ALL -- so a variant
+     * the filters exclude can never be selected, and the slice is never lost
+     * to a click elsewhere (agreed with the user, 2026-10-19). */
+    paramFiltersLive() { return this.variantSel === 'all'; },
+
+    paramTicked(p, v) {
+      const c = this.filters.cats[`param__${p}`];
+      return !c || c.selected.includes(v);
+    },
+
+    sliceVariants() {
+      const sw = this.sweep;
+      if (!sw) return [];
+      return sw.variants.filter(v => sw.params.every(p => this.paramTicked(p, v.params[p])));
+    },
+
+    allLabel() {
+      const sw = this.sweep;
+      if (!sw) return '';
+      const n = this.sliceVariants().length, all = sw.variants.length;
+      return n === all ? `ALL — ${all} variants` : `ALL — ${n} of ${all} variants (parameter filters)`;
     },
 
     /* The parameter sections and grid compare variants, so they show at ALL. */
@@ -952,7 +977,10 @@ document.addEventListener('alpine:init', () => {
         if (f.calmar === undefined) f.calmar = obExtraStats(OB_DATA.columns, f.rows, f.stats, null, 0).calmar;
         return [f.id, f];
       }));
-      const g = obParamGrid(sw.variants, sw.values, figures, this.gridX, this.gridY);
+      // An axis lists only the TICKED values: filter pt to 75 and the grid
+      // collapses to one column of it, which is the question being asked.
+      const ticked = Object.fromEntries(sw.params.map(p => [p, (sw.values[p] || []).filter(v => this.paramTicked(p, v))]));
+      const g = obParamGrid(sw.variants, ticked, figures, this.gridX, this.gridY);
       const metric = OB_GRID_METRICS.find(m => m.key === this.gridMetric) || OB_GRID_METRICS[0];
       const shown = g.cells.flat().filter(c => c.n && c[metric.key] !== null);
       const maxAbs = Math.max(0, ...shown.map(c => Math.abs(c[metric.key])));
@@ -996,7 +1024,7 @@ document.addEventListener('alpine:init', () => {
                    `${this.grid.median === null ? '—' : this.grid.median.toLocaleString()}; ${this.grid.thin} thin now). ` +
                    'All filters apply.';
       if (!others.length) return 'Each cell is one variant. ' + rule;
-      const what = others.map(p => `${p} (${(sw.values[p] || []).length} values)`).join(', ');
+      const what = others.map(p => `${p} (${(sw.values[p] || []).filter(v => this.paramTicked(p, v)).length} values)`).join(', ');
       return `More than two parameters: each cell pools every variant sharing its ${this.gridX}` +
              (this.gridY ? ` and ${this.gridY}` : '') + ` values, across ${what}. ` + rule;
     },
@@ -1165,12 +1193,15 @@ document.addEventListener('alpine:init', () => {
       const dmax = opened.length ? opened.reduce((a, b) => (a > b ? a : b)) : '';
       this.dateBounds = { min: dmin, max: dmax };
       const ranges = {}, cats = {};
-      for (const m of this.registry.filter(x => x.filter)) {
+      for (const m of this.filterDefs()) {
         if (m.type === 'range') {
           const r = this.rangeStateFor(m);
           if (r) ranges[m.key] = r;
         } else {
-          const vals = cols[m.column] || [];
+          // A parameter's values and counts come from the WHOLE sweep, never
+          // the variant in view: its ticks are the slice ALL returns to, and
+          // must survive a visit to one variant unchanged.
+          const vals = (m.param && OB_DATA.full ? OB_DATA.full.columns : cols)[m.column] || [];
           const counts = new Map();
           for (const v of vals) counts.set(v, (counts.get(v) || 0) + 1);
           let options;
@@ -1202,13 +1233,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     isActive(m) {
+      // With one variant selected the parameter filters do not apply (their
+      // ticks are kept for ALL); they are not "active" and not counted.
+      if (m.param && !this.paramFiltersLive()) return false;
       const r = this.rangeOf(m), c = this.catOf(m);
       if (m.type === 'range') return !!r && (r.lo > r.min || r.hi < r.max);
       return !!c && c.selected.length < c.options.length;
     },
 
     activeCount() {
-      return (this.dateActive() ? 1 : 0) + this.registry.filter(m => m.filter && this.isActive(m)).length
+      return (this.dateActive() ? 1 : 0) + this.filterDefs().filter(m => this.isActive(m)).length
         + this.surfRows.filter(m => this.rowFilterOnPage(m)).length;
     },
 
@@ -1228,7 +1262,7 @@ document.addEventListener('alpine:init', () => {
 
     toggleCat(m, value) {
       const c = this.catOf(m);
-      if (!c) return;
+      if (!c || (m.param && !this.paramFiltersLive())) return;
       const i = c.selected.findIndex(v => v === value);
       if (i >= 0) c.selected.splice(i, 1); else c.selected.push(value);
       this.onFilterChange();
@@ -1236,7 +1270,7 @@ document.addEventListener('alpine:init', () => {
 
     setAllCats(m, on) {
       const c = this.catOf(m);
-      if (!c) return;
+      if (!c || (m.param && !this.paramFiltersLive())) return;
       c.selected = on ? c.options.map(o => o.value) : [];
       this.onFilterChange();
     },
@@ -1282,7 +1316,7 @@ document.addEventListener('alpine:init', () => {
       if (this.dateActive()) {
         specs.push({ kind: 'date', column: 'date_opened', from: this.filters.dateFrom, to: this.filters.dateTo });
       }
-      for (const m of this.registry.filter(x => x.filter)) {
+      for (const m of this.filterDefs()) {
         if (!this.isActive(m)) continue;
         if (m.type === 'range') {
           const r = this.rangeOf(m);
@@ -2192,7 +2226,12 @@ document.addEventListener('alpine:init', () => {
 
     /* ── registry-driven views ─────────────────────────────────────────── */
 
-    filterMetrics() { return this.registry.filter(m => m.filter); },
+    filterMetrics() { return this.filterDefs(); },
+
+    /* Every filter card, in order: a sweep's parameters first (the slice is
+     * the first thing chosen), then the registry's. A parameter is an
+     * ordinary categorical filter -- same card, same spec, same reset. */
+    filterDefs() { return [...(this.sweep ? this.paramRows : []), ...this.registry.filter(m => m.filter)]; },
     sectionMetrics() { return [...this.paramSections(), ...this.registry.filter(m => m.section), ...this.surfRows]; },
 
     /* The column a metric reads now: its basis column where it has more than

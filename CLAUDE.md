@@ -168,6 +168,23 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   where every variant could have traded. The UI gate holds every cell of a
   2- and a 3-parameter sweep to stats.py per variant file, with and without
   a filter, and fails when a cell's total is summed instead of averaged.
+- **Parameter FILTERS (2026-10-19).** The middle ground between one
+  variant and ALL: each parameter is an ordinary categorical filter card
+  (`paramRows` have `filter: true`; `filterDefs()` = parameters first, then
+  the registry — every filter loop goes through it), so it narrows
+  everything, counts as active and clears with "reset all filters". Its
+  options and counts come from the FULL sweep, never the view. **Agreed
+  interaction:** the parameter filters decide which variants exist; the
+  selector chooses among them ("ALL — 15 of 90 variants (parameter
+  filters)", listing only survivors). Picking one variant greys the cards
+  (`paramFiltersLive()` false: they neither apply nor count) and KEEPS their
+  ticks, so ALL returns to the same slice and an excluded variant can never
+  be picked. The mean-per-variant figures already average only variants
+  with trades in view, i.e. the survivors; one survivor drops the tags and
+  restores BH, because both key off the variants in VIEW, not the selector.
+  The grid lists only TICKED values on each axis (pt filtered to 75 → one
+  column), and its note counts the hidden parameters' ticked values. The UI
+  gate holds the slice to stats.py and fails when the grid stops collapsing.
 - **P4: a sweep saves as ONE strategy (done 2026-10-18).** The row in
   `oo_backtest_strategies` gains `sweep` (JSONB: params, variants, each
   file's reading — recorded at save, minus timing) and its files live in

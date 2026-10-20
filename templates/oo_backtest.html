@@ -125,6 +125,8 @@
     .ob-variant-bar .ob-card-body { padding:8px 12px; }
     .ob-variant-sel { flex:1; min-width:0; }
     .ob-variant-note { margin-top:4px; font-size:12px; line-height:1.4; }
+    .ob-param-off .ob-checks { opacity:.45; }
+    .ob-param-off-note { margin-top:4px; font-size:11px; }
     .ob-pgrid-ctl { flex-wrap:wrap; gap:6px 10px; margin-bottom:8px; }
     .ob-pgrid-ctl .ob-sel { width:auto; min-width:90px; }
     .ob-pgrid-wrap { overflow-x:auto; }
@@ -344,9 +346,10 @@
 
       <!-- One card per registry entry with filter: true. -->
       <template x-for="m in filterMetrics()" :key="m.key">
-        <div class="ob-card" :class="{ 'ob-active': loaded && isActive(m) }">
+        <div class="ob-card" :class="{ 'ob-active': loaded && isActive(m), 'ob-param-off': m.param && !paramFiltersLive() }">
           <div class="ob-card-hdr">
             <span class="ob-card-title" x-text="m.label"></span>
+            <span class="ob-card-sub" x-show="m.param">sweep parameter</span>
             <a href="#" class="ob-card-sub ob-reset" x-show="loaded && isActive(m)" @click.prevent="resetFilter(m)">reset</a>
           </div>
           <div class="ob-card-body">
@@ -376,7 +379,8 @@
                 <div class="ob-checks">
                   <template x-for="o in catOf(m).options" :key="String(o.value)">
                     <label class="ob-check">
-                      <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)">
+                      <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)"
+                             :disabled="m.param && !paramFiltersLive()">
                       <span x-text="o.label"></span>
                       <span class="ob-dim" x-text="o.count"></span>
                     </label>
@@ -390,6 +394,8 @@
             </template>
 
             <div class="ob-parse-note" :class="{ warn: isActive(m) }" x-show="loaded && coverageNote(m)" x-text="coverageNote(m)"></div>
+            <div class="ob-dim ob-param-off-note" x-show="m.param && !paramFiltersLive()">
+              A single variant is selected: parameter filters apply at ALL, and your ticks are kept for it.</div>
           </div>
         </div>
       </template>
@@ -411,9 +417,8 @@
           <div class="ob-row">
             <label class="ob-lbl" for="ob-variant">Variant</label>
             <select id="ob-variant" class="ob-sel ob-variant-sel" @change="setVariant($event.target.value)">
-              <option value="all" :selected="variantSel === 'all'"
-                      x-text="'ALL — ' + (sweep ? sweep.variants.length : 0) + ' variants'"></option>
-              <template x-for="v in (sweep ? sweep.variants : [])" :key="v.id">
+              <option value="all" :selected="variantSel === 'all'" x-text="allLabel()"></option>
+              <template x-for="v in sliceVariants()" :key="v.id">
                 <option :value="String(v.id)" :selected="variantSel === String(v.id)"
                         x-text="v.label + ' (' + v.n.toLocaleString() + ' trades)'"></option>
               </template>

@@ -20,6 +20,13 @@ with payloads the REAL router built (analyze_batch, no database):
   * Export CSV carries param_* columns
   * the surface ranking marks no significance over pooled variants, and does
     for one variant
+  * parameter FILTERS (2026-10-19): a card per parameter, every value
+    ticked; a slice (pt=25) narrows everything, the mean-per-variant figures
+    average the surviving variants (stats.py), the grid collapses to the
+    ticked values, the selector lists only survivors; one survivor drops the
+    "mean / variant" tags and brings the BH line back; picking a variant
+    greys the cards and keeps the slice for ALL; unticking every value is the
+    no-trades state; "reset all filters" clears them
   * saving (P4): a multi-file sweep's Save sends EVERY file, gzipped, to
     /strategies/sweep as one strategy; a single file saves as before; a
     saved sweep loads back with ALL selected, and a changed variant list is
@@ -161,7 +168,12 @@ def payloads() -> tuple[dict, dict, dict, dict]:
         ns = [n for (dd, _, _), n in zip(VARIANTS3, NAMES3) if dd == d]
         c = cell([figures(fr3[n]) for n in ns])
         sec[str(d)] = {"avg": c["avg"], "total": c["total"], "win": c["win"]}
-    expect.update({"grid3": grid3, "grid3_nomon": grid3_nomon, "sec_dte": sec})
+    # Parameter-filter slices: pt=25 (4 variants), and one variant alone.
+    pt25 = [n for (_, pp, _), n in zip(VARIANTS3, NAMES3) if pp == 25]
+    one = NAMES3[VARIANTS3.index((30, 25, 100))]
+    expect.update({"grid3": grid3, "grid3_nomon": grid3_nomon, "sec_dte": sec,
+                   "slice_pt25": cell([figures(fr3[n]) for n in pt25]), "slice_one": cell([figures(fr3[one])]),
+                   "n3": sum(len(f) for f in fr3.values())})
     files.update(files3)
     return sweep, alone, expect, files, sweep3
 
@@ -518,6 +530,75 @@ window.addEventListener('load', () => setTimeout(async () => {
     await wait(300);
     await check3(FIX.expect.grid3_nomon, 'filtered (no Mondays)');
     await setSel('ob-grid-m', 'avg');
+
+    // ── parameter filters ───────────────────────────────────────────────
+    c.setAllCats(dow3, true);
+    await until(() => c.activeCount() === 0);
+    await wait(200);
+    const pcard = p => [...document.querySelectorAll('.ob-side .ob-card')].find(e =>
+      txt(e.querySelector('.ob-card-title')) === p && /sweep parameter/.test(txt(e.querySelector('.ob-card-hdr'))));
+    const pbox = (p, v) => [...pcard(p).querySelectorAll('.ob-check')].find(l => txt(l.querySelector('span')) === String(v))
+      .querySelector('input');
+    const isParamCard = e => [...e.querySelectorAll('.ob-card-sub')].some(x => shown(x) && txt(x) === 'sweep parameter');
+    const filterCards = [...document.querySelectorAll('.ob-side .ob-card')].filter(e => e.querySelector('.ob-checks, .ob-dual'));
+    ok('a filter card per parameter, first in the panel',
+       [filterCards.filter(isParamCard).map(e => txt(e.querySelector('.ob-card-title'))),
+        filterCards.slice(0, 3).every(isParamCard)], [['dte', 'pt', 'sl'], true]);
+    ok('values with trade counts, every one ticked', [...pcard('pt').querySelectorAll('.ob-check')].map(l =>
+       [txt(l.querySelectorAll('span')[0]), l.querySelector('input').checked]), [['25', true], ['50', true]]);
+    pbox('pt', 50).click();
+    await until(() => c.activeCount() === 1 && c.filteredCount === FIX.expect.slice_pt25.n);
+    await wait(300);
+    const SP = FIX.expect.slice_pt25, EN = FIX.expect.n3;
+    ok('unticking pt=50 narrows the page to the pt=25 trades', [boxVal('# Trades'), txt(document.querySelector('.ob-status span'))],
+       [SP.n.toLocaleString(), `Showing ${SP.n.toLocaleString()} of ${EN.toLocaleString()} trades`]);
+    near('Total P/L averages the 4 SURVIVING variants (stats.py)', money(boxVal('Total P/L')), SP.total, 0.51);
+    near('Max DD averages the 4 surviving variants (stats.py)', money(boxVal('Max DD')), SP.maxdd, 0.51);
+    ok('it counts as an active filter', /1 filter active/.test(txt(document.querySelector('.ob-status'))), true);
+    ok('the selector lists only the surviving variants', [...sel.options].map(o => txt(o).replace(/ \(\d+ trades\)$/, '')),
+       ['ALL — 4 of 8 variants (parameter filters)', 'dte=30 · pt=25 · sl=100', 'dte=30 · pt=25 · sl=200',
+        'dte=45 · pt=25 · sl=100', 'dte=45 · pt=25 · sl=200']);
+    ok('the grid collapses: pt down shows only 25', [heads(), rowHeads()], [['30', '45'], ['25']]);
+    ok('and the note counts the ticked values of the hidden parameter', /across sl \(2 values\)/.test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
+    // Down to ONE surviving variant: the page is single-variant in effect.
+    pbox('dte', 45).click(); await wait(100);
+    pbox('sl', 200).click();
+    await until(() => c.filteredCount === FIX.expect.slice_one.n);
+    await wait(300);
+    const SO = FIX.expect.slice_one;
+    ok('one survivor: its own trades', boxVal('# Trades'), SO.n.toLocaleString());
+    near('one survivor: Total P/L is its own', money(boxVal('Total P/L')), SO.total, 0.51);
+    ok('one survivor: no "mean / variant" tags', LABELS.filter(l => boxTag(l)), []);
+    await c.rankSurface();
+    await until(() => !c.surf.busy && !!c.surf.result);
+    ok('one survivor: the ranking marks significance again (BH in the footer, no pooled note)',
+       [/Benjamini/.test(c.surfFooter()), await until(() => !shown(document.querySelector('.ob-rank-pooled')))], [true, true]);
+    // Picking a variant greys the cards; ALL brings the slice back.
+    sel.value = String(c.sliceVariants()[0].id);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => c.variantSel !== 'all');
+    await wait(300);
+    ok('a picked variant greys the parameter cards and says why',
+       [pbox('pt', 25).disabled, shown(pcard('pt').querySelector('.ob-param-off-note')), c.activeCount()], [true, true, 0]);
+    sel.value = 'all';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => c.variantSel === 'all');
+    await wait(300);
+    ok('back at ALL the slice is as it was', [c.catOf(c.paramRows[1]).selected, boxVal('# Trades'), pbox('pt', 25).disabled],
+       [[25], SO.n.toLocaleString(), false]);
+    // Every value of one parameter unticked: the no-trades state.
+    pbox('pt', 25).click();
+    await until(() => c.filteredCount === 0);
+    const noTrades = [...document.querySelectorAll('.ob-main .ob-empty')].find(e => /No trades match/.test(txt(e)));
+    ok('every pt value unticked: the ordinary no-trades state', [await until(() => shown(noTrades)), sel.options[0].textContent.trim()],
+       [true, 'ALL — 0 of 8 variants (parameter filters)']);
+    // "reset all filters" clears them.
+    [...document.querySelectorAll('.ob-status a')].find(a => /reset all filters/.test(txt(a))).click();
+    await until(() => c.filteredCount === EN);
+    await wait(200);
+    ok('reset all filters ticks every parameter value again', [['dte', 30], ['dte', 45], ['pt', 25], ['pt', 50], ['sl', 100], ['sl', 200]]
+       .map(([p, v]) => pbox(p, v).checked).concat([sel.options[0].textContent.trim()]),
+       [true, true, true, true, true, true, 'ALL — 8 variants']);
   } catch (e) {
     out.push('FAIL|the driver threw|' + e + (e && e.stack ? ' ' + e.stack.split(String.fromCharCode(10))[1] : '') + '|nothing');
   }
