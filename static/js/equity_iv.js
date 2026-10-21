@@ -2102,7 +2102,7 @@ document.addEventListener('alpine:init', () => {
                     // two axis metrics — those get their own line below.
                     `chain extrap ≤30d: ${p.extrap_rate != null ? (p.extrap_rate * 100).toFixed(1) + '%' : '—'}`,
                   ];
-                  if (useColor) rows.push(`${self.colorCol()}: ${self.fmt(p.color, cUnits)}`);
+                  if (useColor) rows.push(`${self.colorCol()}: ${self.fmt(p.color, self.colorUnits())}`);
                   if (p.x_extrap) rows.push(`⚠ x rests on a fabricated node (${self.depends(self.xCol())})`);
                   if (p.y_extrap) rows.push(`⚠ y rests on a fabricated node (${self.depends(self.yCol())})`);
                   return rows;
