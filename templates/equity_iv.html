@@ -230,6 +230,9 @@
       width:120px; height:8px; border-radius:2px; border:1px solid var(--border);
       background:linear-gradient(90deg,#e84393 0%, #8a8a8a 50%, #3498db 100%);
     }
+    /* The bar with the grey point's value centred under it. */
+    .eq-ramp-mid { display:flex; flex-direction:column; align-items:center; gap:1px; line-height:1; }
+    .eq-ramp-mid span { font-size:9px; }
 
     /* Scanner table. ~14 rows then internal scroll, so the table cannot push
        the rest of the page down. */
@@ -718,7 +721,7 @@
           </div>
 
           <div class="ctrl-div"></div>
-          <span class="eq-lbl">Colour</span>
+          <span class="eq-lbl">Color</span>
           <select class="eq-sel" x-model="colorBase" @change="onAxisChange()" style="max-width:180px">
             <option value="">none</option>
             <template x-for="m in colorChoices()" :key="'cm-'+m.column_name">
@@ -726,9 +729,13 @@
             </template>
           </select>
           <div class="eq-ramp" x-show="colorBase">
-            <span x-text="fmtShort(colorRange()[0], colorUnits())"></span>
-            <div class="eq-ramp-bar"></div>
-            <span x-text="fmtShort(colorRange()[1], colorUnits())"></span>
+            <span x-text="fmtShort(colorScale().lo, colorUnits())"></span>
+            <div class="eq-ramp-mid">
+              <div class="eq-ramp-bar" :style="colorRampStyle()"></div>
+              <span :title="colorScale().sym ? 'Gray is zero; both sides scaled alike, so the shorter side stops short of full color.' : 'Gray is the median; each side runs to its own extreme.'"
+                    x-text="(colorScale().sym ? '0' : 'median ' + fmtShort(colorScale().mid, colorUnits()))"></span>
+            </div>
+            <span x-text="fmtShort(colorScale().hi, colorUnits())"></span>
           </div>
         </div>
 
@@ -761,8 +768,8 @@
         <div class="eq-note" x-show="note" x-cloak>
           Size is <code>median_n_strikes_clean</code> — surviving strikes per fitted
           expiry, a liquidity <em>proxy</em>. This database has no volume, ADV or
-          market-cap column and no sector table, so the spec's "colour by sector,
-          size by liquidity" has no source; colour is an optional metric on a
+          market-cap column and no sector table, so the spec's "color by sector,
+          size by liquidity" has no source; color is an optional metric on a
           diverging ramp instead.
         </div>
       </div>
@@ -875,7 +882,7 @@
             The adverse-selection check at universe level: are the rich-skew
             names the ones that fell? A tight cluster with a flat y-axis is a
             different universe from a downward slope.
-            Coloured by term state — blue contango, pink backwardation — and
+            Colored by term state — blue contango, pink backwardation — and
             NOT by sector: this database has no sector table, nor a volume,
             ADV or market-cap column. Term state is the regime filter and the
             third axis of the same question, so it adds a dimension rather
@@ -1474,7 +1481,7 @@
             reference, not a plottable series, so it is absent from the metric
             picker and from the legend.
             Candles are the daily OHLC <em>of the metric</em> — open, high, low
-            and close across that day's intraday buckets, coloured blue when the
+            and close across that day's intraday buckets, colored blue when the
             metric rose through the day and pink when it fell. That is not the
             green/red of a price chart: a rising skew is not "good". A pink dot
             on a line marks a point resting on a fabricated node.
@@ -1702,7 +1709,7 @@
             <span x-show="gridDirectNote()" x-text="gridDirectNote()"
                   style="display:block;margin-bottom:3px"></span>
             Rows are tenors, columns are put_delta. Blue above, pink below —
-            colour is direction, scaled to this view's own range, since the five
+            color is direction, scaled to this view's own range, since the five
             views are in different units and one shared scale would render four
             of them flat.
             <span x-show="gridNote()" x-text="gridNote()"
@@ -1949,7 +1956,7 @@
               </span>
               <span x-show="oiTab === 'flow'" style="display:block;margin-top:3px">
                 Strikes down the side, sessions across, dot size by magnitude and
-                colour by sign, with the white line the spot path. This is the
+                color by sign, with the white line the spot path. This is the
                 one that shows whether large-OI strikes mattered, because it puts
                 where OI concentrated next to where price actually went.
                 The strike axis defaults to the band around spot holding ~90% of

@@ -264,11 +264,24 @@ function eqMix(a, b, t) {
 }
 
 /* Diverging ramp: pink -> neutral grey -> blue, with a NEUTRAL midpoint.
- * Never a hue at the middle — that reads as a third category. */
-function eqDiverge(v, lo, hi, mid) {
+ * Never a hue at the middle — that reads as a third category.
+ * `sym` scales both sides by the larger half-width, so equal distances from
+ * mid get equal colour (a z-score: -1.2 must not look as strong as +3).
+ * Otherwise each side runs to its own extreme — lo is full pink, hi full
+ * blue — which is what the legend strip says. A shared half-width centred
+ * on a skewed median left the short side faint: days to earnings drew a
+ * 1-day name at ~40% pink beside full-blue 99-day names (2026-10-21). */
+function eqDiverge(v, lo, hi, mid, sym) {
   if (v == null || !isFinite(v)) return EQ_GREY;
-  const half = Math.max(Math.abs(hi - mid), Math.abs(mid - lo)) || 1;
-  const t = Math.max(-1, Math.min(1, (v - mid) / half));
+  let t;
+  if (sym) {
+    const half = Math.max(Math.abs(hi - mid), Math.abs(mid - lo)) || 1;
+    t = (v - mid) / half;
+  } else {
+    t = v >= mid ? (hi > mid ? (v - mid) / (hi - mid) : 0)
+                 : (mid > lo ? (v - mid) / (mid - lo) : 0);
+  }
+  t = Math.max(-1, Math.min(1, t));
   return t >= 0 ? eqMix(EQ_GREY, EQ_BLUE, t) : eqMix(EQ_GREY, EQ_PINK, -t);
 }
 
@@ -1966,11 +1979,27 @@ document.addEventListener('alpine:init', () => {
       return { plotted, nulls: pts.length - plotted, fabricated: fab };
     },
 
-    colorRange() {
-      if (!this.cs || !this.cs.points.length) return [0, 0];
-      const vals = this.cs.points.map(p => p.color).filter(v => v != null);
-      if (!vals.length) return [0, 0];
-      return [Math.min(...vals), Math.max(...vals)];
+    /* The colour scale, ONE definition for the dots and the legend strip, over
+     * the PLOTTED points (a ticker missing x or y draws no dot, so it must not
+     * stretch the scale). Grey sits at 0 for a z-score, else the median. */
+    colorScale() {
+      const sym = this.colorUnits() === 'z_score';
+      const vals = (this.cs ? this.cs.points : [])
+        .filter(p => p.x != null && p.y != null && p.color != null)
+        .map(p => p.color).sort((a, b) => a - b);
+      if (!vals.length) return { lo: 0, mid: 0, hi: 0, sym, n: 0 };
+      return {
+        lo: vals[0], hi: vals[vals.length - 1], sym, n: vals.length,
+        mid: sym ? 0 : vals[Math.floor(vals.length / 2)],
+      };
+    },
+
+    /* The strip drawn with the dots' own colours at its ends, so a z scale
+     * whose short side never reaches full pink shows that too. */
+    colorRampStyle() {
+      const s = this.colorScale();
+      return `background:linear-gradient(90deg,${eqDiverge(s.lo, s.lo, s.hi, s.mid, s.sym)} 0%,`
+           + `${EQ_GREY} 50%,${eqDiverge(s.hi, s.lo, s.hi, s.mid, s.sym)} 100%)`;
     },
 
     // ── rendering ────────────────────────────────────────────────────────
@@ -1997,12 +2026,7 @@ document.addEventListener('alpine:init', () => {
       };
 
       const useColor = !!this.colorCol();
-      const cvals = pts.map(p => p.color).filter(v => v != null);
-      const cUnits = this.colorUnits();
-      const cMid = cUnits === 'z_score' ? 0
-        : (cvals.length ? cvals.slice().sort((a, b) => a - b)[Math.floor(cvals.length / 2)] : 0);
-      const cLo = cvals.length ? Math.min(...cvals) : 0;
-      const cHi = cvals.length ? Math.max(...cvals) : 1;
+      const cs = this.colorScale();
 
       // Extremes get a direct label; everything else is identified on hover.
       const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
@@ -2027,7 +2051,7 @@ document.addEventListener('alpine:init', () => {
             pointRadius: pts.map(radius),
             pointHoverRadius: pts.map(p => radius(p) + 3),
             backgroundColor: pts.map(p =>
-              useColor ? eqDiverge(p.color, cLo, cHi, cMid) : EQ_BLUE),
+              useColor ? eqDiverge(p.color, cs.lo, cs.hi, cs.mid, cs.sym) : EQ_BLUE),
             // A 2px ring in the surface colour separates overlapping dots.
             // Pink instead when the value rests on a fabricated node, and
             // white when it is the selected ticker — never colour alone.
