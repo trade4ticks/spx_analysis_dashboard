@@ -73,10 +73,10 @@ async def main() -> int:
     a = ap.parse_args()
 
     if not (os.getenv("DATABASE_URL") and os.getenv("OI_DATABASE_URL")):
-        print("SKIPPED — needs both DATABASE_URL and OI_DATABASE_URL.")
-        print("  Without them the pool is stubbed and /grid answers "
-              "'OI database not configured', which would pass vacuously.")
-        return 0
+        # Without them the pool is stubbed and /grid answers 'OI database
+        # not configured', which would pass vacuously.
+        print("SKIPPED: the grid comparison -- needs both DATABASE_URL and OI_DATABASE_URL")
+        return 3
 
     from app.db import init_pool, close_pool, get_oi_pool
     from app.routers.factor_trades import grid, GridReq

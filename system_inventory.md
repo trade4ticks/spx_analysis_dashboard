@@ -185,12 +185,16 @@ this repo.
 
 ### 2b. The gate suite (`scripts/check_*.py`, run by `scripts/gates.py`)
 
-31 `check_*.py` scripts plus two dry-runs. `GATES` in `gates.py` is an
-**explicit list**, not a directory scan: a script that is not in it does not
-run, and `--vps --deploy` selects only the two that can run on the box.
-**Nothing reports PASS that it did not run** — a gate that declares
-`can_skip` and exits 3 is reported SKIP, and for any other gate a 3 is an
-ordinary failure. Gates in the order `gates.py` runs them:
+`GATES` in `gates.py` is an **explicit list**, not a directory scan: a
+script that is not in it does not run. **It is the list; this table is a
+summary and does not name every gate** — counts written here went stale
+twice (this paragraph said "31 scripts" and "the two that can run on the
+box" when there were 42 and five; corrected 2026-10-25). `--vps --deploy`
+selects the gates marked `vps=True`. **Nothing reports PASS that it did not
+run**: a run that ends in a traceback is CRASH; a gate that declares
+`can_skip` and exits 3 — whole, or one part via `SKIPPED: what -- why` — is
+SKIP, and `--deploy` fails it; a gate that exits 0 while its output says it
+skipped something is a FAIL. Gates in the order `gates.py` runs them:
 
 | Group | Gates | What the group protects |
 |---|---|---|
@@ -198,7 +202,7 @@ ordinary failure. Gates in the order `gates.py` runs them:
 | Equity IV | `equity_iv_dryrun` (85+ endpoint cases), `check_tenor_retarget` | Endpoint SQL, contamination, JS/Python retarget parity |
 | Equities Scalp | `scalp_dryrun`, `check_scalp_fills`, `check_scalp_metrics`, `check_scalp_filters` | The statement parser; **no hardcoded metric names**; that a filter the pane accepts actually reaches the request |
 | Replay & scatter | `check_replay`, `check_scatter_invariants` | |
-| Backtest | `check_oo_backtest` (JS binning vs `pd.cut`, stats, auto-bins, half-open deployment), `check_portfolio`, `check_portfolio_ui` (the page driven **by clicking**, headless Edge), `check_oo_market_sql` (a real temp Postgres) | The numbers on both backtest pages, and that the portfolio page's controls work rather than merely exist |
+| Backtest | `check_oo_backtest` (JS binning vs `pd.cut`, stats, auto-bins, half-open deployment), `check_oo_sweep`, `check_oo_sweep_ui`, `check_oo_notes_ui`, `check_oo_offstate` (the page held to a recording), `check_oo_split_ui` (train/test, a differential), `check_portfolio`, `check_portfolio_ui` (the page driven **by clicking**, headless Edge), `check_oo_market_sql` (a real temp Postgres) | The numbers on both backtest pages, and that the portfolio page's controls work rather than merely exist |
 | Live service | `check_live_hub`, `check_wall`, `check_live_axis`, `check_live_layout`, `check_live_reconcile`, `check_arrival_norm` | Tier caps, no aggregation, resubscribe on reconnect, and that the wall **cannot reach a broker** |
 | Brokers | `check_broker`, `check_das` | The switches and guards (the adapter is asserted NOT CALLED when one refuses); the DAS line protocol against a fake socket |
 | Repo-wide | `check_pool_wiring`, `check_vendored`, `check_chart_contract`, `check_routes_smoke`, `check_template_render`, `check_grid_equivalence` | |

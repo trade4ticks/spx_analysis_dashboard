@@ -1690,7 +1690,14 @@ gates used to PASS that way: `check_routes_smoke` without a DB (and on the
 VPS its /run /zone without `SMOKE_METRIC` — it now finds a binned metric
 itself), `check_scalp_fills`' xlsx case, `check_vendored` with a source
 absent. The xlsx skip was the local venv missing `openpyxl`, which IS in
-requirements.txt — an environment gap reading as PASS. **Keep the dev venv
+requirements.txt — an environment gap reading as PASS. **The runner refuses
+an undeclared skip**: exit 0 with a line saying SKIP/SKIPPED in any other
+form is a FAIL (`undeclared_skips`), which caught nothing at once and fires
+when planted; `check_alpine_refs` (a template whose component could not be
+built), `scalp_dryrun --live` and `check_grid_equivalence` (no DSN) were
+converted. What it cannot see: a check that returns early SILENTLY, or one
+whose loop runs over nothing (check_alpine_syntax's zero pages) — gates
+print their counts for that reason; read them. **Keep the dev venv
 at requirements.txt** (`pip install -r requirements.txt`; Jinja2 is pinned
 to 3.1.3); `sqlglot` is the one dev-only extra.
 

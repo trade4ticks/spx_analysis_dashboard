@@ -132,7 +132,7 @@ def _s(script, *extra, **kw):
 GATES = [
     # ── syntax and references ────────────────────────────────────────────
     _s("check_alpine_syntax.py", note="every x-* expression parses"),
-    _s("check_alpine_refs.py",
+    _s("check_alpine_refs.py", can_skip=True,
        note="every Alpine call resolves to a component member"),
     _s("check_asset_versions.py", note="static assets are content-hashed"),
     # One partial, seventeen pages. A page that falls out of the nav is
@@ -157,7 +157,7 @@ GATES = [
 
     # ── the scalp page ───────────────────────────────────────────────────
     _s("scalp_dryrun.py", note="meta/health/candidates/calibration",
-       live_flag=True),
+       live_flag=True, can_skip=True),
     _s("check_scalp_fills.py", can_skip=True, note="the Schwab statement parser"),
     _s("check_scalp_metrics.py", note="no hardcoded metric names"),
     # The pane accepted a constraint, chipped it, and never sent it. Only
@@ -281,7 +281,7 @@ GATES = [
     # the list entirely would make the table complete-looking and wrong, which
     # is the failure mode every script in it exists to prevent.
     _s("check_template_render.py", slow=True, vps=True),
-    _s("check_grid_equivalence.py", slow=True),
+    _s("check_grid_equivalence.py", slow=True, can_skip=True),
 ]
 
 JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js",
@@ -370,6 +370,15 @@ def run_one(g: Gate, live: bool):
 
 
 SKIPPED_LINE = re.compile(r"^\s*SKIPPED: (.+)$", re.M)
+
+
+# A line that SAYS it skipped something without the SKIPPED: form. Exit 0
+# with one of these is an undeclared skip: a PASS the gate did not earn.
+UNDECLARED_SKIP = re.compile(r"^\s*(SKIP|SKIPPED)\b(?!: )|\bSKIPPED\b(?!:)", re.M)
+
+
+def undeclared_skips(out: str) -> list[str]:
+    return [l.strip() for l in out.splitlines() if UNDECLARED_SKIP.search(l) and not SKIPPED_LINE.match(l)]
 
 
 def skipped_parts(out: str) -> list[str]:
@@ -463,6 +472,14 @@ def main() -> int:
                 status, detail = "FAIL", (last_line(out) or last_line(err)
                                           or f"exit {code}")
                 failures.append((g.name, (out + err)))
+
+        # THE CLASS-CLOSER (2026-10-25): exit 0 but the output says something
+        # was skipped in its own words -- the shape of all four instances of
+        # "PASS without running". Refused until the gate declares it.
+        if status == "PASS" and undeclared_skips(out):
+            status, detail = "FAIL", ("says it skipped something but exited 0 (declare it as 'SKIPPED: what -- why' "
+                                      "and exit EXIT_SKIPPED): " + undeclared_skips(out)[0])
+            failures.append((g.name, (out + err)))
 
         if status == "PASS":
             passed += 1

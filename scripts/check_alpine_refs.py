@@ -284,7 +284,7 @@ def main() -> int:
             continue
         got = component_names(js)
         if got is None:
-            print(f"  SKIP {tpl.name}: component could not be constructed")
+            print(f"SKIPPED: {tpl.name} -- its component could not be constructed, so none of its calls were checked")
             skipped += 1
             continue
         names, fns = got
@@ -367,6 +367,10 @@ def main() -> int:
               "\nhandler does nothing, and any state set before the call still "
               "\nupdates -- so the control looks alive.")
         return 1
+    if skipped:
+        # Not a pass: those templates' calls were never looked at.
+        print(f"\nevery checked call resolves; {skipped} template(s) NOT checked")
+        return 3
     print("\nOK — every Alpine call resolves to a component member.")
     return 0
 

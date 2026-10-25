@@ -1715,17 +1715,17 @@ async def run_live() -> int:
     from app import db
 
     if db._scalp_dsn() is None:
-        print("SKIP --live: no DSN. It derives from DATABASE_URL; set that or "
+        print("SKIPPED: the --live run -- no DSN. It derives from DATABASE_URL; set that or "
               "SCALP_DATABASE_URL.")
-        return 0
+        return 3
 
     await db.init_pool()
     pool = await db.get_scalp_pool()
     if pool is None:
         st = db.pool_status().get("equities_scalp", {})
-        print(f"SKIP --live: no pool — {st.get('error') or 'not configured'}")
+        print(f"SKIPPED: the --live run -- no pool: {st.get('error') or 'not configured'}")
         await db.close_pool()
-        return 0
+        return 3
 
     fails = 0
     try:
