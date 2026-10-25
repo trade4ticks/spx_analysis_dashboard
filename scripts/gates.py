@@ -34,10 +34,14 @@ would start a second cluster beside the live database. So:
   dev machine   everything except the vps-only pair; in particular
                 check_oo_backtest (node, source checkout) and
                 check_oo_market_sql (initdb). Run before pushing.
-  VPS           check_routes_smoke (the real app, real .env, real DB) and
-                check_template_render --report-diffs --ref ORIG_HEAD. Run after
+  VPS           the vps=True gates, five as of 2026-10-25:
+                check_routes_smoke (the real app, real .env, real DB),
+                check_template_render --report-diffs --ref ORIG_HEAD,
+                check_market_calendar, check_oo_sweep, check_das. Run after
                 `git pull`, via --vps. Nothing else is selected there, so a
                 deploy check cannot fail on tooling that is absent by design.
+                They run UNATTENDED, so each runs its parts one by one (an
+                exception fails that part, not the rest of the gate).
 
 VPS SETUP, once. The flow is: pull as root, gate as an unprivileged user
 (initdb-style tools refuse root, and a gate has no business running as root).
@@ -73,6 +77,16 @@ naming the gate function it died in, and the summary counts crashes apart.
 The fix for a gate that crashes is to make the gate run its parts
 separately (check_oo_backtest's CHECKS), not to catch the exception here.
 
+A PART NOT RUN IS A SKIP (2026-10-25). A gate that ran but could not run one
+of its parts (no database for the API checks, no openpyxl for the xlsx case,
+no source checkout to compare with) prints one line per part,
+
+    SKIPPED: <what> -- <why>
+
+and exits EXIT_SKIPPED when nothing failed. The table shows SKIP with those
+parts named, the summary counts it as not run, and the end lists every
+skipped part. Before, these gates exited 0 and read as PASS.
+
 A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
 (no Postgres binaries, running as root). That is reported as SKIP, never PASS.
 Under --deploy it is a FAIL: a deploy check that did not exercise the SQL has
@@ -81,8 +95,10 @@ not checked the SQL.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -142,7 +158,7 @@ GATES = [
     # ── the scalp page ───────────────────────────────────────────────────
     _s("scalp_dryrun.py", note="meta/health/candidates/calibration",
        live_flag=True),
-    _s("check_scalp_fills.py", note="the Schwab statement parser"),
+    _s("check_scalp_fills.py", can_skip=True, note="the Schwab statement parser"),
     _s("check_scalp_metrics.py", note="no hardcoded metric names"),
     # The pane accepted a constraint, chipped it, and never sent it. Only
     # driving the shipped page JS can see what the request carried.
@@ -248,12 +264,12 @@ GATES = [
 
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),
-    _s("check_vendored.py", note="vendored files match their source"),
+    _s("check_vendored.py", can_skip=True, note="vendored files match their source"),
 
     # ── slower, and not usually what changed ─────────────────────────────
     _s("check_chart_contract.py", slow=True,
        note="chart modules route through window.FactorCharts"),
-    _s("check_routes_smoke.py", slow=True, vps=True, note="every route imports"),
+    _s("check_routes_smoke.py", slow=True, vps=True, can_skip=True, note="every route imports"),
 
     # ── listed so they appear as SKIP rather than not appearing ──────────
     #
@@ -299,7 +315,7 @@ def crash_of(gate: str, err: str) -> str | None:
     frames = re.findall(r'File "([^"]+)", line (\d+), in (\S+)', tail)
     mine = [f for f in frames if Path(f[0]).name == gate + ".py"]
     where = f" (in {mine[-1][2]}, line {mine[-1][1]})" if mine else ""
-    return last[:140] + where
+    return last + where
 
 # Gates that need an argument this runner does not supply. Listed rather than
 # discovered, so a gate that starts needing one does not quietly become a skip.
@@ -349,6 +365,14 @@ def run_one(g: Gate, live: bool):
     return g, p.returncode, (p.stdout or ""), time.monotonic() - t0, (p.stderr or "")
 
 
+SKIPPED_LINE = re.compile(r"^\s*SKIPPED: (.+)$", re.M)
+
+
+def skipped_parts(out: str) -> list[str]:
+    """The parts a gate said it did not run (see SKIPPED: in the docstring)."""
+    return [m.strip() for m in SKIPPED_LINE.findall(out)]
+
+
 def last_line(text: str) -> str:
     lines = [l.rstrip() for l in text.splitlines() if l.strip()]
     return lines[-1] if lines else ""
@@ -394,18 +418,30 @@ def main() -> int:
     width = max(len(g.name) for g, *_ in results)
     passed = failed = skipped = crashed = 0
     failures = []
+    not_run = []          # (gate, what, why) -- every skip, listed at the end
+    # Details are WRAPPED under their own column, never cut: a message cut
+    # mid-sentence ("-- what cam") is unreadable output, which is how every
+    # failure P0 found went unread.
+    term = shutil.get_terminal_size((140, 24)).columns
+    lead = 2 + 5 + 1 + width + 2 + 6 + 2
+    wrap_at = max(60, min(term, 160) - lead)
 
     print()
     for g, code, out, secs, err in results:
         status, detail = "PASS", g.note
+        parts = skipped_parts(out)
         if g.name in NEEDS_ARGS and not getattr(g, "ref_supplied", False):
             status, detail = "SKIP", NEEDS_ARGS[g.name]
+            not_run.append((g.name, "the whole gate", NEEDS_ARGS[g.name]))
         elif g.can_skip and code == EXIT_SKIPPED:
+            what = ("not run: " + "; ".join(parts)) if parts else (last_line(out) or "could not run on this host")
             if deploy:
-                status, detail = "FAIL", "could not run on this host (--deploy): " + (last_line(out) or "skipped")
+                status, detail = "FAIL", "could not run on this host (--deploy): " + what
                 failures.append((g.name, (out + err)))
             else:
-                status, detail = "SKIP", last_line(out) or "could not run on this host"
+                status, detail = "SKIP", (f"ran, except -- {what}" if parts else what)
+                for p_ in parts or [what]:
+                    not_run.append((g.name, *(p_.split(" -- ", 1) if " -- " in p_ else (p_, ""))))
         elif code != 0:
             gap = ENV_GAPS.get(g.name)
             if gap and gap[0] in (out + err) and deploy:
@@ -414,9 +450,10 @@ def main() -> int:
                 status, detail = "FAIL", f"could not run on this host (--deploy): {gap[1]}"
                 failures.append((g.name, (out + err)))
             elif gap and gap[0] in (out + err):
-                status, detail = "ENV ", gap[1]
+                status, detail = "SKIP", gap[1]
+                not_run.append((g.name, "the whole gate", gap[1]))
             elif crash_of(g.name, err):
-                status, detail = "CRASH", "died: " + crash_of(g.name, err) + " -- what came after did not run"
+                status, detail = "CRASH", "died of " + crash_of(g.name, err) + "; the rest of this gate did not run"
                 failures.append((g.name, (out + err)))
             else:
                 status, detail = "FAIL", (last_line(out) or last_line(err)
@@ -434,7 +471,10 @@ def main() -> int:
         else:
             skipped += 1
 
-        print(f"  {status:<5} {g.name:<{width}}  {secs:5.1f}s  {detail[:120]}")
+        lines = textwrap.wrap(detail.strip(), wrap_at) or [""]
+        print(f"  {status:<5} {g.name:<{width}}  {secs:5.1f}s  {lines[0]}")
+        for more in lines[1:]:
+            print(" " * lead + more)
 
     # The full output of anything that failed, after the table, so the table
     # stays readable and the detail is still one screen away.
@@ -447,20 +487,19 @@ def main() -> int:
     if failed:
         bits.append(f"{failed} FAILED")
     if crashed:
-        bits.append(f"{crashed} CRASHED (stopped part-way; the rest of each did not run)")
+        bits.append(f"{crashed} CRASHED (each stopped part-way)")
     if skipped:
-        bits.append(f"{skipped} could not run")
+        bits.append(f"{skipped} SKIPPED in whole or part")
     print("  " + ", ".join(bits))
-    if skipped:
-        # Named again at the bottom. A skip mentioned once in a table is a
-        # skip that gets read as a pass.
-        for g, code, out, _, err in results:
-            if (g.name in NEEDS_ARGS and not getattr(g, "ref_supplied", False)) or (g.can_skip and code == EXIT_SKIPPED) or (
-                    code != 0 and ENV_GAPS.get(g.name)
-                    and ENV_GAPS[g.name][0] in (out + err)):
-                print(f"    not run: {g.name}")
+    if not_run:
+        # Named again at the bottom, part by part. A skip mentioned once in
+        # a table is a skip that gets read as a pass.
+        print("  not run:")
+        for gate, what, why in not_run:
+            for i, line in enumerate(textwrap.wrap(f"{gate}: {what}" + (f" -- {why}" if why else ""), 120)):
+                print(("    " if i == 0 else "      ") + line)
         if not deploy and any(g.can_skip and code == EXIT_SKIPPED for g, code, *_ in results):
-            print("    (a deploy check must not skip these: rerun with --deploy as a non-root user)")
+            print("  (under --deploy every skip is a FAIL)")
     if not slow and not vps:
         n = sum(1 for g in GATES if g.slow)
         print(f"    {n} slow gates omitted; add --slow to include them")

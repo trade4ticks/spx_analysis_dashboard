@@ -32,6 +32,9 @@ HEAD = ("Transactions  for account XXXX-1234\n"
         "Date,Time,Type,REF #,Description,Misc Fees,Amount\n")
 
 
+EXIT_SKIPPED = 3
+SKIPS: list[str] = []      # parts not run on this host; see gates.py "SKIPPED:"
+
 def stmt(*lines: str) -> bytes:
     return (HEAD + "\n".join(lines) + "\n").encode()
 
@@ -257,7 +260,10 @@ def case_xlsx():
     try:
         from openpyxl import Workbook
     except ImportError:
-        print("  SKIP xlsx: openpyxl not installed")
+        # Not a pass: the xlsx path is a real input format (openpyxl is in
+        # requirements.txt). Said, and the gate exits EXIT_SKIPPED.
+        SKIPS.append("xlsx statement parsing")
+        print("SKIPPED: xlsx statement parsing -- openpyxl is not installed (it is in requirements.txt)")
         return
     import io
     wb = Workbook()
@@ -305,8 +311,9 @@ def main() -> int:
         if len(FAILS) > before:
             for m in FAILS[before:]:
                 print(f"  FAIL {name}: {m}")
-    print(f"\nparser cases: {len(CASES)}, failures: {len(FAILS)}")
-    return 1 if FAILS else 0
+    print(f"\nparser cases: {len(CASES)}, failures: {len(FAILS)}"
+          + (f", not run: {', '.join(SKIPS)}" if SKIPS else ""))
+    return 1 if FAILS else (EXIT_SKIPPED if SKIPS else 0)
 
 
 sys.exit(main())

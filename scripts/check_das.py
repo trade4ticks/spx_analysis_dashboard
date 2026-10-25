@@ -1493,7 +1493,39 @@ def case_interface():
                          "the only outward sign a pushed feed gives")
 
 
+UNREADABLE_PROBE = r"""
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+real = pathlib.Path.is_file
+def is_file(self):
+    if self.name == ".env" and "Portfolio_Dashboard" in str(self):
+        raise PermissionError(13, "Permission denied", str(self))
+    return real(self)
+pathlib.Path.is_file = is_file
+import os
+os.environ["SCHWAB_ENV_FILE"] = "/root/Portfolio_Dashboard/.env"
+from live import config
+print("imported", config.PORT)
+"""
+
+
+def case_unreadable_env_candidate():
+    """An .env candidate that cannot be read is ABSENT, not fatal. The VPS
+    gate run (2026-10-25) died at import: the gates user cannot stat
+    /root/Portfolio_Dashboard/.env, and Path.is_file() raises
+    PermissionError rather than answering False. In a fresh interpreter,
+    so the reload cannot reset what the other cases configured."""
+    import subprocess
+    r = subprocess.run([sys.executable, "-c", UNREADABLE_PROBE, str(ROOT)],
+                       capture_output=True, text=True, timeout=60)
+    check(r.returncode == 0 and "imported" in r.stdout,
+          f"live.config died on an unreadable .env candidate: {(r.stderr or r.stdout).strip()[-300:]}")
+    check("not readable" in r.stderr,
+          "an unreadable candidate was skipped without saying so")
+
+
 CASES = [
+    ("an unreadable .env candidate is skipped", case_unreadable_env_candidate),
     ("order statuses", case_statuses),
     ("the real login banner", case_login_banner),
     ("#OrderServer is not a snapshot", case_order_server_line),

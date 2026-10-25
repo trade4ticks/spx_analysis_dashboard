@@ -1587,7 +1587,9 @@ a gate that could not run is a FAIL.
   before pushing, with `./.venv/Scripts/python.exe`.
 - **VPS:** after `git pull`,
   `sudo -u gates .venv/bin/python scripts/gates.py --vps --deploy` — runs only
-  `check_routes_smoke` and `check_template_render`. The VPS has no node and no Postgres
+  the `vps=True` gates: `check_routes_smoke`, `check_template_render`,
+  `check_market_calendar`, `check_oo_sweep`, `check_das` — each isolating its
+  parts, since nobody reads that output. The VPS has no node and no Postgres
   server binaries (the DB is elsewhere), so the SQL gate can never run there.
 
 One-time VPS setup (also in the `gates.py` docstring):
@@ -1624,11 +1626,30 @@ failures:
   ENV gap ("not run"), with the install named.
 **Structural, not accidents**: the gates come in two shapes. The CASES-loop
 ones (live hub, wall, DAS, broker, portfolio, replay, scalp fills) catch
-per case and survive; the straight-line `main()` ones (14 more besides check_oo_backtest) do not. And
-several PASS with a skip inside (`check_routes_smoke`'s API part without a
-DB, `check_scalp_fills`' xlsx case without openpyxl, `check_vendored` with a
-source absent). **Run `gates.py --slow`** — the slow gates are where two of
+per case and survive; the straight-line `main()` ones do not. Isolated
+since: `check_oo_backtest` and the VPS deploy gates (`check_routes_smoke`,
+`check_market_calendar`, `check_oo_sweep`); the other twelve rely on CRASH,
+by decision. **Run `gates.py --slow`** — the slow gates are where two of
 the four sat unseen.
+
+**A part not run is a SKIP, never a PASS (2026-10-25).** A gate that could
+not run one of its parts prints `SKIPPED: <what> -- <why>` and exits
+EXIT_SKIPPED (it must be `can_skip`); the table says "ran, except", the
+summary counts it and lists every part, and `--deploy` fails it. Three
+gates used to PASS that way: `check_routes_smoke` without a DB (and on the
+VPS its /run /zone without `SMOKE_METRIC` — it now finds a binned metric
+itself), `check_scalp_fills`' xlsx case, `check_vendored` with a source
+absent. The xlsx skip was the local venv missing `openpyxl`, which IS in
+requirements.txt — an environment gap reading as PASS. **Keep the dev venv
+at requirements.txt** (`pip install -r requirements.txt`; Jinja2 is pinned
+to 3.1.3); `sqlglot` is the one dev-only extra.
+
+`live/config.py` probes three `.env` candidates (Open_Interest's for the
+Polygon key, `SCHWAB_ENV_FILE` default `/root/Portfolio_Dashboard/.env` for
+the Schwab credentials — deliberate, one place to rotate them — and its
+own). An unreadable candidate is now skipped with a warning: `is_file()`
+raises PermissionError rather than answering False, which killed
+`check_das` at import for the `gates` user (2026-10-25).
 
 **`check_oo_offstate`** holds the OO page, with no new feature switched on,
 to a RECORDING made at 8f996e8 (before the train/test split):

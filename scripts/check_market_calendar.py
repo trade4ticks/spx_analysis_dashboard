@@ -29,19 +29,8 @@ def check(cond, msg: str) -> None:
         FAILURES.append(msg)
 
 
-def main() -> int:
-    try:
-        from app.oo_backtest import market_calendar as mc
-    except ImportError as exc:
-        print(f"  pandas_market_calendars is not installed: {exc}")
-        print("  install it before pulling:  "
-              "sudo /spx_analysis_dashboard/.venv/bin/pip install "
-              "'pandas_market_calendars>=5.0'")
-        return 1
-
-    print("exchange calendar (NYSE)")
-    check(mc.MARKET == "NYSE", "the market is NYSE, matching SPX cash hours")
-
+def _part_1(mc) -> None:
+    """The day that produced all of this."""
     # ── THE DAY THAT PRODUCED ALL OF THIS ─────────────────────────────────
     # index_ohlc holds a full VIX session and zero SPX bars for 2026-04-08.
     # The old rule called it "not an SPX session"; it was a trading day with
@@ -51,6 +40,9 @@ def main() -> int:
     check("2026-04-08" in mc.sessions("2026-04-01", "2026-04-30"),
           "and it appears in a month's session list")
 
+
+def _part_2(mc) -> None:
+    """Days that are not sessions."""
     # ── DAYS THAT ARE NOT SESSIONS ────────────────────────────────────────
     for day, what in [("2023-07-04", "Independence Day"),
                       ("2023-12-25", "Christmas"),
@@ -66,6 +58,9 @@ def main() -> int:
           "2021-07-05 is not a session (July 4th observed on the Monday)")
     check(mc.is_session("2021-07-06"), "but 2021-07-06 is")
 
+
+def _part_3(mc) -> None:
+    """Expected bars come from that day's own close."""
     # ── EXPECTED BARS COME FROM THAT DAY'S OWN CLOSE ──────────────────────
     # This is what replaces MIN_SESSION_BARS. A single floor tuned for full
     # days cannot see a short half-day; the close time can.
@@ -86,6 +81,9 @@ def main() -> int:
     check(all(d["open"] == "09:30" for d in tbl.values()),
           "every session opens 09:30, which the rollup's window assumes")
 
+
+def _part_4(mc) -> None:
+    """Completeness is a separate question."""
     # ── COMPLETENESS IS A SEPARATE QUESTION ───────────────────────────────
     # The calendar says whether it was a session; the data says whether a
     # series has usable values on it. is_complete never asks the first.
@@ -104,6 +102,9 @@ def main() -> int:
     check(mc.shortfall(75, 78) == 3 and mc.shortfall(80, 78) == 0,
           "shortfall counts the gap and floors at zero")
 
+
+def _part_5(mc) -> None:
+    """The range the deployment axis needs."""
     # ── THE RANGE THE DEPLOYMENT AXIS NEEDS ───────────────────────────────
     # index_ohlc starts 2017-01-03. The calendar has to reach further back or
     # the capital-deployed chart still cannot draw a 2013 strategy.
@@ -117,6 +118,9 @@ def main() -> int:
     check(all(len(d) == 10 and d[4] == '-' for d in long[:50]),
           "and are ISO date strings, which every caller compares as strings")
 
+
+def _part_6(mc) -> None:
+    """Pure and repeatable."""
     # ── PURE AND REPEATABLE ───────────────────────────────────────────────
     check(mc.sessions("2024-01-01", "2024-03-31")
           == mc.sessions("2024-01-01", "2024-03-31"),
@@ -132,6 +136,9 @@ def main() -> int:
     check(len(mc.sessions("2030-01-01", "2030-12-31")) > 240,
           "a future year resolves offline, from bundled rules")
 
+
+def _part_7(mc) -> None:
+    """Landing a date on a real session."""
     # ── LANDING A DATE ON A REAL SESSION ──────────────────────────────────
     check(mc.first_session_on_or_after("2023-07-04") == "2023-07-05",
           "a holiday resolves forward to the next session")
@@ -140,6 +147,9 @@ def main() -> int:
     check(mc.first_session_on_or_after("2023-07-08") == "2023-07-10",
           "a Saturday resolves to the Monday")
 
+
+def _part_8(mc) -> None:
+    """The report names the day."""
     # ── THE REPORT NAMES THE DAY ──────────────────────────────────────────
     # session_report is pure given the per-day bar counts and the calendar,
     # so the exact shape of 2026-04-08 can be asserted with no database: a
@@ -177,6 +187,9 @@ def main() -> int:
     check(rep["sessions"] == len(tbl) and "2026-04-08" in tbl,
           "and the day is counted as a session, not skipped")
 
+
+def _part_9(mc) -> None:
+    """Staleness is counted in sessions."""
     # ── STALENESS IS COUNTED IN SESSIONS ──────────────────────────────────
     # It used to be five CALENDAR days, which is what you pick when you do
     # not know which days were sessions: long enough to survive a holiday
@@ -209,6 +222,48 @@ def main() -> int:
     st = staleness(None, date(2023, 7, 4))
     check(st["stale"] and st["age_sessions"] is None,
           "no SPX bar at all is stale, with no age to report")
+
+
+# Every part, in order, each run on its own (2026-10-25): a VPS deploy gate
+# runs unattended, and these were one straight-line main(), so one
+# exception skipped every check after it. An exception is now a failure
+# naming the part, and the rest still run.
+PARTS = [
+    (_part_1, 'the day that produced all of this'),
+    (_part_2, 'days that are not sessions'),
+    (_part_3, "expected bars come from that day's own close"),
+    (_part_4, 'completeness is a separate question'),
+    (_part_5, 'the range the deployment axis needs'),
+    (_part_6, 'pure and repeatable'),
+    (_part_7, 'landing a date on a real session'),
+    (_part_8, 'the report names the day'),
+    (_part_9, 'staleness is counted in sessions'),
+]
+
+
+def main() -> int:
+    try:
+        from app.oo_backtest import market_calendar as mc
+    except ImportError as exc:
+        print(f"  pandas_market_calendars is not installed: {exc}")
+        print("  install it before pulling:  "
+              "sudo /spx_analysis_dashboard/.venv/bin/pip install "
+              "'pandas_market_calendars>=5.0'")
+        return 1
+
+    print("exchange calendar (NYSE)")
+    check(mc.MARKET == "NYSE", "the market is NYSE, matching SPX cash hours")
+
+
+    for fn, title in PARTS:
+        try:
+            fn(mc)
+        except Exception as exc:                          # noqa: BLE001
+            import traceback
+            print(f"  FAIL  part {title!r} RAISED {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-5:-1]:
+                print("        " + line)
+            FAILURES.append(f"{title} raised {type(exc).__name__} -- the rest of it did not run")
 
     print(f"\ncalendar cases: {len(FAILURES)} failed"
           if FAILURES else "\nPASS: exchange calendar")

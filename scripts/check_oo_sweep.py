@@ -463,13 +463,22 @@ def check_rank_memory() -> None:
                         f"gathered matrix alone ({took:.1f}s)")
 
 
+# Every part, in order, each run on its own (2026-10-25): a VPS deploy gate
+# runs unattended, and one exception used to skip every check after it. An
+# exception is now a FAIL naming the part, and the rest still run.
+CHECKS = [check_filenames, check_combine, check_ignored, check_mcp, check_endpoints, check_rank_memory]
+
+
 def main() -> int:
-    check_filenames()
-    check_combine()
-    check_ignored()
-    check_mcp()
-    check_endpoints()
-    check_rank_memory()
+    for fn in CHECKS:
+        try:
+            fn()
+        except Exception as exc:                          # noqa: BLE001
+            import traceback
+            print(f"  FAIL  {fn.__name__} RAISED {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-5:-1]:
+                print("        " + line)
+            FAILS.append(f"{fn.__name__} raised {type(exc).__name__} -- the rest of it did not run")
     print()
     if FAILS:
         print(f"FAIL: {len(FAILS)} check(s) failed")

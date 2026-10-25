@@ -1957,6 +1957,8 @@ def main() -> int:
         print(f"FAIL: {len(FAILS)} check(s) failed" + (f"; also not run: {'; '.join(NOT_RUN)}" if NOT_RUN else ""))
         return 1
     if NOT_RUN:
+        for what in NOT_RUN:
+            print(f"SKIPPED: {what} -- this host cannot run it")
         print(f"NOT FULLY RUN: everything that ran passed, but {len(NOT_RUN)} part(s) could not run here: "
               + "; ".join(NOT_RUN))
         return EXIT_SKIPPED

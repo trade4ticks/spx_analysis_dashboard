@@ -26,7 +26,19 @@ try:
     for candidate in (Path(__file__).resolve().parents[2] / "Open_Interest" / ".env",
                       Path(_schwab_env),
                       Path(__file__).resolve().parents[1] / ".env"):
-        if candidate.is_file():
+        # A probe: a candidate that cannot be read is ABSENT, and the loop
+        # moves on. is_file() swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so a
+        # PermissionError (the gates user meeting /root/Portfolio_Dashboard)
+        # used to end the import. Said, not silent: a credential file that
+        # exists but is unreadable explains a later "no Schwab credentials".
+        try:
+            readable = candidate.is_file()
+        except OSError as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "env file %s not readable (%s); skipped", candidate, exc.strerror or exc)
+            continue
+        if readable:
             load_dotenv(candidate)
     load_dotenv()
 except ImportError:                                    # pragma: no cover

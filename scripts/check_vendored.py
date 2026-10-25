@@ -128,6 +128,10 @@ FINGERPRINT = [
 ]
 
 
+EXIT_SKIPPED = 3
+# Copies whose source is absent on this host: not compared, so not a pass.
+SKIPS: list[str] = []
+
 def _symbol_source(path, symbol, rel=None):
     """Source text of one top-level def/class, via the AST.
 
@@ -189,7 +193,8 @@ def check_fingerprints() -> int:
             bad += 1
             continue
         if not there.is_file():
-            print("  SKIP " + label + ": source absent at " + str(there))
+            SKIPS.append(label)
+            print("SKIPPED: " + label + " -- source absent at " + str(there))
             continue
 
         seg = _symbol_source(there, fp["symbol"], fp["source"])
@@ -278,7 +283,8 @@ def main() -> int:
             bad += 1
             continue
         if not there.is_file():
-            print(f"  SKIP {rel}: source absent at {there}")
+            SKIPS.append(rel)
+            print(f"SKIPPED: {rel} -- source absent at {there}")
             continue
         a = here.read_bytes()
         b = there.read_bytes()
@@ -302,8 +308,9 @@ def main() -> int:
     bad += check_fingerprints()
 
     print(f"\nvendored files checked: {len(VERBATIM)} verbatim + "
-          f"{len(FINGERPRINT)} fingerprinted, drifted: {bad}")
-    return 1 if bad else 0
+          f"{len(FINGERPRINT)} fingerprinted, drifted: {bad}"
+          + (f", NOT COMPARED: {len(SKIPS)} (source absent)" if SKIPS else ""))
+    return 1 if bad else (EXIT_SKIPPED if SKIPS else 0)
 
 
 sys.exit(main())

@@ -67,16 +67,69 @@ def _db_env() -> tuple[bool, str]:
     return True, ""
 
 
-def main() -> int:
-    # DB-free static pass first: it is the only check here that does not
-    # need a live database, and it catches the class the others cannot.
-    static_bad = _check_undefined_names()
-    static_bad += _check_alpine_templates()
-    static_bad += _check_sql_placeholders()
+EXIT_SKIPPED = 3
+# Parts this run did not exercise, each printed as "SKIPPED: what -- why" and
+# making the gate exit EXIT_SKIPPED rather than PASS (gates.py lists them).
+SKIPS: list[str] = []
 
+
+def skipped(what: str, why: str) -> None:
+    SKIPS.append(what)
+    print(f"SKIPPED: {what} -- {why}")
+
+
+def main() -> int:
+    # EACH PART RUNS ON ITS OWN (2026-10-25). They were called in a row, so
+    # one exception ended the run: from 7499f72 the SQL-placeholder stubs
+    # raised, and the page sweep and factor-trades API -- this deploy gate's
+    # reason to exist -- never ran on the VPS for a month. An exception is
+    # now a failure naming the part, and the rest still run.
+    import traceback
+    results: dict[str, str] = {}
+
+    def part(name, fn, *a):
+        before = len(SKIPS)
+        try:
+            n = fn(*a)
+            results[name] = (f"{n} problem(s)" if n else "SKIPPED in part" if len(SKIPS) > before else "ok")
+            return n
+        except Exception as exc:                          # noqa: BLE001
+            print(f"  {name} RAISED {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-5:-1]:
+                print("    " + line)
+            results[name] = f"RAISED {type(exc).__name__}"
+            return 1
+
+    # DB-free static passes first: they need no database, and they catch the
+    # class the others cannot.
+    bad = part("undefined names", _check_undefined_names)
+    bad += part("alpine templates", _check_alpine_templates)
+    bad += part("sql placeholders", _check_sql_placeholders)
+    try:
+        app = _app()
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  app.main did not import: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        results["app import"] = f"RAISED {type(exc).__name__}"
+        bad += 1
+        app = None
+    real_db, why_not = _db_env()
+    if app is not None:
+        bad += part("page routes", _check_pages, app)
+        bad += part("factor-trades API", _check_factor_trades, app, real_db, why_not)
+    print()
+    print("routes smoke: " + "; ".join(f"{k} {v}" for k, v in results.items())
+          + (f"; not run: {', '.join(SKIPS)}" if SKIPS else ""))
+    if bad:
+        return 1
+    return EXIT_SKIPPED if SKIPS else 0
+
+
+def _app():
+    """app.main's FastAPI app, its lifespan neutralised when there is no DB."""
     import app.main as main_mod
 
-    real_db, why_not = _db_env()
+    real_db, _ = _db_env()
     if not real_db:
         # No DB: neutralise the lifespan so the page sweep still runs. main.py
         # does `from app.db import init_pool, close_pool`, so the names to
@@ -87,10 +140,12 @@ def main() -> int:
         # refuses to before init_pool has run -- which here it never does.
         # Unpatched, every no-DB run died at the first request from then on.
         main_mod.verify_pools = lambda: None
+    return main_mod.app
 
+
+def _check_pages(app) -> int:
+    """Every GET page route defined in app.main renders, with its nav."""
     from fastapi.testclient import TestClient
-
-    app = main_mod.app
 
     # Page routes = GET routes defined in app.main itself. That excludes the
     # /api/* routers and FastAPI's own /docs, /openapi.json.
@@ -161,9 +216,7 @@ def main() -> int:
 
     print()
     print(f"page routes healthy: {ok}/{ok + bad}")
-
-    api_bad = _check_factor_trades(app, real_db, why_not)
-    return 1 if (bad or api_bad or static_bad) else 0
+    return bad
 
 
 def _check_sql_placeholders() -> int:
@@ -445,11 +498,10 @@ def _check_factor_trades(app, real_db: bool, why_not: str) -> int:
 
     print()
     if not real_db:
-        print(f"factor-trades API: SKIPPED — {why_not}.")
-        print("  This check needs BOTH DATABASE_URL and OI_DATABASE_URL, because")
-        print("  app.db.init_pool requires the former and the endpoints need the")
-        print("  latter. With either missing the pool is stubbed out and every")
-        print("  endpoint would answer 'OI database not configured'.")
+        # Needs BOTH: app.db.init_pool requires DATABASE_URL and the
+        # endpoints need OI_DATABASE_URL. With either missing the pool is
+        # stubbed and every endpoint would answer 'OI database not configured'.
+        skipped("factor-trades API (/rules, /run, /zone)", f"{why_not}; it needs a real database")
         return 0
 
     bad = 0
@@ -477,14 +529,19 @@ def _check_factor_trades(app, real_db: bool, why_not: str) -> int:
                 for fam in g.get("families", []):
                     for rule in fam.get("rules", []):
                         key = key or rule.get("rule_key")
+            # /run takes only a metric with a bin20_<metric> column in tt_bins.
+            # SMOKE_METRIC chooses one; without it the gate FINDS one, the
+            # router's own way (_bin_columns), rather than skipping /run and
+            # /zone -- which, unset on the VPS, it silently did.
             metric = os.getenv("SMOKE_METRIC", "")
             if not metric:
-                print("  /run /zone  SKIPPED — set SMOKE_METRIC to a metric that has a")
-                print("      bin20_<metric> column in tt_bins (not merely a daily_features")
-                print("      column); /run rejects anything else with 'no stored bins'.")
-                return bad
+                metric, why = _a_binned_metric(client)
+                if not metric:
+                    skipped("/api/factor-trades/run and /zone", why)
+                    return bad
+                print(f"  (no SMOKE_METRIC: driving /run /zone with {metric!r}, the first binned metric)")
             if not key:
-                print("  /run /zone  SKIPPED — /rules returned no rule_key to drive them")
+                skipped("/api/factor-trades/run and /zone", "/rules returned no rule_key to drive them")
                 return bad
             payload = {"primary_metric": metric, "entry_anchor": "open",
                        "rule_keys": [key], "n_bins": 20}
@@ -503,6 +560,27 @@ def _check_factor_trades(app, real_db: bool, why_not: str) -> int:
                 print(f"  {path:28s} 200  keys={len(b)}  "
                       f"horizon_auto_added={b.get('horizon_auto_added')}")
     return bad
+
+
+def _a_binned_metric(client) -> tuple[str, str]:
+    """(metric, "") for the first metric with stored bins, or ("", why).
+    Runs on the app's own event loop (the TestClient portal), where its pool
+    lives."""
+    from app.db import get_oi_pool
+    from app.routers import factor_trades as ft
+
+    async def first():
+        pool = await get_oi_pool()
+        async with pool.acquire() as conn:
+            return sorted(await ft._bin_columns(conn))
+
+    try:
+        cols = client.portal.call(first)
+    except Exception as exc:                              # noqa: BLE001
+        return "", f"could not list tt_bins' bin20_ columns: {type(exc).__name__}: {exc}"
+    if not cols:
+        return "", "tt_bins has no bin20_ column"
+    return cols[0][len("bin20_"):], ""
 
 
 if __name__ == "__main__":
