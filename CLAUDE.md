@@ -1697,7 +1697,17 @@ when planted; `check_alpine_refs` (a template whose component could not be
 built), `scalp_dryrun --live` and `check_grid_equivalence` (no DSN) were
 converted. What it cannot see: a check that returns early SILENTLY, or one
 whose loop runs over nothing (check_alpine_syntax's zero pages) — gates
-print their counts for that reason; read them. **Keep the dev venv
+print their counts for that reason; read them.
+
+**Declared minimums (2026-10-25)**: every gate is in `COVERS` (a count it
+prints, or its number of "ok" lines, and the least it must reach — about
+three quarters of what it covered that day) or in `NO_NATURAL_COUNT` with a
+reason; a gate in neither stops the runner. Under the minimum, or the count
+line missing, is a FAIL. **On its first run it caught `node --check`
+checking 4 of 26 page scripts** — a hand-kept list under a note saying "the
+page JS parses"; it now globs `static/js`. When a gate legitimately grows or
+shrinks a lot, move its minimum in the same commit and say why. A small
+silent early return inside a large gate still passes; a large one does not. **Keep the dev venv
 at requirements.txt** (`pip install -r requirements.txt`; Jinja2 is pinned
 to 3.1.3); `sqlglot` is the one dev-only extra.
 

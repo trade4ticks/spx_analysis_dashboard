@@ -87,6 +87,17 @@ and exits EXIT_SKIPPED when nothing failed. The table shows SKIP with those
 parts named, the summary counts it as not run, and the end lists every
 skipped part. Before, these gates exited 0 and read as PASS.
 
+A GATE THAT COVERED NOTHING FAILS (2026-10-25). Every gate declares, in
+COVERS, the least it expects to cover -- pages, templates, cases, assertions
+-- read from a count it prints; or it is listed in NO_NATURAL_COUNT. A count
+under its minimum, or a count line that is missing, is a FAIL: a loop that
+ran over nothing (check_alpine_syntax checking zero pages for weeks) passes
+every assertion it never made. The minimums are rough on purpose -- about
+three quarters of what each covered when this was written -- to catch zero
+and collapses, not to police exact numbers. "ok" means the number of lines
+that start with "ok", for gates that print one per assertion. A gate in
+neither table stops the runner before anything runs.
+
 A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
 (no Postgres binaries, running as root). That is reported as SKIP, never PASS.
 Under --deploy it is a FAIL: a deploy check that did not exercise the SQL has
@@ -284,8 +295,10 @@ GATES = [
     _s("check_grid_equivalence.py", slow=True, can_skip=True),
 ]
 
-JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js",
-            "static/js/equities_live.js", "static/js/oo_backtest.js"]
+# EVERY page script, discovered. It was a hand-kept list of four while the
+# gate's note said "the page JS parses" over 26 files; the coverage minimum
+# (COVERS) is what caught it, on its first run (2026-10-25).
+JS_FILES = sorted(str(p.relative_to(ROOT)).replace("\\", "/") for p in (ROOT / "static" / "js").glob("*.js"))
 
 # A gate can fail because THIS HOST lacks something rather than because the
 # code is wrong. Those are reported as ENV, never as PASS -- but also not as
@@ -321,6 +334,78 @@ def crash_of(gate: str, err: str) -> str | None:
     where = f" (in {mine[-1][2]}, line {mine[-1][1]})" if mine else ""
     return last + where
 
+# The least each gate must cover: (regex with one number group, or "ok" for
+# the count of "ok" lines; minimum). See the docstring. Set from what each
+# covered on 2026-10-25 -- the comment after each is that count.
+COVERS = {
+    "check_alpine_syntax":       [(r"expressions checked: (\d+)", 5000)],          # 7,520
+    "check_alpine_refs":         [(r"templates checked\s*: (\d+)", 15)],           # 19
+    "check_asset_versions":      [(r"templates checked\s*: (\d+)", 15)],           # 23
+    "check_nav":                 [(r"nav: (\d+) pages rendered", 15)],              # 19
+    "check_rendered_assets":     [(r"pages rendered: (\d+)", 15)],                  # 19
+    "check_orphaned_handlers":   [(r"pages checked: (\d+)", 15)],                   # 23
+    "node --check":              [(r"files checked: (\d+)", 20)],                   # 26 (it checked 4)
+    "equity_iv_dryrun":          [(r"cases: (\d+)", 70), (r"sql statements checked: (\d+)", 280)],  # 87, 380
+    "check_tenor_retarget":      [(r"retarget cases : (\d+)", 20)],                 # 27
+    "scalp_dryrun":              [(r"metrics: (\d+), failures", 20)],               # 29
+    "check_scalp_fills":         [(r"parser cases: (\d+)", 9)],                     # 12
+    "check_scalp_metrics":       [(r"files scanned: (\d+)", 2)],                    # 2
+    "check_replay":              [(r"replay cases: (\d+)", 5)],                     # 6
+    "check_scatter_invariants":  [(r"threshold positions swept: (\d+)", 30)],       # 63
+    "check_market_calendar":     [("ok", 40)],                                      # 54
+    "check_oo_sweep":            [("ok", 55)],                                      # 74
+    "check_oo_backtest":         [("ok", 260)],                                     # 346
+    "check_portfolio":           [(r"portfolio cases: (\d+)", 8)],                  # 10
+    "check_portfolio_ui":        [(r"(\d+) clicked assertions", 200)],              # 265
+    "check_oo_notes_ui":         [(r"(\d+) clicked assertions", 16)],               # 21
+    "check_oo_sweep_ui":         [(r"(\d+) clicked assertions", 96)],               # 128
+    "check_oo_offstate":         [(r"(\d+) comparisons with the recording", 23)],   # 30
+    "check_oo_split_ui":         [(r"(\d+) assertions, failures", 130)],            # 176
+    "check_oo_market_sql":       [("ok", 150)],                                     # 197
+    "check_ft_population":       [("ok", 90)],                                      # 119
+    "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 16)],             # 21
+    "check_strategy_signal":     [("ok", 85)],                                      # 112
+    "check_strategy_signal_ui":  [(r"(\d+) assertions, failures", 100)],            # 137
+    "check_strategy_signal_sql": [("ok", 16)],                                      # 21
+    "check_live_hub":            [(r"hub cases: (\d+)", 20)],                       # 28
+    "check_wall":                [(r"wall cases: (\d+)", 20)],                      # 29
+    "check_live_axis":           [(r"band positions checked: (\d+) flat", 300)],    # 400
+    "check_broker":              [(r"broker cases: (\d+)", 13)],                    # 18
+    "check_das":                 [(r"DAS cases: (\d+)", 22)],                       # 29
+    "check_pool_wiring":         [(r"pool wiring cases: (\d+)", 7)],                # 9
+    "check_vendored":            [(r"vendored files checked: (\d+) verbatim", 3),
+                                  (r"\+ (\d+) fingerprinted", 1)],                  # 4 + 2
+    "check_chart_contract":      [(r"state contract: (\d+) required", 10)],         # 20
+    "check_routes_smoke":        [(r"page routes healthy: (\d+)/", 15)],            # 16
+    "check_template_render":     [(r": \d+/(\d+) pages", 15)],                     # 19
+}
+# Gates with no natural count: each asserts fixed properties of one thing.
+NO_NATURAL_COUNT = {
+    "check_scalp_filters":    "drives one page's request builder through fixed cases",
+    "check_live_layout":      "asserts the layout of one page",
+    "check_live_reconcile":   "asserts fixed behaviours of one pane",
+    "check_arrival_norm":     "asserts the edges of one bucketing function",
+    "check_grid_equivalence": "a targeted comparison run by hand with --sweep",
+}
+
+
+def coverage_shortfalls(name: str, out: str) -> list[str]:
+    """What the gate printed against what it declared it would cover."""
+    bad = []
+    for rx, least in COVERS.get(name, []):
+        if rx == "ok":
+            got, what = len(re.findall(r"^\s+ok\b", out, re.M)), '"ok" lines'
+        else:
+            m = re.findall(rx, out)
+            if not m:
+                bad.append(f"no count line matching {rx!r} -- it cannot show it covered anything")
+                continue
+            got, what = int(str(m[-1]).replace(",", "")), rx
+        if got < least:
+            bad.append(f"covered {got:,} ({what}), at least {least:,} expected")
+    return bad
+
+
 # Gates that need an argument this runner does not supply. Listed rather than
 # discovered, so a gate that starts needing one does not quietly become a skip.
 NEEDS_ARGS = {
@@ -353,6 +438,7 @@ def run_one(g: Gate, live: bool):
             codes.append(p.returncode)
             if p.returncode:
                 outs.append(f"{f}: {(p.stderr or '').strip().splitlines()[:1]}")
+        outs.append(f"files checked: {len(JS_FILES)}")
         return g, max(codes or [0]), "\n".join(outs), time.monotonic() - t0, ""
 
     argv = list(g.argv)
@@ -392,6 +478,11 @@ def last_line(text: str) -> str:
 
 
 def main() -> int:
+    undeclared = [g.name for g in GATES if g.name not in COVERS and g.name not in NO_NATURAL_COUNT]
+    if undeclared:
+        print("every gate must declare what it covers (COVERS) or why it has no count (NO_NATURAL_COUNT); "
+              "not declared: " + ", ".join(undeclared))
+        return 2
     args = [a for a in sys.argv[1:]]
     live = "--live" in args
     slow = "--slow" in args
@@ -476,6 +567,12 @@ def main() -> int:
         # THE CLASS-CLOSER (2026-10-25): exit 0 but the output says something
         # was skipped in its own words -- the shape of all four instances of
         # "PASS without running". Refused until the gate declares it.
+        # Ran, but over too little to mean anything (PASS, or SKIP of a part).
+        if status == "PASS" or (status == "SKIP" and parts):
+            short = coverage_shortfalls(g.name, out)
+            if short:
+                status, detail = "FAIL", "covered too little: " + "; ".join(short)
+                failures.append((g.name, (out + err)))
         if status == "PASS" and undeclared_skips(out):
             status, detail = "FAIL", ("says it skipped something but exited 0 (declare it as 'SKIPPED: what -- why' "
                                       "and exit EXIT_SKIPPED): " + undeclared_skips(out)[0])
@@ -528,4 +625,5 @@ def main() -> int:
     return 1 if failed or crashed else 0
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
