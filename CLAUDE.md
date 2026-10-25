@@ -1598,13 +1598,46 @@ sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
 sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
 ```
 
-**`check_oo_backtest` needs `surface_metrics_catalog.csv` at the repo
-root**, which is UNTRACKED (un-tracked in 586a44a with other swept-in files).
-Without it the gate stops at its surface-ranking step and reports FAIL, and
-every check after that point -- the surface ranking and added-row UI tests,
-the parsers -- silently never runs; it read as "a pre-existing failure" for
-a whole feature's worth of sessions (2026-10-18/19). Restore it with
-`git show 586a44a^:surface_metrics_catalog.csv > surface_metrics_catalog.csv`.
+**A CRASH is not a FAIL (2026-10-25).** `gates.py` reports a gate whose run
+ENDED in an uncaught exception as `CRASH`, naming the gate function it died
+in, counted apart from FAIL — because a crashed gate did not run whatever
+came after, and its last line reads like any other failure. The audit that
+added it found FOUR gates in that state, three of them read as "known"
+failures:
+- `check_oo_backtest` raised on a missing UNTRACKED fixture,
+  `surface_metrics_catalog.csv` (now committed), so the surface-ranking UI,
+  added rows, dropped scope, PARSERS, real MesoSim and surface stats never
+  ran through the whole sweeps feature (they passed when run, at every
+  commit of it). Its parts now run one by one (`CHECKS`): an exception is a
+  FAIL naming the part, and the run goes on.
+- `check_routes_smoke` (a VPS deploy gate) crashed in its SQL-placeholder
+  stubs from 7499f72 (2026-09-26, the Population builder): the page sweep
+  and the factor-trades API checks never ran on a deploy for a month. Behind
+  that, two more breaks: no-DB runs died on `verify_pools()` (since a2ce2be,
+  2026-08-31), and the active-nav regex missed the multi-line anchor of the
+  six-category nav (2026-09-24), so every page read as having no active link.
+- `check_chart_contract` (slow) failed from 2026-08-21 on two false
+  positives: typeof-guarded opt-in calls, and a Jinja macro (`stat_bar_core`)
+  read as an Alpine call because macro names were a hand-kept list.
+- `equity_iv_dryrun` has never run on the dev machine: `sqlglot` (a dev
+  tool, not in requirements) was missing, so it died at import. Now an
+  ENV gap ("not run"), with the install named.
+**Structural, not accidents**: the gates come in two shapes. The CASES-loop
+ones (live hub, wall, DAS, broker, portfolio, replay, scalp fills) catch
+per case and survive; the straight-line `main()` ones (14 more besides check_oo_backtest) do not. And
+several PASS with a skip inside (`check_routes_smoke`'s API part without a
+DB, `check_scalp_fills`' xlsx case without openpyxl, `check_vendored` with a
+source absent). **Run `gates.py --slow`** — the slow gates are where two of
+the four sat unseen.
+
+**`check_oo_offstate`** holds the OO page, with no new feature switched on,
+to a RECORDING made at 8f996e8 (before the train/test split):
+`scripts/fixtures/oo_offstate_baseline.json.gz` — the inputs (registry,
+catalog, payloads) and, per clicked step, the rendered DOM, every chart's
+data, the computed figures, the Export CSV text and the requests sent.
+Elements marked `data-gate-exclude="train-test-card"` are the one allowed
+difference. `--record` re-records; do that only on a commit whose page is
+the one to keep, and say why.
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

@@ -79,7 +79,13 @@ def main() -> int:
     bad = 0
 
     # 1. no receiver method calls
-    receiver_calls = sorted(set(re.findall(r"\bcmp\.(_?[A-Za-z][\w]*)\s*\(", mod)))
+    # A call behind `typeof cmp.X === 'function'` is an OPT-IN the module
+    # already handles the absence of (cutoffLineDateFor / seriesAxisFor,
+    # d152c51) -- exactly what this rule protects against, so not a breach.
+    # Before 2026-10-25 it counted, and the gate failed on them from
+    # 2026-08-21 on, read as a known failure.
+    guarded_fns = set(re.findall(r"typeof\s+cmp\.(_?[A-Za-z][\w]*)\s*===?\s*['\"]function['\"]", mod))
+    receiver_calls = sorted(set(re.findall(r"\bcmp\.(_?[A-Za-z][\w]*)\s*\(", mod)) - guarded_fns)
     if receiver_calls:
         print("FAIL: module calls methods on its receiver — these must route "
               "through window.FactorCharts instead:")
@@ -113,9 +119,15 @@ def main() -> int:
     macro_src = re.sub(r"\{#.*?#\}", "", macro_src, flags=re.S)
     macro_src = re.sub(r"\{%-?\s*if (cls_expr|click_expr).*?\{%-?\s*endif\s*-?%\}", "",
                        macro_src, flags=re.S)
+    # Jinja macros are server-side: their names (definitions and m.x( calls)
+    # are never Alpine calls. Read from the file rather than listed -- the
+    # list missed stat_bar_core (524a506, 2026-08-21) and the gate failed
+    # on it from then on.
+    jinja_macros = set(re.findall(r"\{%-?\s*macro\s+([_A-Za-z]\w*)\s*\(", macro_src))
     macro_calls = sorted(
         set(re.findall(r"(?<![\w.$])([_A-Za-z][\w]*)\s*\(", macro_src))
-        - {"if", "for", "heatmap_grid", "stat_box", "indent", "safe", "expression",
+        - jinja_macros
+        - {"if", "for", "indent", "safe", "expression",
            "var", "times", "fmtPct"})
 
     for comp, tpl in CONSUMERS.items():

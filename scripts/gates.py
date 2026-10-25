@@ -61,6 +61,18 @@ Then, on every deploy:
     sudo systemctl restart spx-dashboard.service       # never spx-live
     sudo -u gates .venv/bin/python scripts/gates.py --vps --deploy
 
+A CRASH IS NOT A FAIL (2026-10-25). A gate that died of an uncaught Python
+exception did not run whatever came after the line that raised, and a FAIL
+does not say so -- its last line is the exception, which reads like any other
+failure, and an old known failure gets read past. That happened three times:
+check_alpine_syntax checked zero pages for weeks; check_oo_backtest raised on
+a missing untracked fixture and its parser checks never ran for a whole
+feature; equity_iv_dryrun has never run on the dev machine (no sqlglot) and
+read as a known FAIL. So a run that ENDS in a traceback is reported as CRASH,
+naming the gate function it died in, and the summary counts crashes apart.
+The fix for a gate that crashes is to make the gate run its parts
+separately (check_oo_backtest's CHECKS), not to catch the exception here.
+
 A gate declared can_skip exits EXIT_SKIPPED (3) when this host cannot run it
 (no Postgres binaries, running as root). That is reported as SKIP, never PASS.
 Under --deploy it is a FAIL: a deploy check that did not exercise the SQL has
@@ -68,6 +80,7 @@ not checked the SQL.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -178,6 +191,10 @@ GATES = [
     # variant at ALL against stats.py per file, one variant == its own file.
     _s("check_oo_sweep_ui.py", can_skip=True,
        note="OO sweeps clicked: batch upload, ALL = mean per variant, one variant = its file"),
+    # The page with no new feature on is the page RECORDED at 8f996e8 (before
+    # the train/test split): DOM, charts, figures, export, requests.
+    _s("check_oo_offstate.py", can_skip=True,
+       note="OO page, split off = the recording (DOM, charts, figures, requests)"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
     # Strategy Signal: the decision rule, the percentile, the index/surface
@@ -259,7 +276,30 @@ JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js",
 ENV_GAPS = {
     "check_routes_smoke": ("No module named 'anthropic'",
                            "anthropic is not installed on this host"),
+    # A dev-machine tool, not an app dependency (not in requirements.txt).
+    # Without it the gate dies at import and runs NONE of its 87 cases.
+    "equity_iv_dryrun": ("No module named 'sqlglot'",
+                         "sqlglot is not installed (pip install sqlglot) -- none of its cases ran"),
 }
+
+
+def crash_of(gate: str, err: str) -> str | None:
+    """If the run ENDED in an uncaught exception, 'ExcType: msg (in fn)' --
+    fn being the innermost frame in the gate's own file, i.e. the part of
+    the gate that died -- else None. A traceback a gate prints and then
+    carries on from does not end its stderr, so it is not a crash."""
+    lines = [l.rstrip() for l in err.splitlines() if l.strip()]
+    if not lines or "Traceback (most recent call last):" not in err:
+        return None
+    last = lines[-1]
+    if not re.match(r"^[A-Za-z_][\w.]*(Error|Exception|Interrupt|Exit|Warning)\b", last):
+        return None
+    # The last traceback in the stream is the one that ended it.
+    tail = err[err.rfind("Traceback (most recent call last):"):]
+    frames = re.findall(r'File "([^"]+)", line (\d+), in (\S+)', tail)
+    mine = [f for f in frames if Path(f[0]).name == gate + ".py"]
+    where = f" (in {mine[-1][2]}, line {mine[-1][1]})" if mine else ""
+    return last[:140] + where
 
 # Gates that need an argument this runner does not supply. Listed rather than
 # discovered, so a gate that starts needing one does not quietly become a skip.
@@ -352,7 +392,7 @@ def main() -> int:
     results.sort(key=lambda r: order[r[0].name])
 
     width = max(len(g.name) for g, *_ in results)
-    passed = failed = skipped = 0
+    passed = failed = skipped = crashed = 0
     failures = []
 
     print()
@@ -375,6 +415,9 @@ def main() -> int:
                 failures.append((g.name, (out + err)))
             elif gap and gap[0] in (out + err):
                 status, detail = "ENV ", gap[1]
+            elif crash_of(g.name, err):
+                status, detail = "CRASH", "died: " + crash_of(g.name, err) + " -- what came after did not run"
+                failures.append((g.name, (out + err)))
             else:
                 status, detail = "FAIL", (last_line(out) or last_line(err)
                                           or f"exit {code}")
@@ -386,10 +429,12 @@ def main() -> int:
             detail = summary if summary else detail
         elif status == "FAIL":
             failed += 1
+        elif status == "CRASH":
+            crashed += 1
         else:
             skipped += 1
 
-        print(f"  {status}  {g.name:<{width}}  {secs:5.1f}s  {detail[:96]}")
+        print(f"  {status:<5} {g.name:<{width}}  {secs:5.1f}s  {detail[:120]}")
 
     # The full output of anything that failed, after the table, so the table
     # stays readable and the detail is still one screen away.
@@ -401,6 +446,8 @@ def main() -> int:
     bits = [f"{passed} passed"]
     if failed:
         bits.append(f"{failed} FAILED")
+    if crashed:
+        bits.append(f"{crashed} CRASHED (stopped part-way; the rest of each did not run)")
     if skipped:
         bits.append(f"{skipped} could not run")
     print("  " + ", ".join(bits))
@@ -418,7 +465,7 @@ def main() -> int:
         n = sum(1 for g in GATES if g.slow)
         print(f"    {n} slow gates omitted; add --slow to include them")
     print()
-    return 1 if failed else 0
+    return 1 if failed or crashed else 0
 
 
 sys.exit(main())

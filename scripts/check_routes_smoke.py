@@ -83,6 +83,10 @@ def main() -> int:
         # patch are the ones bound in app.main, not the originals in app.db.
         main_mod.init_pool = _noop
         main_mod.close_pool = _noop
+        # The lifespan asserts the pools were wired (a2ce2be, 2026-08-31) and
+        # refuses to before init_pool has run -- which here it never does.
+        # Unpatched, every no-DB run died at the first request from then on.
+        main_mod.verify_pools = lambda: None
 
     from fastapi.testclient import TestClient
 
@@ -139,7 +143,10 @@ def main() -> int:
                 bad += 1
                 continue
 
-            active = re.findall(r'<a class="nav-link on" href="([^"]+)"', html)
+            # The anchor spans lines since the six-category nav (2026-09-24):
+            # its href is on the next line, which a single space missed --
+            # every page read as having no active link.
+            active = re.findall(r'<a class="nav-link on"\s+href="([^"]+)"', html)
             if len(active) != 1:
                 print(f"  {path:26s} expected exactly 1 active nav link, found {len(active)}")
                 bad += 1
@@ -200,35 +207,38 @@ def _check_sql_placeholders() -> int:
     # out per shape instead of looped over one predicate.
     CELL_1F = "y = ANY($3::int[])"
     CELL_2F = "(y, z) IN (SELECT * FROM unnest($3::int[], $4::int[]))"
-    cases = [
-        ("_zone_count_sql 1f",          ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_1F, "")),
-        ("_zone_count_sql 1f +strike",  ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_1F,
-                                                           " AND tp.entry_price <= $4")),
-        ("_zone_count_sql 2f",          ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_2F, "")),
-        ("_zone_count_sql 2f +strike",  ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_2F,
-                                                           " AND tp.entry_price <= $5")),
-        # The random sampler fixes $1..$5 itself, so the strike filter is
-        # always $6 regardless of metric mode.
-        ("_random_zone_sql",            ft._random_zone_sql("SELECT 1", "")),
-        ("_random_zone_sql +strike",    ft._random_zone_sql("SELECT 1", " AND tp.entry_price <= $6")),
-        # The random-exit sampler fixes $1..$8 (adding the holding-period
-        # CDF arrays), so its strike filter is $9.
-        ("_random_exit_zone_sql",         ft._random_exit_zone_sql("SELECT 1", "t2.r1", "")),
-        ("_random_exit_zone_sql +strike", ft._random_exit_zone_sql("SELECT 1", "t2.r1",
-                                                                   " AND tp.entry_price <= $9")),
-        # exit-only reuses the ZONE query's arg list and appends four
-        # parameters after it, so its placeholder numbers are dynamic. These
-        # four cases are the four real arg-list lengths: 1f=3, 1f+strike=4,
-        # 2f=4, 2f+strike=5.
-        ("_random_exit_only_sql 1f",         ft._random_exit_only_sql(
-            "SELECT 1", "bt.x > 0", CELL_1F, "", "t2.r1", 4, 5, 6, 7)),
-        ("_random_exit_only_sql 1f +strike", ft._random_exit_only_sql(
-            "SELECT 1", "bt.x > 0", CELL_1F, " AND tp.entry_price <= $4", "t2.r1", 5, 6, 7, 8)),
-        ("_random_exit_only_sql 2f",         ft._random_exit_only_sql(
-            "SELECT 1", "bt.x > 0", CELL_2F, "", "t2.r1", 5, 6, 7, 8)),
-        ("_random_exit_only_sql 2f +strike", ft._random_exit_only_sql(
-            "SELECT 1", "bt.x > 0", CELL_2F, " AND tp.entry_price <= $5", "t2.r1", 6, 7, 8, 9)),
-    ]
+    # The population fragment (strike cap, metric filters) is a PopSQL from
+    # the ONE builder every statement uses (ft.Population, 2026-09-26); these
+    # stubs passed bare strings until 2026-10-25, so this check raised and
+    # the whole smoke gate -- the page sweep included -- died here for a
+    # month. NONE = no fragment; STRIKE(n) = the strike cap at $n;
+    # FILTERED(n) = the cap at $n and one metric filter at $n+1.
+    NONE = ft.PopSQL("", "", [])
+
+    def STRIKE(n):
+        return ft.Population(1000, []).sql(n - 1)
+
+    def FILTERED(n):
+        return ft.Population(1000, [("ret_5d", ">", 0.05)]).sql(n - 1)
+
+    cases = []
+    # zone() builds four shapes: the single-metric cell predicate consumes
+    # $3, the two-factor one $3 and $4, so the population lands after them.
+    for tag, cell, nxt in (("1f", CELL_1F, 4), ("2f", CELL_2F, 5)):
+        for ptag, ps in (("", NONE), (" +strike", STRIKE(nxt)), (" +filter", FILTERED(nxt))):
+            cases.append((f"_zone_count_sql {tag}{ptag}", ft._zone_count_sql("SELECT 1", "bt.x > 0", cell, ps)))
+    # The random sampler fixes $1..$5 itself; the random-exit sampler $1..$8.
+    for ptag, ps in (("", NONE), (" +strike", STRIKE(6)), (" +filter", FILTERED(6))):
+        cases.append((f"_random_zone_sql{ptag}", ft._random_zone_sql("SELECT 1", ps)))
+    for ptag, ps in (("", NONE), (" +strike", STRIKE(9)), (" +filter", FILTERED(9))):
+        cases.append((f"_random_exit_zone_sql{ptag}", ft._random_exit_zone_sql("SELECT 1", "t2.r1", ps)))
+    # exit-only reuses the ZONE query's arg list and appends four parameters
+    # after it, so its numbers follow that list's length.
+    for tag, cell, nxt in (("1f", CELL_1F, 4), ("2f", CELL_2F, 5)):
+        for ptag, ps in (("", NONE), (" +strike", STRIKE(nxt)), (" +filter", FILTERED(nxt))):
+            k = nxt + len(ps.args)
+            cases.append((f"_random_exit_only_sql {tag}{ptag}", ft._random_exit_only_sql(
+                "SELECT 1", "bt.x > 0", cell, ps, "t2.r1", k, k + 1, k + 2, k + 3)))
 
     bad = 0
     for label, sql in cases:

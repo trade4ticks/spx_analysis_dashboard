@@ -1921,24 +1921,39 @@ def check_export_csv() -> None:
           f"quotes and commas escaped, null as an empty cell ({o['quoted']!r})")
 
 
+# Every part, in order. Each runs on its own: an exception in one is a FAIL
+# naming it and the run goes on. Before 2026-10-25 they were called in a
+# row, so one exception ended the run -- a missing untracked fixture
+# (surface_metrics_catalog.csv) made the surface-ranking check raise, and the
+# five checks after it, the parsers among them, never ran for a whole
+# feature's development while the gate's FAIL read as a known old failure.
+CHECKS = [
+    "check_registry", "check_against_source", "check_binning", "check_stats_parity", "check_section_parity",
+    "check_auto_bins", "check_component_filters", "check_export_csv", "check_deployment_and_extra_stats",
+    "check_surface_ranking_ui", "check_surface_rows", "check_dropped_scope", "check_parsers",
+    "check_real_mesosim", "check_surface_stats",
+]
+# Files the checks read. Missing, they are a FAIL naming the file -- never an
+# exception halfway through a check.
+REQUIRED_FILES = ["surface_metrics_catalog.csv"]
+
+
 def main() -> int:
-    check_registry()
-    check_against_source()
-    check_binning()
-    check_stats_parity()
-    check_section_parity()
-    check_auto_bins()
-    check_component_filters()
-    check_export_csv()
-    check_deployment_and_extra_stats()
-    check_surface_ranking_ui()
-    check_surface_rows()
-    check_dropped_scope()
-    check_parsers()
-    check_real_mesosim()
-    check_surface_stats()
+    for f in REQUIRED_FILES:
+        check((ROOT / f).exists(), f"fixture present: {f}")
+    for name in CHECKS:
+        try:
+            globals()[name]()
+        except Exception as exc:                          # noqa: BLE001
+            import traceback
+            print(f"  FAIL  {name} RAISED {type(exc).__name__}: {exc}")
+            for line in traceback.format_exc().splitlines()[-5:-1]:
+                print("        " + line)
+            FAILS.append(f"{name} raised {type(exc).__name__} -- the rest of it did not run")
     print()
     if FAILS:
+        for m in FAILS:
+            print(f"  failed: {m[:160]}")
         print(f"FAIL: {len(FAILS)} check(s) failed" + (f"; also not run: {'; '.join(NOT_RUN)}" if NOT_RUN else ""))
         return 1
     if NOT_RUN:
