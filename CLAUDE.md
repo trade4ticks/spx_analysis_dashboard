@@ -292,6 +292,56 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   made column-major, as rankdata returns it — numpy's summation order
   follows the layout, and a C-ordered copy differed in the 16th digit).
 
+**Train / Test split** (in progress, 2026-10-25). Choose a filter threshold
+on the early period only, then see what the same filter does to a later
+period never looked at. Phases: **P0** gates (crash/skip honesty, the
+off-state recording) — done; **P1** split mechanics, the Train/Full view
+through Summary, sections, ranking (train only) — done; **P2** the Train vs
+Test panel; **P3** the cutoff line + the test pivot beside the parameter
+grid; **P4** saving cutoff + Split on/off (View never saves; restore to
+Train). The portfolio page is out of scope, by decision.
+- **Split OFF is the page as it was** — `check_oo_offstate` holds it to a
+  recording made at 8f996e8 (DOM, charts, figures, export, requests); the
+  sidebar card (`data-gate-exclude="train-test-card"`) holds only Off/On.
+  Everything new in the main column is inside `x-if` (renders nothing) or an
+  expression that returns the old text when off.
+- **The mechanism is ONE restriction in `recompute()`**: Train view
+  intersects the filtered rows with entry date ≤ cutoff, so every consumer
+  of `OB_DATA.idx` (stats, curves, sections, deployment, grid, parameter
+  sections, export) follows. Bin edges and slider extents stay from the
+  whole log (the user's decision: Train and Full histograms must stay
+  bar-for-bar comparable). Universe = date range + variant selection
+  (parameter filters); metric filters are what is tested.
+- **Counts over the whole VIEW leak test counts** — the status "of Y",
+  filter-option counts, "N trades with a value", coverage notes, an added
+  row's report, the row-scope cost, a variant's "(N trades)". In Train view
+  each comes from `trainCounts()` (cached per cutoff/variant/log/columns);
+  off, each returns exactly its old value. **A new count over all rows must
+  go through it**, or Train view shows a test figure.
+- **Not train-restricted, knowingly**: the Data source card and the topbar
+  label describe the FILE (its total trades, its date range, the load
+  report, market checks), and the date-range bounds are the log's.
+- **The ranking is train-only whenever the split is on, Full view
+  included** (`rankIdx()`), says "ranked on train only", and switching view
+  does not stale it. A test column in the 452-row list would be selection on
+  test.
+- **With nothing in view and the split on, the trade charts are destroyed**
+  (`clearTradeCharts`): a hidden canvas kept FULL-view data under Train.
+- Default cutoff: the entry date nearest 70% of the loaded log's entry span
+  (`obDefaultCutoff`, every variant), computed once on load; the date range,
+  filters and variant never move it. A malformed typed date is refused.
+- Measured at 288,000 rows (node, shipped functions): the split adds ~12–14
+  ms per recompute (filter pass 67 ms on the same data); Train-view counts
+  ~26 ms, once per cutoff/variant change.
+- **`check_oo_split_ui` is a DIFFERENTIAL**: the same log with every TEST
+  trade's P/L and exit reason changed (B) and with every test trade doubled
+  (C) must render Train view IDENTICALLY to the original — DOM, titles,
+  charts, figures, export, rank request (C: bar the file-size label) — and
+  must differ in Full view. Planted leaks (status total, option counts,
+  ranking in Full, no restriction, cutoff following the date filter) each
+  fail it. Headless Edge runs get a private `--user-data-dir` and a unique
+  page file.
+
 **Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
 loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes
 `PUT /strategies/{id}/notes` (`store.set_notes`) — the notes only, trimmed,

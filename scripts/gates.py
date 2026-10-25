@@ -211,6 +211,10 @@ GATES = [
     # the train/test split): DOM, charts, figures, export, requests.
     _s("check_oo_offstate.py", can_skip=True,
        note="OO page, split off = the recording (DOM, charts, figures, requests)"),
+    # The train/test split clicked. Its core is a differential: Train view
+    # must render identically when every TEST trade is changed.
+    _s("check_oo_split_ui.py", can_skip=True,
+       note="OO split clicked: Train view untouched by any test trade; counts, cutoff, ranking"),
     _s("check_oo_market_sql.py", can_skip=True,
        note="market SQL on a temp cluster; dev machine only (needs initdb)"),
     # Strategy Signal: the decision rule, the percentile, the index/surface

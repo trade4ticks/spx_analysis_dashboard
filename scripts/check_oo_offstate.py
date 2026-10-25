@@ -59,52 +59,9 @@ EXCLUDE = "train-test-card"
 PAGE_FILES = ["templates/oo_backtest.html", "templates/_nav.html", "templates/_macros.html", "static/js/oo_backtest.js",
               "static/js/backtest_core.js", "static/js/nav.js", "static/css"]
 
-DRIVER = r"""
-<script>
-window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 0);
-window.cancelAnimationFrame = id => clearTimeout(id);
-window.__errs = [];
-window.onerror = (m) => window.__errs.push('error: ' + m);
-window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
-(function () {
-  const ce = console.error;
-  console.error = (...a) => { window.__errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); };
-})();
-const FIX = __FIX__;
-const EXCLUDE = '__EXCLUDE__';
-window.__next = 'alone';
-window.__requests = [];
-window.__blobs = [];
-const realURL = URL.createObjectURL.bind(URL);
-URL.createObjectURL = (b) => { window.__blobs.push(b); return realURL(b); };
-HTMLAnchorElement.prototype.click = function () {};          // no download navigation
-window.fetch = async (u, init) => {
-  const url = String(u);
-  const reply = (status, body) => ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(body)) });
-  if (/\/registry$/.test(url)) return reply(200, { metrics: FIX.registry, coverage_error: null });
-  if (/\/strategies$/.test(url) && !(init && init.method === 'POST')) return reply(200, { strategies: [] });
-  if (/\/market-status$/.test(url)) return reply(200, { ok: false, error: 'stub' });
-  if (/\/parse-batch$/.test(url)) {
-    window.__requests.push({ url: 'parse-batch', files: init.body.getAll('files').map(f => f.name) });
-    return reply(200, FIX[window.__next]);
-  }
-  if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
-  if (/\/surface\/rank$/.test(url)) {
-    const body = JSON.parse(init.body);
-    window.__requests.push({ url: 'surface/rank', body });
-    return reply(200, { rows: FIX.rankRows, report: { no_bar: 0, with_bar: body.pnl.length, distinct_entries: body.bars.length },
-                        lookahead_confirmed: true });
-  }
-  window.__requests.push({ url, stub: 404 });
-  return reply(404, { detail: 'stub' });
-};
-
-window.addEventListener('load', () => setTimeout(async () => {
-  const wait = ms => new Promise(r => setTimeout(r, ms));
-  const until = async (cond, ms = 6000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
+SNAPSHOT_JS = r"""
   const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   const txt = el => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
-  const steps = [], notes = [];
 
   // The rendered DOM, one line per element: depth, tag, class, H when not
   // shown, input state, inline style, then its OWN text (child elements are
@@ -114,7 +71,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     const lines = [];
     const walk = (el, d) => {
       if (el.id === 'report' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'TEMPLATE') return;
-      if (el.getAttribute && el.getAttribute('data-gate-exclude') === EXCLUDE) { lines.push(d + '|EXCLUDED'); return; }
+      // The split's card: absent from the recording, so absent here too.
+      if (el.getAttribute && el.getAttribute('data-gate-exclude') === EXCLUDE) { window.__excluded++; return; }
       const own = [...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' ').replace(/\s+/g, ' ').trim();
       const bits = [d, el.tagName.toLowerCase(), el.getAttribute('class') || '', shown(el) ? '' : 'H'];
       if (el.tagName === 'INPUT') bits.push(`${el.type}=${el.type === 'file' ? '' : el.value}${el.checked ? ' checked' : ''}`);
@@ -155,9 +113,58 @@ window.addEventListener('load', () => setTimeout(async () => {
   }));
   // The ranking stamps its own clock time and duration; nothing else does.
   const scrub = lines => lines.map(l => l.replace(/\b\d\d:\d\d\b/g, 'HH:MM').replace(/\b\d+ ?ms\b/g, 'N ms'));
-  const snap = async (name, c) => {
+"""
+
+DRIVER = r"""
+<script>
+window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 0);
+window.cancelAnimationFrame = id => clearTimeout(id);
+window.__errs = [];
+window.onerror = (m) => window.__errs.push('error: ' + m);
+window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
+(function () {
+  const ce = console.error;
+  console.error = (...a) => { window.__errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); };
+})();
+const FIX = __FIX__;
+const EXCLUDE = '__EXCLUDE__';
+window.__next = 'alone';
+window.__excluded = 0;
+window.__requests = [];
+window.__blobs = [];
+const realURL = URL.createObjectURL.bind(URL);
+URL.createObjectURL = (b) => { window.__blobs.push(b); return realURL(b); };
+HTMLAnchorElement.prototype.click = function () {};          // no download navigation
+window.fetch = async (u, init) => {
+  const url = String(u);
+  const reply = (status, body) => ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(body)) });
+  if (/\/registry$/.test(url)) return reply(200, { metrics: FIX.registry, coverage_error: null });
+  if (/\/strategies$/.test(url) && !(init && init.method === 'POST')) return reply(200, { strategies: [] });
+  if (/\/market-status$/.test(url)) return reply(200, { ok: false, error: 'stub' });
+  if (/\/parse-batch$/.test(url)) {
+    window.__requests.push({ url: 'parse-batch', files: init.body.getAll('files').map(f => f.name) });
+    return reply(200, FIX[window.__next]);
+  }
+  if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
+  if (/\/surface\/rank$/.test(url)) {
+    const body = JSON.parse(init.body);
+    window.__requests.push({ url: 'surface/rank', body });
+    return reply(200, { rows: FIX.rankRows, report: { no_bar: 0, with_bar: body.pnl.length, distinct_entries: body.bars.length },
+                        lookahead_confirmed: true });
+  }
+  window.__requests.push({ url, stub: 404 });
+  return reply(404, { detail: 'stub' });
+};
+
+window.addEventListener('load', () => setTimeout(async () => {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const until = async (cond, ms = 6000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
+  const steps = [], notes = [];
+__SNAPSHOT__  const snap = async (name, c) => {
     await wait(300);
-    steps.push({ name, dom: scrub(dom()), charts: charts(), state: state(c) });
+    window.__excluded = 0;
+    const d = scrub(dom());
+    steps.push({ name, dom: d, charts: charts(), state: state(c), excluded: window.__excluded });
   };
   const drop = (names) => {
     const dt = new DataTransfer();
@@ -248,17 +255,25 @@ def inputs() -> dict:
 def drive(browser: str, fix: dict) -> dict:
     html = N.build_page()
     html = html.replace(N.DRIVER.replace("__SAVED__", json.dumps(N.SAVED)), "")
-    page = html.replace("</head>", DRIVER.replace("__FIX__", json.dumps(fix)).replace("__EXCLUDE__", EXCLUDE)
+    page = html.replace("</head>", DRIVER.replace("__SNAPSHOT__", SNAPSHOT_JS).replace("__FIX__", json.dumps(fix)).replace("__EXCLUDE__", EXCLUDE)
                         + "</head>", 1)
-    tmp = ROOT / "scripts" / "_oo_offstate.html"
+    import os
+    tmp = ROOT / "scripts" / f"_oo_offstate_{os.getpid()}.html"   # unique: a gate may run beside itself
     tmp.write_text(page, encoding="utf-8")
+    import tempfile
+    prof = tempfile.mkdtemp(prefix="edge-gate-")
     try:
         p = subprocess.run(
-            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1200",
+            # A PRIVATE profile per run: gates run six at a time, and a second
+            # Edge on the default profile hands its page to the first and exits
+            # with nothing -- "the page never reported".
+            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1200", f"--user-data-dir={prof}",
              "--dump-dom", "--virtual-time-budget=60000", tmp.as_uri()],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
     finally:
         tmp.unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(prof, ignore_errors=True)
     m = re.search(r'<pre id="report">(.*?)</pre>', p.stdout, re.S)
     if not m:
         raise RuntimeError("the page never reported -- it did not get that far")
@@ -341,6 +356,11 @@ def main() -> int:
         print(f"  FAIL  steps: {[s['name'] for s in got['steps']]} != {names}")
         fails += 1
     for w, g in zip(want["steps"], got["steps"]):
+        # The exclusion covers ONE element (the split's card) or none -- it
+        # must not be able to hide anything else.
+        ex = g.get("excluded", 0)
+        print(("  ok    " if ex <= 1 else "  FAIL  ") + f"{w['name']}: {ex} element(s) excluded (at most 1)")
+        fails += ex > 1
         for part in ("dom", "charts", "state"):
             if part == "dom":
                 same = w["dom"] == g["dom"]
@@ -361,7 +381,7 @@ def main() -> int:
                 print("          " + line)
         fails += not same
     print()
-    print(f"OO off-state: {len(names) * 3 + 2} comparisons with the recording, failures: {fails}")
+    print(f"OO off-state: {len(names) * 4 + 2} comparisons with the recording, failures: {fails}")
     return 1 if fails else 0
 
 

@@ -123,6 +123,10 @@
                       overflow-wrap:anywhere; }
     .ob-sweep-files div { padding:1px 0; }
     .ob-variant-bar .ob-card-body { padding:8px 12px; }
+    .ob-split .ob-split-gap { display:block; margin-top:8px; }
+    .ob-split .ob-split-note { margin-top:5px; line-height:1.4; }
+    .ob-split .ob-split-note b { color:var(--text); font-weight:600; }
+    .ob-split .ob-split-counts { margin-top:8px; font-size:12px; line-height:1.5; }
     .ob-variant-sel { flex:1; min-width:0; }
     .ob-variant-note { margin-top:4px; font-size:12px; line-height:1.4; }
     .ob-param-off .ob-checks { opacity:.45; }
@@ -295,6 +299,47 @@
         </div>
       </div>
 
+      <!-- Train / Test (2026-10-25). Choose a threshold on the train period,
+           then look at what it does to the test period. OFF -- the default --
+           this card holds the Off/On control and nothing else, and the rest
+           of the page is exactly what it was before the split existed
+           (check_oo_offstate; data-gate-exclude marks the one allowed
+           difference). Every binding here goes through splitOn() /
+           viewTrain() / viewFull(), which always return booleans. -->
+      <div class="ob-card" data-gate-exclude="train-test-card" x-show="loaded">
+        <div class="ob-card-hdr"><span class="ob-card-title">Train / Test</span></div>
+        <div class="ob-card-body ob-split">
+          <div class="ob-lbl">Split</div>
+          <div class="seg">
+            <div class="seg-btn" :class="{on: !splitOn()}" @click="setSplit(false)">Off</div>
+            <div class="seg-btn" :class="{on: splitOn()}" @click="setSplit(true)">On</div>
+          </div>
+          <template x-if="splitOn()">
+            <div>
+              <div class="ob-lbl ob-split-gap">View</div>
+              <div class="seg">
+                <div class="seg-btn" :class="{on: viewTrain()}" @click="setSplitView('train')">Train</div>
+                <div class="seg-btn" :class="{on: viewFull()}" @click="setSplitView('full')">Full</div>
+              </div>
+              <div class="ob-dim ob-split-note">Drives the whole page. <b>Train</b> while you choose a filter — no
+                test figure appears anywhere. <b>Full</b> reveals it.</div>
+              <label class="ob-lbl ob-split-gap" for="ob-cutoff">Cutoff — entry date</label>
+              <div class="ob-row">
+                <input id="ob-cutoff" class="ob-input ob-date" type="date" :value="split.cutoff"
+                       @change="setCutoff($event.target.value, $event.target)" aria-label="Train / test cutoff, by entry date">
+                <a href="#" class="ob-reset" x-show="split.cutoff !== split.auto" @click.prevent="resetCutoff()">reset</a>
+              </div>
+              <div class="ob-dim ob-split-note" x-text="cutoffNote()"></div>
+              <div class="ob-split-counts">
+                <template x-for="line in splitCountLines()" :key="line">
+                  <div x-text="line"></div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div class="ob-err" x-show="registryError" x-text="registryError"></div>
 
       <!-- Temporary: both ratio bases are built until one is chosen. -->
@@ -382,7 +427,7 @@
                       <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)"
                              :disabled="paramLocked(m)">
                       <span x-text="o.label"></span>
-                      <span class="ob-dim" x-text="o.count"></span>
+                      <span class="ob-dim" x-text="optCount(m, o)"></span>
                     </label>
                   </template>
                 </div>
@@ -420,7 +465,7 @@
               <option value="all" :selected="variantSel === 'all'" x-text="allLabel()"></option>
               <template x-for="v in sliceVariants()" :key="v.id">
                 <option :value="String(v.id)" :selected="variantSel === String(v.id)"
-                        x-text="v.label + ' (' + v.n.toLocaleString() + ' trades)'"></option>
+                        x-text="variantOption(v)"></option>
               </template>
             </select>
           </div>
@@ -430,7 +475,8 @@
 
       <!-- Filter status: how much of the log the page is showing. -->
       <div class="ob-status" x-show="loaded">
-        <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + viewN.toLocaleString() + ' trades'"></span>
+        <span x-text="'Showing ' + filteredCount.toLocaleString() + ' of ' + statusTotal().toLocaleString() + ' trades'"></span>
+        <template x-if="splitOn()"><span class="ob-dim" x-text="' · ' + periodWord()"></span></template>
         <span class="ob-dim" x-show="activeCount()" x-text="' · ' + activeCount() + ' filter' + (activeCount() === 1 ? '' : 's') + ' active'"></span>
         <a href="#" class="ob-reset" x-show="activeCount()" @click.prevent="resetAllFilters()">reset all filters</a>
         <button class="btn primary" style="margin-left:auto;" @click="exportCsv()" :disabled="!filteredCount"
@@ -438,11 +484,12 @@
       </div>
 
       <div class="ob-card" x-show="loaded && filteredCount === 0">
-        <div class="ob-empty">No trades match the current filters.</div>
+        <div class="ob-empty" x-text="emptyText()">No trades match the current filters.</div>
       </div>
 
       <div class="ob-card ob-summary" x-show="loaded && filteredCount > 0">
-        <div class="ob-card-hdr"><span class="ob-card-title">Summary</span></div>
+        <div class="ob-card-hdr"><span class="ob-card-title">Summary</span>
+          <template x-if="splitOn()"><span class="ob-card-sub" x-text="periodNote()"></span></template></div>
         <div class="ob-card-body ob-stats">
           <!-- row 1 -->
           {{ m.stat_box('# Trades', "stat('num_trades')") | indent(10) | safe }}
@@ -469,7 +516,7 @@
            first render and Chart.js can size them. -->
       <div class="ob-card" x-show="loaded && filteredCount > 0">
         <div class="ob-card-hdr"><span class="ob-card-title">Performance over time</span>
-          <span class="ob-card-sub">by close date</span></div>
+          <span class="ob-card-sub" x-text="splitOn() ? 'by close date · ' + periodWord() : 'by close date'">by close date</span></div>
         <div class="ob-card-body ob-sec-grid two">
           <div class="chart-box">
             <div class="chart-title">Cumulative P/L
@@ -554,7 +601,7 @@
       <div class="ob-card" x-show="loaded && filteredCount > 0 && gridShown()">
         <div class="ob-card-hdr">
           <span class="ob-card-title">Parameter grid</span>
-          <span class="ob-card-sub" x-text="grid ? grid.metric : ''"></span>
+          <span class="ob-card-sub" x-text="withPeriod(grid ? grid.metric : '')"></span>
         </div>
         <div class="ob-card-body">
           <div class="ob-row ob-pgrid-ctl">
@@ -644,6 +691,7 @@
       <div class="ob-card" x-show="loaded && filteredCount > 0">
         <div class="ob-card-hdr">
           <span class="ob-card-title">Surface metrics vs P/L</span>
+          <template x-if="splitOn()"><span class="ob-card-sub">ranked on train only</span></template>
           <span class="ob-card-sub" x-text="surfSubline()"></span>
         </div>
         <div class="ob-card-body">

@@ -44,6 +44,46 @@ const OB_DATA = { columns: null, n: 0, file: null, idx: [], sessions: [], conc: 
                   // (for saving); `vm` the per-variant figures in view.
                   full: null, files: [], vm: null };
 
+/* ── Train / Test split (2026-10-25) ──────────────────────────────────────
+ * Choose a filter threshold looking at the early period only, then see what
+ * the same filter does to a later period that was never looked at. A trade
+ * is TRAIN when its ENTRY date is on or before the cutoff, TEST after (a
+ * missing entry date is test: it cannot be shown to be train). The default
+ * cutoff is the entry date nearest OB_SPLIT_FRACTION of the calendar span
+ * between the loaded log's first and last entry -- computed ONCE per load,
+ * from every trade of it, and never again: a cutoff that moved with the
+ * date filter or the variant would change the train period under the work
+ * being done in it. */
+const OB_SPLIT_FRACTION = 0.7;
+
+function obDefaultCutoff(dates) {
+  const seen = new Set();
+  let lo = null, hi = null;
+  for (const d of dates || []) {
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    if (lo === null || d < lo) lo = d;
+    if (hi === null || d > hi) hi = d;
+  }
+  if (lo === null) return '';
+  const target = obDay(lo) + OB_SPLIT_FRACTION * (obDay(hi) - obDay(lo));
+  let best = null, gap = Infinity;
+  for (const d of seen) {
+    const g = Math.abs(obDay(d) - target);
+    if (g < gap || (g === gap && d < best)) { best = d; gap = g; }   // a tie goes to the earlier date
+  }
+  return best;
+}
+
+/* The rows of idx in one period: 'train' (entry <= cutoff) or 'test'. One
+ * pass; train and test of the same idx always sum to it. */
+function obInPeriod(cols, idx, cutoff, period) {
+  const d = cols.date_opened || [], out = [];
+  if (period === 'train') { for (const i of idx) if (d[i] && d[i] <= cutoff) out.push(i); }
+  else { for (const i of idx) if (!(d[i] && d[i] <= cutoff)) out.push(i); }
+  return out;
+}
+
 /* A scatter draws at most this many points. A 240,000-trade sweep drew all of
  * them in every section on every filter change: 16 s of Chart.js per
  * recompute, against 3 ms to filter. Every single log seen so far is below
@@ -657,6 +697,17 @@ document.addEventListener('alpine:init', () => {
     viewN: 0,
     filesOpen: false,
 
+    // The train/test split. OFF, the page is exactly what it was before the
+    // split existed (check_oo_offstate holds it to a recording). `view` is
+    // 'train' (every computation on train trades; no test figure anywhere)
+    // or 'full' (the full period, and the comparison). `cutoff` is set from
+    // the log on load (obDefaultCutoff) and then only by the user; `auto`
+    // keeps the default for the note and the reset.
+    split: { on: false, view: 'train', cutoff: '', auto: '' },
+    // {uTrain, uTest, fTrain, fTest}: the universe (date range + variant
+    // selection) and the filtered trades, per period. Null while off.
+    splitCounts: null,
+
     market: null,
     marketLoading: false,
     marketError: '',
@@ -809,6 +860,11 @@ document.addEventListener('alpine:init', () => {
 
     setTrades(payload) {
       OB_DATA.full = { columns: payload.columns, n: payload.n };
+      // The cutoff for THIS log, from every trade of it, once. A new log
+      // always opens in Train: arriving in Full would show test numbers
+      // before they were asked for.
+      const auto = obDefaultCutoff(payload.columns.date_opened);
+      this.split = { on: this.split.on, view: 'train', cutoff: auto, auto };
       OB_DATA.files = [];
       this.fileCount = 0;
       OB_DATA.logToken++;
@@ -1185,6 +1241,150 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* ── train / test split ────────────────────────────────────────────── */
+
+    // ALWAYS BOOLEANS. Alpine 3.14 sets a boolean attribute for `undefined`
+    // and reads a truthy object as on; 43312b4 disabled two filters for good
+    // that way. Every binding of this feature goes through these three.
+    splitOn() { return this.split.on === true; },
+    viewTrain() { return this.split.on === true && this.split.view === 'train'; },
+    viewFull() { return this.split.on === true && this.split.view === 'full'; },
+
+    setSplit(on) {
+      on = on === true;
+      if (this.split.on === on) return;
+      // Turning it on (or off and on again) always starts in Train.
+      this.split = { ...this.split, on, view: 'train' };
+      this.onFilterChange();
+    },
+    setSplitView(v) {
+      if (!this.splitOn() || (v !== 'train' && v !== 'full') || this.split.view === v) return;
+      this.split = { ...this.split, view: v };
+      this.onFilterChange();
+    },
+    /* A typed or picked date. Anything that is not a whole ISO date is
+     * refused and the field shows the cutoff in force again. */
+    setCutoff(raw, el) {
+      const v = String(raw || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v + 'T00:00:00Z'))) {
+        if (el) el.value = this.split.cutoff;
+        return;
+      }
+      if (v === this.split.cutoff) return;
+      this.split = { ...this.split, cutoff: v };
+      this.onFilterChange();
+    },
+    resetCutoff() { this.setCutoff(this.split.auto); },
+
+    cutoffNote() {
+      const sp = this.split;
+      if (!sp.auto) return '';
+      return sp.cutoff === sp.auto
+        ? `${Math.round(OB_SPLIT_FRACTION * 100)} / ${Math.round((1 - OB_SPLIT_FRACTION) * 100)} of this log's entry dates. ` +
+          'Fixed on load; does not move when you change the date filter or the variant.'
+        : `Default ${sp.auto} (${Math.round(OB_SPLIT_FRACTION * 100)} / ${Math.round((1 - OB_SPLIT_FRACTION) * 100)} of this log's entry dates).`;
+    },
+
+    /* The card's counts. Train view says TRAIN ONLY: a test count beside it
+     * is a test figure. */
+    splitCountLines() {
+      const c = this.splitCounts;
+      if (!c) return [];
+      const f = n => n.toLocaleString();
+      if (this.viewTrain()) return [`Unfiltered · Train ${f(c.uTrain)}`, `Filtered · Train ${f(c.fTrain)}`];
+      return [`Unfiltered · Train ${f(c.uTrain)} · Test ${f(c.uTest)}`, `Filtered · Train ${f(c.fTrain)} · Test ${f(c.fTest)}`];
+    },
+
+    /* The universe the split divides: the date range and the variant
+     * selection (the parameter filters choose which variants exist). The
+     * metric filters are what is being tested, so they are not in it. */
+    universeSpecs() {
+      return this.activeSpecs().filter(sp => sp.kind === 'date' || (sp.kind === 'set' && /^param__/.test(sp.column)));
+    },
+
+    /* The period the page shows, in words, with its dates: from the start of
+     * the date range to its end -- or to the cutoff, in Train view. */
+    periodWord() { return this.viewTrain() ? 'train period' : 'full period'; },
+    periodNote() {
+      if (!this.splitOn()) return '';
+      const from = this.filters.dateFrom || this.dateBounds.min, to = this.filters.dateTo || this.dateBounds.max;
+      if (!this.viewTrain()) return `full period · ${from} – ${to}`;
+      if (this.split.cutoff < from) return `train period · none (cutoff ${this.split.cutoff} is before ${from})`;
+      return `train period · ${from} – ${this.split.cutoff < to ? this.split.cutoff : to}`;
+    },
+    /* A header that already says something gets the period in front. */
+    withPeriod(text) { return this.splitOn() ? (text ? `${this.periodWord()} · ${text}` : this.periodWord()) : text; },
+
+    emptyText() {
+      if (this.viewTrain() && this.splitCounts && !this.splitCounts.uTrain) {
+        return `No trades in the train period — the cutoff (${this.split.cutoff}) is before the first trade in the date range.`;
+      }
+      return this.viewTrain() ? 'No trades in the train period match the current filters.' : 'No trades match the current filters.';
+    },
+
+    /* COUNTS THAT ARE NOT OF THE FILTERED ROWS -- "of Y", option counts,
+     * "N trades with a value", coverage, an added row's report, a variant's
+     * trades -- are taken over the WHOLE view, test included. In Train view
+     * each is taken over the train rows instead (one pass, cached until the
+     * cutoff, the variant, the log or a column changes); otherwise every
+     * caller below returns exactly what it returned before the split. */
+    trainCounts() {
+      void this.idxTick;
+      if (!this.viewTrain() || !OB_DATA.columns) return null;
+      const cols = OB_DATA.columns, full = OB_DATA.full;
+      const key = [OB_DATA.logToken, this.variantSel, this.split.cutoff, this.ratioBasis,
+                   this.surfRows.map(r => r.key + (cols[r.column] ? '+' : '')).join(',')].join('|');
+      if (OB_DATA.trainCounts && OB_DATA.trainCounts.key === key) return OB_DATA.trainCounts;
+      const all = Array.from({ length: OB_DATA.n }, (_, i) => i);
+      const tr = obInPeriod(cols, all, this.split.cutoff, 'train');
+      const out = { key, n: tr.length, range: {}, cat: {}, before: {}, valued: {}, variant: new Map() };
+      for (const m of this.filterDefs()) {
+        if (m.type === 'range') {
+          const v = cols[this.metricColumn(m)] || [];
+          out.range[m.key] = tr.reduce((k, i) => k + (v[i] !== null && v[i] !== undefined ? 1 : 0), 0);
+        } else {
+          // A parameter's counts come from every variant, as its options do.
+          const src = m.param && full ? full.columns : cols;
+          const rows = m.param && full ? obInPeriod(src, Array.from({ length: full.n }, (_, i) => i), this.split.cutoff, 'train') : tr;
+          const v = src[m.column] || [], cnt = new Map();
+          for (const i of rows) cnt.set(v[i], (cnt.get(v[i]) || 0) + 1);
+          out.cat[m.key] = cnt;
+        }
+        if (m.minDate) out.before[m.key] = tr.reduce((k, i) => k + (cols.date_opened[i] < m.minDate ? 1 : 0), 0);
+      }
+      for (const r of this.surfRows) {
+        const v = cols[r.column];
+        if (v) out.valued[r.key] = tr.reduce((k, i) => k + (v[i] !== null && v[i] !== undefined ? 1 : 0), 0);
+      }
+      if (full && full.columns.variant) {
+        const fr = obInPeriod(full.columns, Array.from({ length: full.n }, (_, i) => i), this.split.cutoff, 'train');
+        for (const i of fr) out.variant.set(full.columns.variant[i], (out.variant.get(full.columns.variant[i]) || 0) + 1);
+      }
+      OB_DATA.trainCounts = out;
+      return out;
+    },
+    statusTotal() { const t = this.trainCounts(); return t ? t.n : this.viewN; },
+    optCount(m, o) {
+      const t = this.trainCounts();
+      return t && t.cat[m.key] ? (t.cat[m.key].get(o.value) || 0) : o.count;
+    },
+    variantOption(v) {
+      const t = this.trainCounts();
+      const n = t ? (t.variant.get(v.id) || 0) : v.n;
+      return v.label + ' (' + n.toLocaleString() + ' trades)';
+    },
+
+    /* What the surface ranking is computed on: the filtered trades, and with
+     * the split on, ONLY their train part -- in Full view as well. A
+     * 452-metric list carrying test correlations is a list to scroll until
+     * one survives: selection on test. */
+    rankIdx() {
+      void this.idxTick;
+      const idx = OB_DATA.idx || [];
+      if (!this.splitOn() || !OB_DATA.columns) return idx;
+      return this.viewTrain() ? idx : obInPeriod(OB_DATA.columns, idx, this.split.cutoff, 'train');
+    },
+
     /* ── filters ───────────────────────────────────────────────────────── */
 
     /* Bounds and options from THE LOADED LOG, never static defaults: every
@@ -1347,7 +1547,19 @@ document.addEventListener('alpine:init', () => {
     recompute() {
       if (!OB_DATA.columns) return;
       const cols = OB_DATA.columns;
-      const idx = obApplyFilters(cols, OB_DATA.n, this.activeSpecs());
+      let idx = obApplyFilters(cols, OB_DATA.n, this.activeSpecs());
+      if (this.splitOn()) {
+        // The universe and the filtered trades, each cut at the cutoff by
+        // entry date. In Train view everything below runs on train alone.
+        const cut = this.split.cutoff;
+        const uni = obApplyFilters(cols, OB_DATA.n, this.universeSpecs());
+        const uTrain = obInPeriod(cols, uni, cut, 'train').length;
+        const train = obInPeriod(cols, idx, cut, 'train');
+        this.splitCounts = { uTrain, uTest: uni.length - uTrain, fTrain: train.length, fTest: idx.length - train.length };
+        if (this.viewTrain()) idx = train;
+      } else {
+        this.splitCounts = null;
+      }
       OB_DATA.idx = idx;
       this.idxTick++;
       this.filteredCount = idx.length;
@@ -1365,6 +1577,10 @@ document.addEventListener('alpine:init', () => {
         : pooled;
       OB_DATA.conc = obConcurrency(cols, idx, OB_DATA.sessions);
       OB_DATA.eq = OB_DATA.vm ? obMeanEquity(cols, idx, OB_DATA.vm) : obEquity(cols, idx);
+      // Nothing in view: the cards hide, but a canvas keeps what it last drew
+      // -- with the split on that can be FULL-view data under a Train view.
+      // Cleared, so no test figure sits in the page even unseen.
+      if (this.splitOn() && !idx.length) this.clearTradeCharts();
       this.renderPerformance(OB_DATA.eq);
       this.renderSections(idx);
       this.recomputeCapital();
@@ -1432,20 +1648,20 @@ document.addEventListener('alpine:init', () => {
     surfCoverage() {
       void this.idxTick;
       if (!OB_DATA.columns) return null;
-      return obCommonCoverage(OB_DATA.columns.date_opened, OB_DATA.idx, this.surfViewMetrics().map(m => m.min_date));
+      return obCommonCoverage(OB_DATA.columns.date_opened, this.rankIdx(), this.surfViewMetrics().map(m => m.min_date));
     },
 
     /* Identifies what a ranking was computed on: the filtered rows and the
      * common-coverage start. A different one now means the chart is stale. */
     surfSignature() {
       void this.idxTick;
-      const idx = OB_DATA.idx || [];
+      const idx = this.rankIdx();
       let h = 0;
       for (const i of idx) h = (h * 31 + i + 1) % 1000000007;
       const cov = this.surf.common ? (this.surfCoverage() || {}).commonStart : '';
       // The view's rows are numbered from 0 in every variant: without the
       // selection, two variants of equal size would share a signature.
-      return `${this.variantSel}:${idx.length}:${h}:${cov || ''}`;
+      return `${this.variantSel}:${idx.length}:${h}:${cov || ''}` + (this.splitOn() ? `:train<=${this.split.cutoff}` : '');
     },
     surfStale() { return !!this.surf.result && this.surf.result.sig !== this.surfSignature(); },
 
@@ -1454,11 +1670,16 @@ document.addEventListener('alpine:init', () => {
       await this.loadSurfaceCatalog();
       const cov = this.surfCoverage();
       const from = this.surf.common && cov ? cov.commonStart : null;
-      const body0 = obRankBody(OB_DATA.columns, OB_DATA.idx, from);
+      const rIdx = this.rankIdx();
+      if (this.splitOn() && !rIdx.length) {
+        this.surf.error = 'No filtered trades in the train period to rank.';
+        return;
+      }
+      const body0 = obRankBody(OB_DATA.columns, rIdx, from);
       const trades = body0.pnl;              // one per trade sent (for the counts below)
       const sig = this.surfSignature();
       const beforeEarliest = cov ? obCommonCoverage(OB_DATA.columns.date_opened,
-        OB_DATA.idx.filter(i => !from || (OB_DATA.columns.date_opened[i] || '') >= from),
+        rIdx.filter(i => !from || (OB_DATA.columns.date_opened[i] || '') >= from),
         (this.surf.catalog || []).map(m => m.min_date)).beforeEarliest : 0;
       this.surf.busy = true;
       this.surf.error = '';
@@ -1471,13 +1692,13 @@ document.addEventListener('alpine:init', () => {
         OB_DATA.rank = body.rows;
         const ns = body.rows.map(x => x.n).filter(n => n > 0);
         this.surf.result = {
-          sig, from, sent: trades.length, filtered: OB_DATA.idx.length, report: body.report,
+          sig, from, sent: trades.length, filtered: rIdx.length, report: body.report,
           beforeCoverage: beforeEarliest, nMin: ns.length ? Math.min(...ns) : 0, nMax: ns.length ? Math.max(...ns) : 0,
           at: new Date().toTimeString().slice(0, 5), ms: Math.round(performance.now() - t0),
           lookahead: body.lookahead_confirmed,
           // Several variants pooled: the same market day is in the sample
           // once per variant, so n -- and every p-value -- is inflated.
-          variants: OB_DATA.vm ? OB_DATA.vm.length : 1,
+          variants: this.splitOn() ? this.variantsIn(rIdx) : (OB_DATA.vm ? OB_DATA.vm.length : 1),
         };
         this.$nextTick(() => this.renderRanking());
       } catch (e) {
@@ -1494,7 +1715,7 @@ document.addEventListener('alpine:init', () => {
       if (!res) {
         const cov = this.surfCoverage();
         if (!cov || !cov.earliestStart) return '';
-        const n = OB_DATA.idx.length;
+        const n = this.rankIdx().length;
         return `${cov.beforeEarliest.toLocaleString()} of ${n.toLocaleString()} filtered trades entered before the metrics in view start (${cov.earliestStart}) and will have no value`;
       }
       const rep = res.report;
@@ -1539,6 +1760,13 @@ document.addEventListener('alpine:init', () => {
       return obRankView(OB_DATA.rank, { method: this.surf.method, form: this.surf.form,
                                         hidden: new Set(Object.keys(this.surf.hidden).filter(k => this.surf.hidden[k])),
                                         groups: this.surf.groups, other: this.surf.other });
+    },
+
+    /* Variants with a trade among idx (1 for a single log or one variant). */
+    variantsIn(idx) {
+      const v = OB_DATA.columns && OB_DATA.columns.variant;
+      if (!this.sweep || this.variantSel !== 'all' || !v) return 1;
+      return Math.max(1, new Set(idx.map(i => v[i])).size);
     },
 
     surfPooled() { return !!this.surf.result && this.surf.result.variants > 1; },
@@ -1902,7 +2130,8 @@ document.addEventListener('alpine:init', () => {
     idxWithout(m) {
       const own = m.column;
       const specs = this.activeSpecs().filter(sp => sp.column !== own);
-      return obApplyFilters(OB_DATA.columns, OB_DATA.n, specs);
+      const idx = obApplyFilters(OB_DATA.columns, OB_DATA.n, specs);
+      return this.viewTrain() ? obInPeriod(OB_DATA.columns, idx, this.split.cutoff, 'train') : idx;
     },
 
     /* What whole-page scope costs through the coverage gap: trades the page
@@ -2044,10 +2273,10 @@ document.addEventListener('alpine:init', () => {
       if (!d || !d.peak) return '';
       const cap = this.capital();
       if (d.pooled) {
-        return `mean peak ${d.peak.toFixed(1)} per variant` + (cap ? ` · ${obMoney(d.peak * cap)}` : '') +
-               ` (curve ${d.curvePeak.toFixed(1)})`;
+        return this.withPeriod(`mean peak ${d.peak.toFixed(1)} per variant` + (cap ? ` · ${obMoney(d.peak * cap)}` : '') +
+               ` (curve ${d.curvePeak.toFixed(1)})`);
       }
-      return `peak ${d.peak} on ${d.peakDay}` + (cap ? ` · ${obMoney(d.peak * cap)}` : '');
+      return this.withPeriod(`peak ${d.peak} on ${d.peakDay}` + (cap ? ` · ${obMoney(d.peak * cap)}` : ''));
     },
 
     deployNote() {
@@ -2121,7 +2350,8 @@ document.addEventListener('alpine:init', () => {
 
     rangeSummary(m) {
       const r = this.rangeOf(m);
-      return r ? `${r.n.toLocaleString()} trades with a value · data ${obFmt(r.min, m.format)} … ${obFmt(r.max, m.format)}` : '';
+      const t = this.trainCounts(), n = t && t.range[m.key] !== undefined ? t.range[m.key] : (r ? r.n : 0);
+      return r ? `${n.toLocaleString()} trades with a value · data ${obFmt(r.min, m.format)} … ${obFmt(r.max, m.format)}` : '';
     },
 
     /* ── summary stats ─────────────────────────────────────────────────── */
@@ -2258,6 +2488,8 @@ document.addEventListener('alpine:init', () => {
      * drop these too -- said before it happens, not discovered after. */
     tradesBeforeCoverage(m) {
       if (!this.loaded || !m.minDate || !OB_DATA.columns) return 0;
+      const t = this.trainCounts();
+      if (t && t.before[m.key] !== undefined) return t.before[m.key];
       let k = 0;
       for (const d of OB_DATA.columns.date_opened) if (d && d < m.minDate) k++;
       return k;
@@ -2317,9 +2549,13 @@ document.addEventListener('alpine:init', () => {
       const s = this.sections[m.key];
       const col = this.columnLabel(m);
       if (m.removable && m.report && (!s || !s.valued)) {
-        return `${m.report.withValue.toLocaleString()} of ${m.report.trades.toLocaleString()} trades in the log have a value`;
+        const t = this.trainCounts();
+        if (t && t.valued[m.key] !== undefined) {
+          return this.withPeriod(`${t.valued[m.key].toLocaleString()} of ${t.n.toLocaleString()} train trades have a value`);
+        }
+        return this.withPeriod(`${m.report.withValue.toLocaleString()} of ${m.report.trades.toLocaleString()} trades in the log have a value`);
       }
-      if (!s || !s.valued) return col;
+      if (!s || !s.valued) return this.withPeriod(col);
       const of = s.valued === this.filteredCount ? '' : ` of ${this.filteredCount.toLocaleString()}`;
       // An auto-binned metric names its step: two logs with different steps
       // are not bar-for-bar comparable, and this is where that shows.
@@ -2327,7 +2563,7 @@ document.addEventListener('alpine:init', () => {
         ? ` · ${this.stepText(m)} bins (auto)` : '';
       const cover = (m.removable && m.minDate ? ` · data from ${m.minDate}` : '') +
         (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m) ? ' · row filter applied' : '');
-      return `${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}${cover}`;
+      return this.withPeriod(`${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}${cover}`);
     },
 
     stepText(m) {
@@ -2492,6 +2728,11 @@ document.addEventListener('alpine:init', () => {
     /* Create a section chart, or update it in place. A canvas Alpine has
      * replaced is a different element: that chart is destroyed, not updated
      * into a detached node. */
+    clearTradeCharts() {
+      for (const k of ['cum', 'dd', 'deploy']) if (OB_CHARTS[k]) { OB_CHARTS[k].destroy(); OB_CHARTS[k] = null; }
+      for (const [id, ch] of Object.entries(OB_CHARTS.sec)) { ch.destroy(); delete OB_CHARTS.sec[id]; }
+    },
+
     upsertChart(id, cfg) {
       const el = document.getElementById(id);
       const old = OB_CHARTS.sec[id];
