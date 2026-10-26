@@ -370,6 +370,7 @@ async def list_saved(pool=Depends(get_pool)):
 @router.post("/strategies")
 async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes: str = Form(""),
                      replace: bool = Form(False), capital_per_position: str = Form(""),
+                     split_on: str = Form("false"), split_cutoff: str = Form(""),
                      pool=Depends(get_pool)):
     filename = file.filename or ""
     content = await file.read()
@@ -384,7 +385,8 @@ async def save_saved(file: UploadFile = File(...), name: str = Form(...), notes:
             trade_count=int(len(df)),
             date_min=dates_open.min().date() if len(dates_open) else None,
             date_max=dates_close.max().date() if len(dates_close) else None,
-            replace=replace, capital_per_position=capital_per_position)
+            replace=replace, capital_per_position=capital_per_position,
+            split_on=split_on, split_cutoff=split_cutoff)
     except store.NameTaken as exc:
         return JSONResponse(status_code=409, content={"detail": str(exc), "existing_id": exc.existing_id})
     except ValueError as exc:
@@ -418,6 +420,7 @@ def recorded_sweep(sw: dict) -> dict:
 @router.post("/strategies/sweep")
 async def save_saved_sweep(files: list[UploadFile] = File(...), name: str = Form(...), notes: str = Form(""),
                            replace: bool = Form(False), capital_per_position: str = Form(""),
+                           split_on: str = Form("false"), split_cutoff: str = Form(""),
                            pool=Depends(get_pool)):
     read = await _read_parts(files)
     if len(read) < 2:
@@ -432,7 +435,8 @@ async def save_saved_sweep(files: list[UploadFile] = File(...), name: str = Form
             sweep=recorded_sweep(sw), trade_count=int(len(df)),
             date_min=dates_open.min().date() if len(dates_open) else None,
             date_max=dates_close.max().date() if len(dates_close) else None,
-            replace=replace, capital_per_position=capital_per_position)
+            replace=replace, capital_per_position=capital_per_position,
+            split_on=split_on, split_cutoff=split_cutoff)
     except store.NameTaken as exc:
         return JSONResponse(status_code=409, content={"detail": str(exc), "existing_id": exc.existing_id})
     except ValueError as exc:
@@ -495,6 +499,19 @@ async def load_saved(strategy_id: int, request: Request, pool=Depends(get_pool))
 async def set_saved_capital(strategy_id: int, body: dict = Body(...), pool=Depends(get_pool)):
     try:
         saved = await store.set_capital(pool, strategy_id, body.get("capital_per_position"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if saved is None:
+        raise HTTPException(404, f"No saved strategy with id {strategy_id}.")
+    return {"strategy": saved}
+
+
+@router.put("/strategies/{strategy_id}/split")
+async def set_saved_split(strategy_id: int, body: dict = Body(...), pool=Depends(get_pool)):
+    """The train/test split of a loaded strategy -- only from the page's
+    explicit Save, never as the cutoff is moved."""
+    try:
+        saved = await store.set_split(pool, strategy_id, body.get("split_on"), body.get("split_cutoff"))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if saved is None:

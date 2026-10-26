@@ -127,6 +127,7 @@
     .ob-split .ob-split-note { margin-top:5px; line-height:1.4; }
     .ob-split .ob-split-note b { color:var(--text); font-weight:600; }
     .ob-split .ob-split-counts { margin-top:8px; font-size:12px; line-height:1.5; }
+    .ob-split .ob-split-save { margin-top:8px; gap:8px; }
     /* Train vs Test: periods as rows, stats as columns; the existing type
        scale, blue / pink for lift, a rule between the two periods. */
     .ob-tt .ob-card-sub { white-space:normal; text-align:right; max-width:60%; }
@@ -359,6 +360,16 @@
               </div>
             </div>
           </template>
+          <!-- P4: a LOADED saved strategy whose split differs from what it
+               holds. Saved only by this button -- never as the cutoff moves. -->
+          <template x-if="splitUnsaved()">
+            <div class="ob-row ob-split-save">
+              <span class="ob-dim">unsaved</span>
+              <button class="btn" @click="saveSplit()" :disabled="splitBusy === true"
+                      x-text="splitBusy ? 'Saving…' : 'Save'"></button>
+            </div>
+          </template>
+          <template x-if="!!splitMsg"><div class="ob-err" x-text="splitMsg"></div></template>
         </div>
       </div>
 

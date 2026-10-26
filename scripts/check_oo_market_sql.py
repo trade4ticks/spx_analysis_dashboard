@@ -311,6 +311,7 @@ async def run(dsn: str) -> None:
         await check_end_to_end(pool)
         await check_saved_strategies(pool)
         await check_saved_sweeps(pool)
+        await check_saved_split(pool)
         await check_portfolio_profiles(pool)
         await check_surface(pool)
         await check_surface_sweep_scale(pool)
@@ -705,6 +706,96 @@ async def check_saved_sweeps(pool) -> None:
             left = await conn.fetchval("SELECT count(*) FROM oo_backtest_strategy_files WHERE strategy_id = $1", did)
         check(left == 0, "deleting a sweep deletes its files")
         await c.delete(f"/api/oo-backtest/strategies/{sid}")
+
+
+async def check_saved_split(pool) -> None:
+    """The train/test split saved with a strategy (P4), through the real
+    endpoints on this database: an upload's Save carries split_on and the
+    cutoff, for a single log and a sweep; a load returns them; the explicit
+    PUT changes only them and leaves the list order alone; a strategy saved
+    BEFORE the columns existed reads Off with no cutoff (the page then
+    computes its default); bad values are refused; a missing id is a 404."""
+    print("saved split (endpoints, this database)")
+    import gzip as _gz
+    import io as _io
+
+    import httpx
+    from fastapi import FastAPI
+
+    from app.db import get_pool
+    from app.oo_backtest import store
+    from app.routers import oo_backtest as R
+
+    app = FastAPI()
+    app.include_router(R.router, prefix="/api/oo-backtest")
+    app.dependency_overrides[get_pool] = lambda: pool
+    hdr = ["Date Opened", "Time Opened", "Date Closed", "Time Closed", "P/L", "Legs", "Premium"]
+
+    def oo(rows):
+        out = _io.StringIO()
+        pd.DataFrame(rows, columns=hdr).to_csv(out, index=False)
+        return out.getvalue().encode()
+    one = oo([["2023-07-03", "12:30:00", "2023-07-05", "15:59:00", 100, "x", 1],
+              ["2023-07-10", "10:00:00", "2023-07-12", "15:59:00", -40, "x", 1]])
+    sweep = {"sp_dte7.csv": oo([["2023-07-03", "10:00:00", "2023-07-05", "15:59:00", 10, "x", 1]]),
+             "sp_dte14.csv": oo([["2023-07-06", "10:00:00", "2023-07-10", "15:59:00", -5, "x", 1]])}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=60) as c:
+        r = await c.post("/api/oo-backtest/strategies", files={"file": ("split.csv", one)},
+                         data={"name": "split on", "split_on": "true", "split_cutoff": "2023-07-05"})
+        sv = r.json().get("strategy", {}) if r.status_code == 200 else {}
+        check(r.status_code == 200 and sv.get("split_on") is True and sv.get("split_cutoff") == "2023-07-05",
+              f"an upload's Save stores split_on and the cutoff ({r.status_code} {sv.get('split_on')} {sv.get('split_cutoff')})")
+        sid = sv.get("id")
+        r = await c.post("/api/oo-backtest/strategies", files={"file": ("plain.csv", one)}, data={"name": "split off"})
+        off = r.json().get("strategy", {})
+        check(off.get("split_on") is False and off.get("split_cutoff") is None,
+              "a Save without them stores Off and no cutoff (the page default)")
+        parts = [("files", (n, _gz.compress(b))) for n, b in sweep.items()]
+        r = await c.post("/api/oo-backtest/strategies/sweep", files=parts,
+                         data={"name": "split sweep", "split_on": "true", "split_cutoff": "2023-07-04"})
+        ss = r.json().get("strategy", {})
+        check(r.status_code == 200 and ss.get("split_on") is True and ss.get("split_cutoff") == "2023-07-04",
+              "a sweep's Save stores them too")
+
+        r = await c.get(f"/api/oo-backtest/strategies/{sid}/load")
+        saved = r.json().get("saved", {}) if r.status_code == 200 else {}
+        check(saved.get("split_on") is True and saved.get("split_cutoff") == "2023-07-05",
+              f"a load returns them on `saved` ({saved.get('split_on')}, {saved.get('split_cutoff')})")
+        r = await c.get(f"/api/oo-backtest/strategies/{ss.get('id')}/load")
+        check(r.status_code == 200 and r.json().get("saved", {}).get("split_cutoff") == "2023-07-04",
+              "so does a sweep's load")
+
+        before = sv
+        r = await c.put(f"/api/oo-backtest/strategies/{sid}/split", json={"split_on": False, "split_cutoff": "2023-07-07"})
+        moved = r.json().get("strategy", {}) if r.status_code == 200 else {}
+        check(r.status_code == 200 and moved.get("split_on") is False and moved.get("split_cutoff") == "2023-07-07"
+              and moved.get("updated_at") == before.get("updated_at") and moved.get("notes") == before.get("notes")
+              and moved.get("file_sha256") == before.get("file_sha256"),
+              "the explicit PUT changes only the split; updated_at (the list order) is untouched")
+        r = await c.put(f"/api/oo-backtest/strategies/{sid}/split", json={"split_on": True, "split_cutoff": None})
+        check(r.status_code == 200 and r.json()["strategy"]["split_cutoff"] is None,
+              "a null cutoff clears it back to the page default")
+        for body, why in (({"split_on": "maybe"}, "split_on neither true nor false"),
+                          ({"split_on": True, "split_cutoff": "2023-13-01"}, "an impossible date"),
+                          ({"split_on": True, "split_cutoff": 20230701}, "a number for a date"),
+                          ({"split_on": 1}, "1 for true")):
+            r = await c.put(f"/api/oo-backtest/strategies/{sid}/split", json=body)
+            check(r.status_code == 400, f"refused (400): {why}")
+        r = await c.put("/api/oo-backtest/strategies/999999/split", json={"split_on": True})
+        check(r.status_code == 404, "a missing id: 404")
+        r = await c.post("/api/oo-backtest/strategies", files={"file": ("bad.csv", one)},
+                         data={"name": "bad cutoff", "split_on": "true", "split_cutoff": "not a date"})
+        check(r.status_code == 400, "an upload's Save with a bad cutoff is refused, nothing saved")
+
+    # SAVED BEFORE THE COLUMNS EXISTED: drop them, as the VPS table is today,
+    # with a row in it; ensure_table puts them back and the row reads Off with
+    # no cutoff -- the page computes the 70% default for it.
+    async with pool.acquire() as conn:
+        await conn.execute(f"ALTER TABLE {store.TABLE} DROP COLUMN split_on, DROP COLUMN split_cutoff")
+    lst = await store.list_strategies(pool)
+    legacy = next(x for x in lst if x["name"] == "split on")
+    check(legacy["split_on"] is False and legacy["split_cutoff"] is None,
+          "a strategy saved before the columns existed reads Off with no cutoff (the default)")
 
 
 async def check_saved_strategies(pool) -> None:

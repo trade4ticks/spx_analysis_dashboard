@@ -877,6 +877,11 @@ document.addEventListener('alpine:init', () => {
     // written back (PUT .../capital) so a reload keeps it.
     capitalInput: String(OB_DEFAULT_CAPITAL),
     capitalMsg: '',
+    // What the LOADED saved strategy holds for the split ({on, cutoff}), to
+    // tell an unsaved change; null for an upload (its Save box saves it).
+    splitSaved: null,
+    splitBusy: false,
+    splitMsg: '',
     autoSteps: {},     // registry key -> step of that metric's auto bins for this log
 
     // Surface metrics ranking. Rank rows live in OB_DATA.rank; `result` is the
@@ -984,7 +989,16 @@ document.addEventListener('alpine:init', () => {
       // always opens in Train: arriving in Full would show test numbers
       // before they were asked for.
       const auto = obDefaultCutoff(payload.columns.date_opened);
-      this.split = { on: this.split.on, view: 'train', cutoff: auto, auto };
+      // A SAVED strategy restores its split (P4): on/off and its cutoff --
+      // NULL, as every strategy saved before these columns has, means the
+      // default -- and ALWAYS opens in Train. An upload keeps the page's
+      // on/off with this log's default cutoff.
+      const sv = payload.saved;
+      const savedOn = !!(sv && sv.split_on === true), savedCut = (sv && sv.split_cutoff) || auto;
+      this.split = sv ? { on: savedOn, view: 'train', cutoff: savedCut, auto }
+                      : { on: this.split.on, view: 'train', cutoff: auto, auto };
+      this.splitSaved = sv ? { on: savedOn, cutoff: savedCut } : null;
+      this.splitMsg = '';
       OB_DATA.files = [];
       this.fileCount = 0;
       OB_DATA.logToken++;
@@ -1345,6 +1359,9 @@ document.addEventListener('alpine:init', () => {
         fd.append('name', this.saveName);
         fd.append('notes', this.saveNotes);
         fd.append('capital_per_position', this.capital() === null ? '' : String(this.capital()));
+        // The split saves with the strategy (the view does not).
+        fd.append('split_on', this.split.on === true ? 'true' : 'false');
+        fd.append('split_cutoff', this.split.cutoff || '');
         fd.append('replace', replace ? 'true' : 'false');
         const r = await fetch(sweepSave ? '/api/oo-backtest/strategies/sweep' : '/api/oo-backtest/strategies',
                               { method: 'POST', body: fd });
@@ -1360,6 +1377,7 @@ document.addEventListener('alpine:init', () => {
         await this.loadSavedList();
         this.selectedSavedId = String(saved.id);
         this.meta = { ...this.meta, saved };
+        this.splitSaved = { on: saved.split_on === true, cutoff: saved.split_cutoff || this.split.auto };
         this.saveMsg = `Saved as ${obSavedLabel(saved)}` +
           (saved.same_file_as && saved.same_file_as.length ? ` — the same file is also saved as: ${saved.same_file_as.join(', ')}` : '');
       } catch (e) {
@@ -1426,6 +1444,35 @@ document.addEventListener('alpine:init', () => {
       this.onFilterChange();
     },
     resetCutoff() { this.setCutoff(this.split.auto); },
+
+    /* A loaded saved strategy whose split differs from what it holds. The
+     * view is not part of it. ALWAYS A BOOLEAN. */
+    splitUnsaved() {
+      const s = this.splitSaved;
+      return !!(s && this.meta && this.meta.saved) && (this.split.on !== s.on || this.split.cutoff !== s.cutoff);
+    },
+    /* The explicit Save (P4). Nothing writes the split as the cutoff moves:
+     * moving it after seeing results is how out-of-sample is defeated. */
+    async saveSplit() {
+      const sv = this.meta && this.meta.saved;
+      if (!sv || this.splitBusy) return;
+      this.splitBusy = true;
+      this.splitMsg = '';
+      try {
+        const r = await fetch(`/api/oo-backtest/strategies/${sv.id}/split`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ split_on: this.split.on === true, split_cutoff: this.split.cutoff || null }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        this.meta = { ...this.meta, saved: body.strategy };
+        this.splitSaved = { on: body.strategy.split_on === true, cutoff: body.strategy.split_cutoff || this.split.auto };
+      } catch (e) {
+        console.error('oo-backtest save split', e);
+        this.splitMsg = `Not saved: ${e.message}`;
+      } finally {
+        this.splitBusy = false;
+      }
+    },
 
     cutoffNote() {
       const sp = this.split;

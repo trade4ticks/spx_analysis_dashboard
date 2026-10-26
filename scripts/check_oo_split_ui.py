@@ -56,6 +56,29 @@ Also, by click and against stats.py / an independent cutoff:
   * a sweep: the same differential at ALL and with one variant picked
   * no console errors (an Alpine expression error leaves a control inert)
 
+SAVING (P4), clicked, with the save / load endpoints stubbed and recording
+what the page sends: a saved strategy loads with its split On and its
+cutoff, in TRAIN; switching view is not an unsaved change; typing a cutoff
+shows "unsaved" and sends NOTHING until the card's Save is clicked, which
+sends exactly the split; a strategy saved before the split existed loads
+Off, and turning it on gives the 70% default; a strategy loaded while the
+page is in Full view opens in Train; an upload's Save carries split_on and
+the cutoff.
+
+SPEED (2026-10-25). Each log's browser loads (A, B, C) run in parallel,
+three at a time -- the flake that kept this serial was traced to the
+requestAnimationFrame shim, not to concurrency. A PLANTED-FAULT run can be
+scoped to the browser work and the assertions that should catch it:
+
+  --log SUBSTR    only the logs whose label contains it
+  --runs A,B,C    only these loads (B: test trades changed; C: doubled)
+  --grep REGEX    only the assertions whose message matches
+
+The driver and console-error checks always count. A scope that matches NO
+assertion is a failure, never a quiet "not caught". A scoped run is for
+proving one assertion catches one fault; the clean full run is what says the
+code is right.
+
 No browser (the VPS) -> SKIP.
 """
 from __future__ import annotations
@@ -84,9 +107,16 @@ import check_oo_sweep_ui as S  # noqa: E402  (the CSV fixture maker)
 EXIT_SKIPPED = 3
 FAILS: list[str] = []
 N_OK = [0]
+SCOPE = {"log": None, "runs": {"A", "B", "C"}, "grep": None}
+MATCHED = [0]
+ALWAYS = ("the driver ran to the end", "no console errors")
 
 
 def check(ok: bool, msg: str, detail: str = "") -> None:
+    if SCOPE["grep"] and not msg.startswith(ALWAYS) and not re.search(SCOPE["grep"], msg):
+        return
+    if not msg.startswith(ALWAYS):
+        MATCHED[0] += 1
     print(("  ok    " if ok else "  FAIL  ") + msg + ("" if ok or not detail else f"\n          {detail[:600]}"))
     if ok:
         N_OK[0] += 1
@@ -460,15 +490,173 @@ __SNAPSHOT__
 """
 
 
+SAVED_DRIVER = r"""
+<script>
+window.__errs = [];
+window.onerror = (m) => window.__errs.push('error: ' + m);
+window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
+(function () { const ce = console.error; console.error = (...a) => { window.__errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); }; })();
+const FIX = __FIX__;
+window.__puts = []; window.__posts = [];
+const saved = Object.fromEntries(FIX.saved.map(sv => [sv.id, sv]));
+window.fetch = async (u, init) => {
+  const url = String(u);
+  const reply = (status, body) => ({ ok: status < 400, status, json: async () => JSON.parse(JSON.stringify(body)) });
+  if (/\/registry$/.test(url)) return reply(200, { metrics: FIX.registry, coverage_error: null });
+  if (/\/market-status$/.test(url)) return reply(200, { ok: false, error: 'stub' });
+  if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
+  if (/\/parse-batch$/.test(url)) return reply(200, FIX.payload);
+  let m = url.match(/\/strategies\/(\d+)\/split$/);
+  if (m) {
+    const body = JSON.parse(init.body); window.__puts.push({ id: +m[1], body });
+    return reply(200, { strategy: { ...saved[m[1]], split_on: body.split_on, split_cutoff: body.split_cutoff } });
+  }
+  m = url.match(/\/strategies\/(\d+)\/load$/);
+  if (m) return reply(200, { ...FIX.payload, saved: saved[m[1]] });
+  if (/\/strategies$/.test(url) && init && init.method === 'POST') {
+    const f = init.body; const rec = { name: f.get('name'), split_on: f.get('split_on'), split_cutoff: f.get('split_cutoff') };
+    window.__posts.push(rec);
+    return reply(200, { strategy: { ...FIX.saved[0], id: 3, name: rec.name, split_on: rec.split_on === 'true',
+                                    split_cutoff: rec.split_cutoff || null } });
+  }
+  if (/\/strategies$/.test(url)) return reply(200, { strategies: FIX.saved });
+  return reply(404, { detail: 'stub' });
+};
+window.addEventListener('load', () => setTimeout(async () => {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const until = async (cond, ms = 6000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
+  const txt = el => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+  const facts = {};
+  const card = () => document.querySelector('[data-gate-exclude="train-test-card"]');
+  const seg = l => [...card().querySelectorAll('.seg-btn')].find(b => txt(b) === l);
+  const on = l => !!seg(l) && seg(l).classList.contains('on');
+  const unsaved = () => !!card().querySelector('.ob-split-save');
+  const cutoff = () => { const e = document.getElementById('ob-cutoff'); return e ? e.value : null; };
+  const state = () => ({ on: on('On'), off: on('Off'), train: on('Train'), full: on('Full'), cutoff: cutoff(),
+                         unsaved: unsaved(), puts: window.__puts.length, card: txt(card()) });
+  const settle = () => wait(400);
+  try {
+    let c = null;
+    for (let i = 0; i < 200 && !(c && c.recompute && c.registry.length); i++) { await wait(50); c = document.body._x_dataStack ? Alpine.$data(document.body) : null; }
+    await until(() => c.savedList.length === FIX.saved.length);
+    const pick = async id => {
+      const sel = [...document.querySelectorAll('.ob-side select')].find(x => /saved strategy/.test(txt(x.options[0])));
+      sel.value = String(id); sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await settle();
+      [...document.querySelectorAll('.ob-side button')].find(b => txt(b) === 'Load').click();
+      await until(() => c.loaded && c.meta && c.meta.saved && c.meta.saved.id === id); await settle();
+    };
+    await pick(1);
+    facts.s1 = state();
+    seg('Full').click(); await settle();
+    facts.s1full = state();
+    const el = document.getElementById('ob-cutoff');
+    el.value = FIX.typed; el.dispatchEvent(new Event('change', { bubbles: true })); await settle();
+    facts.typed = state();
+    await wait(1200);
+    facts.typedLater = state();
+    card().querySelector('.ob-split-save button').click();
+    await until(() => window.__puts.length > 0); await settle();
+    facts.afterSave = { ...state(), put: window.__puts[0] };
+    await pick(2);                                   // loaded while the page is in Full view
+    facts.s2 = state();
+    seg('On').click(); await settle();
+    facts.s2on = state();
+    seg('Off').click(); await settle();
+    facts.s2offAgain = state();
+    seg('On').click(); await settle();
+    card().querySelector('.ob-split-save button').click();
+    await until(() => window.__puts.length > 1); await settle();
+    facts.s2saved = { ...state(), put: window.__puts[1] };
+    seg('Full').click(); await settle();
+    await pick(1);
+    facts.s1again = state();
+    // An upload, then its Save box.
+    const dt = new DataTransfer(); dt.items.add(new File(['x'], 'upload.csv', { type: 'text/csv' }));
+    const inp = document.querySelector('.ob-drop input[type=file]'); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => c.hasUploadFile && !c.uploading); await settle();
+    facts.upload = state();
+    // Re-found: loading the strategy saved Off removed the field (x-if).
+    const el2 = document.getElementById('ob-cutoff');
+    el2.value = FIX.typedUpload; el2.dispatchEvent(new Event('change', { bubbles: true })); await settle();
+    const nm = document.querySelector('.ob-save input[type=text]'); nm.value = 'uploaded with split'; nm.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    [...document.querySelectorAll('.ob-save button')].find(b => txt(b) === 'Save').click();
+    await until(() => window.__posts.length > 0); await settle();
+    facts.uploadSaved = { ...state(), post: window.__posts[0] };
+    window.__result = { facts, errs: window.__errs };
+  } catch (e) {
+    window.__result = { error: String(e) + (e && e.stack ? ' ' + e.stack : ''), facts, errs: window.__errs };
+  }
+  const pre = document.createElement('pre'); pre.id = 'report'; pre.textContent = JSON.stringify(window.__result);
+  document.body.appendChild(pre);
+}, 300));
+</script>
+"""
+
+
+def check_saved(browser: str) -> None:
+    """P4: the split saved with a strategy, clicked."""
+    import uuid
+
+    import edge_cdp
+    from app.oo_backtest.registry import registry_with_coverage
+    print("saving the split (P4)")
+    files = {"split_log.csv": S.make_csv(2)}
+    pa = payload(files)
+    auto = ref_cutoff(pa["columns"]["date_opened"])
+    row = {"notes": "", "source": "oo_csv", "filename": "split_log.csv", "file_sha256": "x", "file_bytes": 1,
+           "trade_count": pa["n"], "date_min": pa["date_min"], "date_max": pa["date_max"], "capital_per_position": None,
+           "created_at": "2026-10-25T00:00:00+00:00", "updated_at": "2026-10-25T00:00:00+00:00", "variants": None}
+    fix = {"registry": registry_with_coverage(None), "catalog": CATALOG, "payload": pa,
+           "saved": [{**row, "id": 1, "name": "with split", "split_on": True, "split_cutoff": "2024-05-01"},
+                     {**row, "id": 2, "name": "saved before the split", "split_on": False, "split_cutoff": None}],
+           "typed": "2024-06-03", "typedUpload": "2024-07-01"}
+    html = N.build_page().replace(N.DRIVER.replace("__SAVED__", json.dumps(N.SAVED)), "")
+    tmp = ROOT / "scripts" / f"_oo_split_saved_{uuid.uuid4().hex[:12]}.html"
+    tmp.write_text(html.replace("</head>", SAVED_DRIVER.replace("__FIX__", json.dumps(fix)) + "</head>", 1), encoding="utf-8")
+    try:
+        out = judge_run(json.loads(edge_cdp.run_page(browser, tmp, timeout_s=300)))
+    finally:
+        tmp.unlink(missing_ok=True)
+    f = out.get("facts", {})
+    s1, s1f, ty, tyl, sv = (f.get(k, {}) for k in ("s1", "s1full", "typed", "typedLater", "afterSave"))
+    check(s1.get("on") is True and s1.get("train") is True and s1.get("cutoff") == "2024-05-01" and s1.get("unsaved") is False,
+          f"a strategy saved with the split On loads On, in TRAIN, with its cutoff, nothing unsaved ({s1})")
+    check(s1f.get("full") is True and s1f.get("unsaved") is False, "switching to Full is not an unsaved change (the view is not saved)")
+    check(ty.get("unsaved") is True and ty.get("cutoff") == "2024-06-03" and ty.get("puts") == 0
+          and tyl.get("puts") == 0 and tyl.get("unsaved") is True,
+          "typing a cutoff shows 'unsaved' and sends NOTHING, a second later too")
+    check(sv.get("put") == {"id": 1, "body": {"split_on": True, "split_cutoff": "2024-06-03"}} and sv.get("unsaved") is False,
+          f"clicking the card's Save sends exactly the split, and 'unsaved' clears ({sv.get('put')})")
+    s2, s2on, s2off, s2s, s1a = (f.get(k, {}) for k in ("s2", "s2on", "s2offAgain", "s2saved", "s1again"))
+    check(s2.get("off") is True and s2.get("unsaved") is False and s2.get("card") == "Train / Test Split Off On",
+          f"a strategy saved before the split existed loads Off -- the card holds only Off/On ({s2.get('card')!r})")
+    check(s2on.get("cutoff") == auto and s2on.get("train") is True and s2on.get("unsaved") is True,
+          f"turning it On gives the 70% default ({s2on.get('cutoff')} = {auto}), in Train, unsaved")
+    check(s2off.get("unsaved") is False, "turning it Off again matches what is saved: nothing unsaved")
+    check(s2s.get("put") == {"id": 2, "body": {"split_on": True, "split_cutoff": auto}} and s2s.get("unsaved") is False,
+          "its Save sends On and the default cutoff")
+    check(s1a.get("train") is True and s1a.get("full") is False and s1a.get("cutoff") == "2024-05-01",
+          "a strategy loaded while the page is in Full view opens in TRAIN")
+    up, us = f.get("upload", {}), f.get("uploadSaved", {})
+    check(up.get("unsaved") is False, "an upload has no 'unsaved' marker (its Save box saves the split)")
+    check(us.get("post") == {"name": "uploaded with split", "split_on": "true", "split_cutoff": "2024-07-01"}
+          and us.get("unsaved") is False,
+          f"an upload's Save carries split_on and the cutoff ({us.get('post')})")
+    print()
+
+
 def drive(browser: str, fix: dict, exclude: str = "__nothing__") -> dict:
     html = N.build_page()
     html = html.replace(N.DRIVER.replace("__SAVED__", json.dumps(N.SAVED)), "")
     page = html.replace("</head>", DRIVER.replace("__SNAPSHOT__", O.SNAPSHOT_JS).replace("__FIX__", json.dumps(fix))
                         .replace("__EXCLUDE__", exclude) + "</head>", 1)
-    import os
+    import uuid
 
     import edge_cdp
-    tmp = ROOT / "scripts" / f"_oo_split_ui_{os.getpid()}.html"   # unique: a gate may run beside itself
+    # Unique per load: loads run in parallel threads of one process.
+    tmp = ROOT / "scripts" / f"_oo_split_ui_{uuid.uuid4().hex[:12]}.html"
     tmp.write_text(page, encoding="utf-8")
     # REAL TIME, over the DevTools protocol (edge_cdp): the page's own report
     # is waited for, and a timeout names the last step it marked. It ran on
@@ -478,7 +666,11 @@ def drive(browser: str, fix: dict, exclude: str = "__nothing__") -> dict:
         text = edge_cdp.run_page(browser, tmp, timeout_s=300)
     finally:
         tmp.unlink(missing_ok=True)
-    out = json.loads(text)
+    return json.loads(text)
+
+
+def judge_run(out: dict) -> dict:
+    """The checks every load gets, on the main thread (loads run in parallel)."""
     if out.get("error"):
         check(False, "the driver ran to the end", out["error"])
     check(not out.get("errs"), "no console errors", " ~ ".join(out.get("errs") or [])[:600])
@@ -581,9 +773,19 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
     base = {"registry": registry_with_coverage(None), "catalog": CATALOG, "rankRows": RANK_ROWS, "names": list(files),
             "cutoffs": cutoffs, "dateFrom": date_from, "outside": outside, "variant": variant,
             "param": param}
-    A = drive(browser, {**base, "payload": pa})
-    B = drive(browser, {**base, "payload": payload(b_files)})
-    C = drive(browser, {**base, "payload": payload(c_files)})
+    from concurrent.futures import ThreadPoolExecutor
+    fixes = {"A": {**base, "payload": pa}}
+    if "B" in SCOPE["runs"]:
+        fixes["B"] = {**base, "payload": payload(b_files)}
+    if "C" in SCOPE["runs"]:
+        fixes["C"] = {**base, "payload": payload(c_files)}
+    # A always loads (every check reads it); B and C as scoped. Three at a time.
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {k: ex.submit(drive, browser, f) for k, f in fixes.items()}
+        got = {k: f.result() for k, f in futures.items()}
+    A = judge_run(got["A"])
+    B = judge_run(got["B"]) if "B" in got else None
+    C = judge_run(got["C"]) if "C" in got else None
     fa = A["facts"]
 
     # ── the default cutoff, and the card while off ──────────────────────
@@ -622,22 +824,24 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
         return not m or m.group(1) <= cut
     train_steps = [s["name"] for s in A["steps"] if s["name"].startswith("train") and at_or_before_default(s["name"])]
     later = [s["name"] for s in A["steps"] if s["name"].startswith("train at") and not at_or_before_default(s["name"])]
-    for name in later:
+    for name in (later if B else []):
         ok, _ = same(step(A, name), step(B, name), parts=("state",))
         check(not ok, f"'{name}' (after the default cutoff): the changed trades ARE train there, and show")
-    for name in train_steps:
-        ok, why = same(step(A, name), step(B, name))
-        check(ok, f"Train view '{name}': changing every TEST trade's P/L and exit reason changes nothing on the "
-                  f"page (DOM, titles, charts, figures)", why)
-    check(fa.get("csvTrain") == B["facts"].get("csvTrain"), "Train view: the Export CSV is identical with the test trades changed")
-    check(fa.get("rankTrain") == B["facts"].get("rankTrain"), "Train view: the /surface/rank request is identical with the test trades changed")
-    ok, _ = same(step(A, "full"), step(B, "full"), parts=("state",))
-    check(not ok, "...and the same change DOES show in Full view (the differential can see test trades)")
-    for name in train_steps:
-        ok, why = same(without_file_summary(step(A, name)), without_file_summary(step(C, name)))
-        check(ok, f"Train view '{name}': doubling the TEST trades changes nothing but the Data source card's file size", why)
-    ok, _ = same(step(A, "full"), step(C, "full"), parts=("state",))
-    check(not ok, "...and doubling them DOES show in Full view")
+    if B:
+        for name in train_steps:
+            ok, why = same(step(A, name), step(B, name))
+            check(ok, f"Train view '{name}': changing every TEST trade's P/L and exit reason changes nothing on the "
+                      f"page (DOM, titles, charts, figures)", why)
+        check(fa.get("csvTrain") == B["facts"].get("csvTrain"), "Train view: the Export CSV is identical with the test trades changed")
+        check(fa.get("rankTrain") == B["facts"].get("rankTrain"), "Train view: the /surface/rank request is identical with the test trades changed")
+        ok, _ = same(step(A, "full"), step(B, "full"), parts=("state",))
+        check(not ok, "...and the same change DOES show in Full view (the differential can see test trades)")
+    if C:
+        for name in train_steps:
+            ok, why = same(without_file_summary(step(A, name)), without_file_summary(step(C, name)))
+            check(ok, f"Train view '{name}': doubling the TEST trades changes nothing but the Data source card's file size", why)
+        ok, _ = same(step(A, "full"), step(C, "full"), parts=("state",))
+        check(not ok, "...and doubling them DOES show in Full view")
 
     # ── Train figures are stats.py on the train trades ──────────────────
     def st(run, name):
@@ -916,19 +1120,38 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log"), ap.add_argument("--runs"), ap.add_argument("--grep")
+    a = ap.parse_args()
+    SCOPE["log"], SCOPE["grep"] = a.log, a.grep
+    if a.runs:
+        SCOPE["runs"] = {r.strip().upper() for r in a.runs.split(",")}
+    scoped = bool(a.log or a.runs or a.grep)
     browser = N.find_browser()
     if browser is None:
         print("  SKIP  no Edge/Chromium on this host -- the page was NOT driven")
         return EXIT_SKIPPED
+    logs = [("one log (60 trades through 2024)", lambda: {"split_log.csv": S.make_csv(2)}, False),
+            ("a six-trade log", lambda: {"tiny_log.csv": S.make_csv(7, n=6)}, False),
+            ("a 4-variant sweep (ALL, then one variant)", lambda: {n: S.make_csv(i) for i, n in enumerate(S.NAMES)}, True)]
     try:
-        check_log(browser, "one log (60 trades through 2024)", {"split_log.csv": S.make_csv(2)})
-        check_log(browser, "a six-trade log", {"tiny_log.csv": S.make_csv(7, n=6)})
-        sweep = {n: S.make_csv(i) for i, n in enumerate(S.NAMES)}
-        check_log(browser, "a 4-variant sweep (ALL, then one variant)", sweep, variant=True)
+        for label, files, variant in logs:
+            if SCOPE["log"] and SCOPE["log"] not in label:
+                continue
+            check_log(browser, label, files(), variant=variant or None)
+        if not SCOPE["log"] or SCOPE["log"] in "saving the split":
+            check_saved(browser)
     except Exception as exc:                              # noqa: BLE001
         import traceback
         traceback.print_exc()
         check(False, f"the gate raised {type(exc).__name__}: {exc}")
+    if scoped:
+        if not MATCHED[0]:
+            check(False, f"the scope (log={a.log}, runs={a.runs}, grep={a.grep}) matched NO assertion -- it proves nothing")
+        print(f"OO split UI, SCOPED (log={a.log}, runs={a.runs}, grep={a.grep}): "
+              f"{MATCHED[0]} assertions in scope, failures: {len(FAILS)}")
+        return 1 if FAILS else 0
     print(f"OO split UI: {N_OK[0] + len(FAILS)} assertions, failures: {len(FAILS)}")
     return 1 if FAILS else 0
 

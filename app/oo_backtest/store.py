@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 """
 
 _LIST_COLS = ("id, name, notes, source, filename, file_sha256, file_bytes, trade_count, "
-              "date_min, date_max, capital_per_position, created_at, updated_at, "
+              "date_min, date_max, capital_per_position, split_on, split_cutoff, created_at, updated_at, "
               # A sweep's variant count; NULL for a single log.
               "CASE WHEN sweep IS NULL THEN NULL ELSE jsonb_array_length(sweep->'variants') END AS variants")
 
@@ -122,6 +122,41 @@ def clean_notes(notes: str | None) -> str:
 ADD_CAPITAL_SQL = f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS capital_per_position DOUBLE PRECISION"
 CAPITAL_MAX = 1e9
 
+# The train/test split (P4, 2026-10-25): whether it is ON, and the CUTOFF --
+# the out-of-sample boundary. NULL cutoff = the page computes its default
+# (the entry date nearest 70% of the log's span), which is also what a
+# strategy saved before these columns existed gets. The VIEW (Train / Full)
+# is deliberately NOT saved: a loaded strategy always opens in Train, so test
+# figures are never on screen before they are asked for. Written only by an
+# explicit save (the upload's Save, or set_split from the page's Save
+# button) -- never as the cutoff is moved, because moving the cutoff after
+# seeing results is the way this feature is defeated.
+ADD_SPLIT_SQL = [
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS split_on BOOLEAN NOT NULL DEFAULT FALSE",
+    f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS split_cutoff DATE",
+]
+
+
+def clean_split(split_on, split_cutoff) -> tuple[bool, date | None]:
+    """(on, cutoff): on is a real boolean (or the form's 'true'/'false');
+    cutoff is None/'' (use the default) or an ISO date."""
+    if isinstance(split_on, str):
+        if split_on.strip().lower() not in ("true", "false", ""):
+            raise ValueError(f"split_on must be true or false, not {split_on!r}.")
+        split_on = split_on.strip().lower() == "true"
+    if split_on is None:
+        split_on = False
+    if not isinstance(split_on, bool):
+        raise ValueError(f"split_on must be true or false, not {split_on!r}.")
+    if split_cutoff is None or (isinstance(split_cutoff, str) and not split_cutoff.strip()):
+        return split_on, None
+    if not isinstance(split_cutoff, str):
+        raise ValueError(f"The cutoff must be a date (YYYY-MM-DD), not {split_cutoff!r}.")
+    try:
+        return split_on, date.fromisoformat(split_cutoff.strip())
+    except ValueError:
+        raise ValueError(f"The cutoff must be a date (YYYY-MM-DD), not {split_cutoff!r}.")
+
 # The parsed frame, cached beside the file it came from. DERIVED DATA, never a
 # source of truth: `parsed_for_sha` and `parsed_fingerprint` say which file and
 # which parser produced it, and a miss on either re-parses. See
@@ -156,6 +191,8 @@ async def ensure_table(conn) -> None:
         await conn.execute(sql)
     await conn.execute(ADD_SWEEP_SQL)
     await conn.execute(CREATE_FILES_SQL)
+    for sql in ADD_SPLIT_SQL:
+        await conn.execute(sql)
 
 
 async def read_parsed(pool, strategy_id: int, *, sha: str,
@@ -194,8 +231,9 @@ async def write_parsed(pool, strategy_id: int, *, sha: str, fingerprint: str,
 
 def _row(r) -> dict:
     d = dict(r)
-    for k in ("date_min", "date_max"):
-        d[k] = d[k].isoformat() if d[k] else None
+    for k in ("date_min", "date_max", "split_cutoff"):
+        if k in d:
+            d[k] = d[k].isoformat() if d[k] else None
     for k in ("created_at", "updated_at"):
         d[k] = d[k].isoformat() if d[k] else None
     return d
@@ -211,13 +249,14 @@ async def list_strategies(pool) -> list[dict]:
 
 async def save_strategy(pool, *, name: str, notes: str, source: str, filename: str, content: bytes,
                         trade_count: int, date_min: date | None, date_max: date | None,
-                        replace: bool, capital_per_position=None) -> dict:
+                        replace: bool, capital_per_position=None, split_on=False, split_cutoff=None) -> dict:
     """Insert, or overwrite an existing name when `replace` is set.
 
     Returns the saved row (without the file) plus `same_file_as`: the other
     saved names holding byte-identical content, so a duplicate is visible.
     """
     name, notes, capital = clean_name(name), clean_notes(notes), clean_capital(capital_per_position)
+    split_on, split_cutoff = clean_split(split_on, split_cutoff)
     sha = hashlib.sha256(content).hexdigest()
     gz = gzip.compress(content, compresslevel=6)
     async with pool.acquire() as conn:
@@ -230,18 +269,19 @@ async def save_strategy(pool, *, name: str, notes: str, source: str, filename: s
                 row = await conn.fetchrow(
                     f"""UPDATE {TABLE} SET notes=$2, source=$3, filename=$4, file_gz=$5, file_sha256=$6,
                             file_bytes=$7, trade_count=$8, date_min=$9, date_max=$10, capital_per_position=$11,
-                            sweep=NULL, updated_at=now()
+                            split_on=$12, split_cutoff=$13, sweep=NULL, updated_at=now()
                         WHERE id=$1 RETURNING {_LIST_COLS}""",
                     existing["id"], notes, source, filename, gz, sha, len(content), trade_count, date_min, date_max,
-                    capital)
+                    capital, split_on, split_cutoff)
                 # A single file saved over a sweep's name: its files go.
                 await conn.execute(f"DELETE FROM {FILES_TABLE} WHERE strategy_id = $1", existing["id"])
             else:
                 row = await conn.fetchrow(
                     f"""INSERT INTO {TABLE} (name, notes, source, filename, file_gz, file_sha256, file_bytes,
-                            trade_count, date_min, date_max, capital_per_position)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {_LIST_COLS}""",
-                    name, notes, source, filename, gz, sha, len(content), trade_count, date_min, date_max, capital)
+                            trade_count, date_min, date_max, capital_per_position, split_on, split_cutoff)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING {_LIST_COLS}""",
+                    name, notes, source, filename, gz, sha, len(content), trade_count, date_min, date_max, capital,
+                    split_on, split_cutoff)
             same = await conn.fetch(f"SELECT name FROM {TABLE} WHERE file_sha256 = $1 AND id <> $2 ORDER BY name",
                                     sha, row["id"])
     out = _row(row)
@@ -277,11 +317,12 @@ def sweep_manifest(files: list[tuple[str, bytes]]) -> str:
 
 async def save_sweep(pool, *, name: str, notes: str, source: str, files: list[tuple[str, bytes]], sweep: dict,
                      trade_count: int, date_min: date | None, date_max: date | None,
-                     replace: bool, capital_per_position=None) -> dict:
+                     replace: bool, capital_per_position=None, split_on=False, split_cutoff=None) -> dict:
     """One saved strategy holding every file of a sweep (see the module
     docstring). Insert, or overwrite an existing name when `replace` is set;
     either way the files are written in the same transaction as the row."""
     name, notes, capital = clean_name(name), clean_notes(notes), clean_capital(capital_per_position)
+    split_on, split_cutoff = clean_split(split_on, split_cutoff)
     if len(files) < 2:
         raise ValueError("A sweep is two or more files; save a single file as a normal strategy.")
     sha = sweep_manifest(files)
@@ -298,18 +339,19 @@ async def save_sweep(pool, *, name: str, notes: str, source: str, files: list[tu
                 row = await conn.fetchrow(
                     f"""UPDATE {TABLE} SET notes=$2, source=$3, filename=$4, file_gz=$5, file_sha256=$6,
                             file_bytes=$7, trade_count=$8, date_min=$9, date_max=$10, capital_per_position=$11,
-                            sweep=$12::jsonb, parsed_gz=NULL, parsed_for_sha=NULL, updated_at=now()
+                            sweep=$12::jsonb, parsed_gz=NULL, parsed_for_sha=NULL, split_on=$13, split_cutoff=$14,
+                            updated_at=now()
                         WHERE id=$1 RETURNING {_LIST_COLS}""",
                     existing["id"], notes, source, f"{len(files)} files", empty_gz, sha, total, trade_count,
-                    date_min, date_max, capital, meta)
+                    date_min, date_max, capital, meta, split_on, split_cutoff)
                 await conn.execute(f"DELETE FROM {FILES_TABLE} WHERE strategy_id = $1", existing["id"])
             else:
                 row = await conn.fetchrow(
                     f"""INSERT INTO {TABLE} (name, notes, source, filename, file_gz, file_sha256, file_bytes,
-                            trade_count, date_min, date_max, capital_per_position, sweep)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING {_LIST_COLS}""",
+                            trade_count, date_min, date_max, capital_per_position, sweep, split_on, split_cutoff)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14) RETURNING {_LIST_COLS}""",
                     name, notes, source, f"{len(files)} files", empty_gz, sha, total, trade_count,
-                    date_min, date_max, capital, meta)
+                    date_min, date_max, capital, meta, split_on, split_cutoff)
             await conn.executemany(
                 f"""INSERT INTO {FILES_TABLE} (strategy_id, ord, filename, file_gz, file_sha256, file_bytes)
                     VALUES ($1, $2, $3, $4, $5, $6)""",
@@ -357,6 +399,17 @@ async def set_capital(pool, strategy_id: int, capital_per_position) -> dict | No
         await ensure_table(conn)
         r = await conn.fetchrow(f"UPDATE {TABLE} SET capital_per_position = $2 WHERE id = $1 RETURNING {_LIST_COLS}",
                                 strategy_id, capital)
+    return _row(r) if r else None
+
+
+async def set_split(pool, strategy_id: int, split_on, split_cutoff) -> dict | None:
+    """The split, saved by the page's explicit Save on a loaded strategy.
+    updated_at is left alone, as for the capital and the notes."""
+    split_on, split_cutoff = clean_split(split_on, split_cutoff)
+    async with pool.acquire() as conn:
+        await ensure_table(conn)
+        r = await conn.fetchrow(f"UPDATE {TABLE} SET split_on = $2, split_cutoff = $3 WHERE id = $1 "
+                                f"RETURNING {_LIST_COLS}", strategy_id, split_on, split_cutoff)
     return _row(r) if r else None
 
 

@@ -298,8 +298,8 @@ period never looked at. Phases: **P0** gates (crash/skip honesty, the
 off-state recording) — done; **P1** split mechanics, the Train/Full view
 through Summary, sections, ranking (train only) — done; **P2** the Train vs
 Test panel — done; **P3** the cutoff line + the test pivot beside the parameter
-grid — done; **P4** saving cutoff + Split on/off (View never saves; restore to
-Train). The portfolio page is out of scope, by decision.
+grid — done; **P4** saving cutoff + Split on/off — done. The feature is
+complete. The portfolio page is out of scope, by decision.
 - **Split OFF is the page as it was** — `check_oo_offstate` holds it to a
   recording made at 8f996e8 (DOM, charts, figures, export, requests); the
   sidebar card (`data-gate-exclude="train-test-card"`) holds only Off/On.
@@ -368,6 +368,25 @@ Train). The portfolio page is out of scope, by decision.
   period (`OB_DATA.splitPer`) feeds both the grids and the panel's filtered
   rows. Train view: one pivot of the train trades. No sortable table, no row
   highlight (the user withdrew them).
+- **P4: saving.** Two columns on `oo_backtest_strategies`, added by
+  `ensure_table` (`ADD COLUMN IF NOT EXISTS`, the store's pattern) and run by
+  hand on the VPS first: `split_on BOOLEAN NOT NULL DEFAULT FALSE`,
+  `split_cutoff DATE` (NULL = the page's 70% default — what every strategy
+  saved before them reads as). The VIEW is never saved: a loaded strategy
+  always opens in Train. An upload's Save (single or sweep) carries both. A
+  LOADED strategy's split is written only by the card's explicit Save
+  (`PUT /strategies/{id}/split`, `store.set_split`, list order untouched) —
+  never as the cutoff moves (moving it after seeing results is how
+  out-of-sample is defeated); "unsaved" + Save show only when the loaded
+  strategy's split differs from what it holds (so a fresh Off page's card is
+  still Off/On only). Gates: `check_saved_split` (real endpoints, temp
+  Postgres, incl. a row from before the columns) and `check_oo_split_ui`'s
+  "saving the split" flow (clicked).
+- **Gate speed (the user's call, 2026-10-25):** each log's browser loads run
+  three at a time (the flake was the rAF shim, not concurrency) — the split
+  gate went 200 s → ~66 s; planted-fault runs are SCOPED (`--log`, `--runs`,
+  `--grep`) to the browser work and assertions that should catch them, an
+  empty scope failing; one clean full run closes each phase.
 - **`check_oo_split_ui` is a DIFFERENTIAL**: the same log with every TEST
   trade's P/L and exit reason changed (B) and with every test trade doubled
   (C) must render Train view IDENTICALLY to the original — DOM, titles,
