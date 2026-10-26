@@ -1706,8 +1706,6 @@ bar-count rule would restore exactly the hiding this removed.
      race (the ranking width) and created a false one (the drop zone); the same may hold
      for the pages those gates drive. Converting them waits on the two converted gates
      running clean for a while (the user's call).
-   - `check_oo_split_ui` takes ~200 s serial in real time (was ~40 s); the full `--slow`
-     suite ~3.5 min. Not parallelised, by decision.
    - The `spx-dashboard` systemd unit file is not in the repo (only `deploy/spx-live.service`
      is); its contents are quoted in `DEPLOYMENT_NOTES.md`'s procedure only in part.
 
