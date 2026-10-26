@@ -170,7 +170,7 @@ this repo.
 
 | File | Purpose | Reads | Writes | Invoked by | Status |
 |---|---|---|---|---|---|
-| `run.py` | Launches FastAPI app via uvicorn on HOST/PORT | `.env` | — | Manual: `python run.py` on VPS (per deployment memory) | active |
+| `run.py` | Launches FastAPI app via uvicorn on HOST/PORT | `.env` | — | systemd `spx-dashboard.service` (`ExecStart=… python run.py`); deployed by the VPS Dashboard's deploy link — see `DEPLOYMENT_NOTES.md` | active |
 | `run_research.py` | CLI runner for the research-agent workflow | MAIN DB + OI DB + `research_config.yaml` | MAIN DB (`research_runs`, results, charts) | Manual CLI | active |
 | `export_report.py` | Loads a completed research run; exports a PDF | MAIN DB (`research_runs`, results, charts) | `reports/<name>.pdf` | Manual CLI | active |
 | `scripts/corner_scan.py` | Offline corner-scan: emits 1F + 2F extreme-corner stats. TT emits 2F only | OI DB (`metric_classification`, `wf_bins`/`is_bins`/`tt_bins`, `daily_features`) | OI DB (`corner_scan_1f`, `corner_scan_2f`, mode-partitioned) | Manual: `python scripts/corner_scan.py --mode {walk_forward\|in_sample\|train_test} [--force] [--dry-run]`. TT reads the frozen cutoff from `tt_bins` — no `--cutoff` flag. Exits non-zero if any metric was skipped for having no usable bins. No cron found. | active |
@@ -219,11 +219,9 @@ data decides whether a series has usable values on one. It replaced a rule that
 inferred sessions from the data it was meant to be checking, which reported a
 missing day (2026-04-08) as a non-trading day.
 
-**Install on the VPS BEFORE pulling**, or the dashboard will not start:
-
-```bash
-sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'
-```
+**Install on the VPS BEFORE pulling**, or the dashboard will not start — the
+command, and every other pre-pull install, is in `DEPLOYMENT_NOTES.md`
+("Deploying, restarting, stopping").
 
 Rules ship in the package — no network at runtime. It pulls four transitive
 dependencies (`exchange-calendars`, `toolz`, `pyluach`, `korean_lunar_calendar`).

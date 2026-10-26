@@ -59,11 +59,15 @@ VPS SETUP, once. The flow is: pull as root, gate as an unprivileged user
     # test's real-database checks need anyway):
     sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
 
-Then, on every deploy:
+Deploying (the pull and the restart) is described in ONE place,
+DEPLOYMENT_NOTES.md "Deploying, restarting, stopping" -- normally the deploy
+link on the VPS Dashboard, which pulls and restarts every unit of the
+project. After any deploy:
 
-    cd /spx_analysis_dashboard && git pull
-    sudo systemctl restart spx-dashboard.service       # never spx-live
     sudo -u gates .venv/bin/python scripts/gates.py --vps --deploy
+
+(This docstring said `systemctl restart spx-dashboard.service  # never
+spx-live` until 2026-10-25; the deploy link restarts both, by design.)
 
 A CRASH IS NOT A FAIL (2026-10-25). A gate that died of an uncaught Python
 exception did not run whatever came after the line that raised, and a FAIL

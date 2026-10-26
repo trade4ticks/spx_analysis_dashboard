@@ -108,7 +108,14 @@ Two long-running initiatives done, IC.5 in progress:
 
 Two other dashboards on the same VPS (`/root/Portfolio_Dashboard/app.py` ~515 MB, `/root/VPS_Dashboard/app.py` ~62 MB) consume ~580 MB permanently, reducing headroom. Not the OOM cause, but worth noting if RAM pressure becomes a recurring issue.
 
-No persistent log file — `run.py` doesn't redirect stdout. VPS is controlled via `python run.py` (spawns multiprocessing children). Stop: `kill <run.py PID>`; children follow. Restart: however originally launched (tmux session etc.).
+**Corrected 2026-10-25 — the line that stood here was wrong.** It said the
+dashboard is started by hand (`python run.py`, tmux), has no log file, and is
+stopped with `kill <run.py PID>`. It runs under systemd
+(`spx-dashboard.service`, `Restart=on-failure`, `RestartSec=5`): a `kill` is
+a failure to systemd, which starts it again five seconds later — the kill
+looks as if it did not work. Stop and restart with `systemctl`; logs are in
+`journalctl -u spx-dashboard`. The procedure, and the deploy link that is
+the normal path: `DEPLOYMENT_NOTES.md` "Deploying, restarting, stopping".
 
 ---
 

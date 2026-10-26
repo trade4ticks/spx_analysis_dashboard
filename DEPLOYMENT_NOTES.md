@@ -22,6 +22,48 @@ straight to local ports. Each app is its own systemd unit:
 holds an upstream WebSocket and redraws thirty times a second, and a crash
 there must not take the three dashboards with it.
 
+### Deploying, restarting, stopping — THE procedure
+
+**This section is the one description of it.** `gates.py`, CLAUDE.md,
+`system_inventory.md` and `NEXT_SESSION.md` point here rather than restate
+it: three files each saying something different, and none of them the
+mechanism actually used, is what this replaced (2026-10-25).
+
+Both apps run under **systemd** (`ExecStart=… .venv/bin/python run.py` for
+`spx-dashboard`, `run_live.py` for `spx-live`; both `User=root`,
+`EnvironmentFile=/spx_analysis_dashboard/.env`, `Restart=on-failure`,
+`RestartSec=5`). The `spx-live` unit file is in the repo
+(`deploy/spx-live.service`); the `spx-dashboard` one lives only in
+`/etc/systemd/system/`.
+
+- **Primary: the deploy link** on `vps.pinkbluelabs.com` (the VPS Dashboard,
+  `/root/VPS_Dashboard/app.py`). It runs `git pull` in the project's path —
+  no ref pinning: whatever the branch's upstream holds — and, if the pull
+  succeeded, `systemctl restart` for **every unit configured for the
+  project** (the list is in `/root/VPS_Dashboard/config.py`, not here),
+  continuing past a failed one because they share the working tree that was
+  just updated. Restarting every unit is intended: per-unit restart buttons
+  exist for restarting one, and the live service is back with what it needs
+  within 10–20 s, so a restart in market hours is fine. No guard needed.
+- **By hand (fallback):** `cd /spx_analysis_dashboard && git pull`, then
+  `sudo systemctl restart spx-dashboard.service` (and `spx-live.service` if
+  `live/` changed).
+- **Stopping: `sudo systemctl stop <unit>`. Never `kill`.** With
+  `Restart=on-failure`, a process killed by a signal is a FAILURE to systemd,
+  which starts it again five seconds later — so a kill looks as if it did
+  not work, and invites a hunt for a second copy that does not exist.
+- **Logs:** stdout and stderr go to the journal —
+  `journalctl -u spx-dashboard -f` (or `-u spx-live`). There is no log file.
+- **A commit that adds a hard dependency must be installed BEFORE the pull**,
+  because the deploy link pulls and restarts in one click and the app then
+  fails to start: `sudo /spx_analysis_dashboard/.venv/bin/pip install '<pkg>'`.
+  So far: `pandas_market_calendars>=5.0` (2026-09-25). `orjson` is soft (the
+  stdlib encodes without it, slower, with a warning).
+- **After any deploy:** the deploy gates, as an unprivileged user —
+  `sudo -u gates .venv/bin/python scripts/gates.py --vps --deploy`. Their
+  one-time setup (the `gates` user, `safe.directory`, `.env` group read) is
+  in the `scripts/gates.py` docstring, the one copy of it.
+
 ### The tunnel is REMOTELY managed — `/etc/cloudflared/config.yml` is inert
 
 This cost a wrong conclusion once already. The unit runs with
