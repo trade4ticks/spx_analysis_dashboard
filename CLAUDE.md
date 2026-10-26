@@ -297,7 +297,7 @@ on the early period only, then see what the same filter does to a later
 period never looked at. Phases: **P0** gates (crash/skip honesty, the
 off-state recording) — done; **P1** split mechanics, the Train/Full view
 through Summary, sections, ranking (train only) — done; **P2** the Train vs
-Test panel; **P3** the cutoff line + the test pivot beside the parameter
+Test panel — done; **P3** the cutoff line + the test pivot beside the parameter
 grid; **P4** saving cutoff + Split on/off (View never saves; restore to
 Train). The portfolio page is out of scope, by decision.
 - **Split OFF is the page as it was** — `check_oo_offstate` holds it to a
@@ -333,14 +333,54 @@ Train). The portfolio page is out of scope, by decision.
 - Measured at 288,000 rows (node, shipped functions): the split adds ~12–14
   ms per recompute (filter pass 67 ms on the same data); Train-view counts
   ~26 ms, once per cutoff/variant change.
+- **The Train vs Test panel (P2)**, Full view only, `x-if` (in Train view
+  it does not exist and is not computed). Four rows — train / test ×
+  unfiltered (the universe) / filtered — from `obPanelRow`, which uses
+  **`obSummaryStats` / `obSummaryExtra`: the Summary's rule, extracted** out
+  of `recompute()` / `recomputeCapital()` (where it was written twice; the
+  off-state recording proved the extraction a no-op). At ALL over several
+  variants Total P/L, Max DD and Calmar are per-variant means and each row
+  prints its variant count (a filter that empties variants averages over
+  fewer — the user wants the size shown). Max DD is each period's own trades
+  from zero, NOT read off the full curve; the header says so, and says
+  "MEANS PER VARIANT" when pooled. Lift per the brief (kept %, pp, $ with %,
+  n/a, DD % improvement, plain differences); nothing to divide by is "—".
+  **The one cache** (`panelUnfiltered`, the user's decision after the cost
+  was measured): the two UNFILTERED rows, keyed on exactly the date range,
+  the variant selection (selector + parameter ticks), the cutoff and the
+  loaded log — never a metric filter. The gate changes each trigger and
+  holds the rows to pandas (including between two partial parameter
+  selections, where only the ticked values differ); planted stale keys —
+  no cutoff, no variant, no date range, no ticked values — each fail it.
+  Measured in Edge at 288,000 trades / 90 variants (loaded machine, so as
+  ratios): recompute per filter change Off 794 ms, Train 586, Full with the
+  cache 1,007, Full without 1,211 — the panel adds ~27% to a Full-view drag
+  instead of ~52%.
 - **`check_oo_split_ui` is a DIFFERENTIAL**: the same log with every TEST
   trade's P/L and exit reason changed (B) and with every test trade doubled
   (C) must render Train view IDENTICALLY to the original — DOM, titles,
   charts, figures, export, rank request (C: bar the file-size label) — and
   must differ in Full view. Planted leaks (status total, option counts,
   ranking in Full, no restriction, cutoff following the date filter) each
-  fail it. Headless Edge runs get a private `--user-data-dir` and a unique
-  page file.
+  fail it. **It and `check_oo_offstate` drive Edge in REAL TIME over the
+  DevTools protocol (`scripts/edge_cdp.py`)**, not `--virtual-time-budget`:
+  twice the split page was printed partway under the parallel suite with
+  most of its virtual budget unspent, cause not found (a planted async wait
+  did not reproduce it), so the mechanism was removed. A timeout names the
+  last step the page marked. Serial, one Edge per page, private profile —
+  no concurrency added. **And no `requestAnimationFrame` shim**: it mapped
+  frames to `setTimeout(0)` because virtual time runs none, but under real
+  time it was itself a race — Alpine shows an x-show element on the next
+  frame and hides one at once, so with zero-delay "frames" and an instant
+  stubbed upload a late show landed after the hide ("Parsing 4 files…"
+  stuck after every sweep-after-single upload: 12 of 12 with the shim, 0 of
+  12 on real frames). It also hid a REAL page race, fixed: `renderRanking`
+  ran on Alpine's tick, before the frame that shows the chart area, so the
+  container measured 0 and a ranking of under ~90 bars drew 88 px wide (3
+  of 4 runs with the old line, 0 of 6 now; it renders on the next frame).
+  Real time costs: split gate ~200 s serial (was ~40 s), off-state ~12 s.
+  The other seven browser gates stay on virtual time with the shim until
+  these two have run clean for a while (the user's call).
 
 **Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
 loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes
@@ -1555,8 +1595,8 @@ this, 2026-04-08 by name. The test helper's hand-written holiday list is gone to
 second, worse trading calendar living in a gate.
 
 **The dependency is hard, and install order matters**: `pandas_market_calendars>=5.0`, and
-on the VPS it goes in BEFORE the pull —
-`sudo /spx_analysis_dashboard/.venv/bin/pip install 'pandas_market_calendars>=5.0'`. The
+on the VPS it goes in BEFORE the pull (the command and the reason are in
+`DEPLOYMENT_NOTES.md`, with every other pre-pull install). The
 module raises ImportError rather than falling back, deliberately: a silent fallback to the
 bar-count rule would restore exactly the hiding this removed.
 
@@ -1642,13 +1682,12 @@ a gate that could not run is a FAIL.
   parts, since nobody reads that output. The VPS has no node and no Postgres
   server binaries (the DB is elsewhere), so the SQL gate can never run there.
 
-One-time VPS setup (also in the `gates.py` docstring):
-
-```bash
-sudo useradd --system --create-home --shell /bin/bash gates
-sudo -u gates git config --global --add safe.directory /spx_analysis_dashboard
-sudo chgrp gates /spx_analysis_dashboard/.env && sudo chmod 640 /spx_analysis_dashboard/.env
-```
+One-time VPS setup for the gates: the `gates.py` docstring (its one copy).
+**Deploying, restarting, stopping and pre-pull installs:
+`DEPLOYMENT_NOTES.md` "Deploying, restarting, stopping"** — the deploy link
+on the VPS Dashboard (`git pull`, then `systemctl restart` of every unit of
+the project) is the primary path; never stop a unit with `kill` (systemd
+restarts it in 5 s).
 
 **A CRASH is not a FAIL (2026-10-25).** `gates.py` reports a gate whose run
 ENDED in an uncaught exception as `CRASH`, naming the gate function it died
@@ -1725,7 +1764,13 @@ catalog, payloads) and, per clicked step, the rendered DOM, every chart's
 data, the computed figures, the Export CSV text and the requests sent.
 Elements marked `data-gate-exclude="train-test-card"` are the one allowed
 difference. `--record` re-records; do that only on a commit whose page is
-the one to keep, and say why.
+the one to keep, and say why. **Re-recorded once, 2026-10-25, with
+`--rerecord-from 8f996e8`** — the page from that commit, the same inputs,
+the new real-time driver on real frames: the old recording held the shim's
+artifact (the drop zone reading "Parsing 4 files…" after the upload had
+finished). The two recordings differ in exactly those 8 DOM lines on each
+of the three sweep steps; every figure, chart, the export and every request
+are identical.
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

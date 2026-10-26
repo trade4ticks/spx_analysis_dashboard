@@ -19,6 +19,17 @@ so the test COUNT changes: Train view must not move except the Data source
 card's description of the file (the log's own size), which is excluded from
 that comparison and said so.
 
+The Train vs Test panel (P2): absent from the DOM in Train view and with
+Split Off; in Full view every figure of its four rows (train / test x
+unfiltered / filtered) equals pandas + stats.py on those trades -- at ALL
+over a sweep by the Summary's rule, the scale-dependent figures as the mean
+of each variant's own, with each row's variant count shown -- and the lift
+row follows the brief's formulas; the drawdown note always, the per-variant
+note only when several variants are pooled; a period with no trades says so.
+THE CACHE of the two unfiltered rows: a clicked metric filter and a view
+switch do NOT rebuild them; a typed cutoff, a picked variant and a typed
+date range DO, and each time the rows equal pandas on the new universe.
+
 Also, by click and against stats.py / an independent cutoff:
   * Split Off: the card holds only the Off/On control. On -> Train -> Full ->
     Off returns the page to exactly its pre-split state
@@ -132,7 +143,52 @@ def payload(files: dict[str, str]) -> dict:
 
 def frame(files: dict[str, str]) -> pd.DataFrame:
     from app.oo_backtest import data_loader
-    return pd.concat([data_loader.parse_upload(c.encode(), n) for n, c in files.items()], ignore_index=True)
+    parts = []
+    for n, c in files.items():
+        d = data_loader.parse_upload(c.encode(), n)
+        d["vfile"] = n                     # one file, one variant
+        parts.append(d)
+    return pd.concat(parts, ignore_index=True)
+
+
+def one_variant(df: pd.DataFrame) -> dict:
+    """A variant's own figures, by stats.py; Calmar as the page defines it
+    (avg annual P/L over |Max DD|, years close-to-close)."""
+    from app.oo_backtest.stats import calculate_stats
+    st = calculate_stats(df)
+    closes = pd.to_datetime(df["date_closed"])
+    years = (closes.max() - closes.min()).days / 365.25
+    dd = float(st["max_drawdown"])
+    total = float(df["pnl"].sum())
+    return {"total": total, "dd": dd, "calmar": (total / years) / abs(dd) if dd < 0 and years > 0 else None}
+
+
+def panel_ref(df: pd.DataFrame, per_variant: bool) -> dict | None:
+    """One panel row, written independently: pooled n / win / avg / PF; at ALL
+    over several variants the mean of each variant's total, Max DD, Calmar."""
+    if not len(df):
+        return None
+    groups = [g for _, g in df.groupby("vfile")] if per_variant else [df]
+    per = [one_variant(g) for g in groups]
+    mean = lambda xs: (sum(xs) / len(xs)) if xs else None  # noqa: E731
+    pooled = one_variant(df)
+    several = per_variant and len(groups) > 1
+    gw, gl = float(df.loc[df["pnl"] > 0, "pnl"].sum()), float(df.loc[df["pnl"] < 0, "pnl"].sum())
+    return {"n": len(df), "win": float((df["pnl"] > 0).mean() * 100), "avg": float(df["pnl"].mean()),
+            "total": mean([x["total"] for x in per]) if several else pooled["total"],
+            "dd": mean([x["dd"] for x in per]) if several else pooled["dd"],
+            "calmar": mean([x["calmar"] for x in per if x["calmar"] is not None]) if several else pooled["calmar"],
+            "pf": gw / abs(gl) if gl < 0 else (float("inf") if gw > 0 else None),
+            "k": len(groups) if per_variant else 1}
+
+
+def close(a, b) -> bool:
+    a = float("inf") if a == "Infinity" else a
+    if a is None or b is None:
+        return a is None and b is None
+    if a == float("inf") or b == float("inf"):
+        return a == b
+    return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
 
 def stats_of(df: pd.DataFrame) -> dict:
@@ -154,8 +210,14 @@ RANK_ROWS = [{"column": f"m{j}", "family": "iv", "tenor": None, "wing": None, "f
 
 DRIVER = r"""
 <script>
-window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 0);
-window.cancelAnimationFrame = id => clearTimeout(id);
+// NO requestAnimationFrame shim. It mapped frames to setTimeout(0) because
+// virtual time runs no frames; this page now runs in REAL time (edge_cdp),
+// where real frames run -- and the shim was itself a race: Alpine shows an
+// x-show element on the next frame and hides one at once, so with frames as
+// zero-delay timers and a stubbed upload that finishes instantly, a late
+// SHOW landed after the hide and "Parsing 4 files..." stuck on screen after
+// every sweep upload that followed a single file (12 of 12 with the shim,
+// 0 of 12 without, 2026-10-25). The drop zone read either way run to run.
 window.__errs = [];
 window.onerror = (m) => window.__errs.push('error: ' + m);
 window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
@@ -193,8 +255,17 @@ window.addEventListener('load', () => setTimeout(async () => {
   const until = async (cond, ms = 6000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
   const steps = [], facts = {};
 __SNAPSHOT__
+  // A TRAIL of (step, virtual ms, wall ms): if the page is dumped before it
+  // reports, the dump says where the time went.
+  const WALL0 = Date.now();
+  const mark = (name) => {
+    const t = document.documentElement;
+    t.setAttribute('data-progress', name);
+    t.setAttribute('data-trail', (t.getAttribute('data-trail') || '') + `${name}@${Math.round(performance.now())}v/${Date.now() - WALL0}w;`);
+  };
+  window.__mark = mark;
   const snap = async (name, c) => {
-    document.documentElement.setAttribute('data-progress', name);
+    mark(name);
     await wait(350);
     window.__excluded = 0;
     steps.push({ name, dom: scrub(dom()), charts: charts(), state: state(c) });
@@ -208,17 +279,27 @@ __SNAPSHOT__
   const card = t => [...document.querySelectorAll('.ob-side .ob-card')].find(e => txt(e.querySelector('.ob-card-title')) === t);
   const button = t => [...document.querySelectorAll('button')].find(b => txt(b) === t);
   const cutoffEl = () => document.getElementById('ob-cutoff');
-  const typeCutoff = async (v) => { const el = cutoffEl(); el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); await settle(); };
+  const typeCutoff = async (v) => { window.__mark('cutoff ' + v); const el = cutoffEl(); el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); await settle(); };
   const typeDate = async (which, v) => {
     const el = document.querySelector(`input[aria-label="Entry date ${which}"]`);
     el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
     await settle();
   };
-  const exportText = async () => { const n = window.__blobs.length; button('Export CSV').click(); await until(() => window.__blobs.length > n);
+  const exportText = async () => { window.__mark('export'); const n = window.__blobs.length; button('Export CSV').click(); await until(() => window.__blobs.length > n);
                                    return window.__blobs.length > n ? await window.__blobs[window.__blobs.length - 1].text() : null; };
-  const rank = async (c) => { const n = window.__ranks.length; (button('Rank metrics') || button('Recompute')).click();
+  const rank = async (c) => { window.__mark('rank'); const n = window.__ranks.length; (button('Rank metrics') || button('Recompute')).click();
                               await until(() => window.__ranks.length > n && !c.surf.busy); await settle();
                               return window.__ranks.length > n ? window.__ranks[window.__ranks.length - 1] : null; };
+  const panel = () => {
+    const card = document.querySelector('.ob-tt');
+    if (!card) return null;
+    return { note: txt(card.querySelector('.ob-card-sub')),
+             // Cells only: an x-if leaves a <template> inside the row.
+             rows: [...card.querySelectorAll('.ob-tt-table tbody tr')].map(tr => [...tr.children].filter(td => td.tagName === 'TD').map(td => txt(td))),
+             // Infinity (a period with no losing trade: PF) would become null in JSON.
+             data: JSON.parse(JSON.stringify(Alpine.$data(document.body).panel, (k, v) => (v === Infinity ? 'Infinity' : v))),
+             builds: OB_DATA.panelUBuilds || 0 };
+  };
   const emptyShown = () => { const e = [...document.querySelectorAll('.ob-main .ob-empty')].find(shown); return e ? txt(e) : ''; };
   const sumSub = () => { const e = document.querySelector('.ob-summary .ob-card-sub'); return e ? txt(e) : ''; };
   const rankSub = () => [...document.querySelectorAll('.ob-main .ob-card')].filter(e => /Surface metrics vs P\/L/.test(txt(e.querySelector('.ob-card-title'))))
@@ -243,12 +324,14 @@ __SNAPSHOT__
 
     seg('On').click(); await settle();
     facts.afterOn = { trainOn: seg('Train').classList.contains('on'), fullOn: seg('Full').classList.contains('on'),
-                      cutoffShown: cutoffEl() ? cutoffEl().value : null, counts: counts(), status: status(), sumSub: sumSub() };
+                      cutoffShown: cutoffEl() ? cutoffEl().value : null, counts: counts(), status: status(), sumSub: sumSub(),
+                      panel: panel(), panelState: c.panel };
     await snap('train', c);
     seg('Full').click(); await settle();
-    facts.afterFull = { counts: counts(), status: status(), sumSub: sumSub() };
+    facts.afterFull = { counts: counts(), status: status(), sumSub: sumSub(), panel: panel() };
     await snap('full', c);
     seg('Off').click(); await settle();
+    facts.afterOff = { panel: panel(), panelState: c.panel };
     await snap('off again', c);
 
     // ── Train view, a clicked filter ─────────────────────────────────────
@@ -257,7 +340,7 @@ __SNAPSHOT__
     facts.dowEnabled = !mon.querySelector('input').disabled;
     const before = c.filteredCount;
     mon.querySelector('input').click(); await until(() => c.filteredCount !== before); await settle();
-    facts.trainDow = { counts: counts(), status: status() };
+    facts.trainDow = { counts: counts(), status: status(), panel: panel(), panelState: c.panel };
     await snap('train dow', c);
     facts.csvTrain = await exportText();
     facts.rankTrain = await rank(c);
@@ -266,7 +349,7 @@ __SNAPSHOT__
 
     // ── Full view ────────────────────────────────────────────────────────
     seg('Full').click(); await settle();
-    facts.fullDow = { counts: counts(), status: status(), stale: c.surfStale() };
+    facts.fullDow = { counts: counts(), status: status(), stale: c.surfStale(), panel: panel() };
     await snap('full dow', c);
     facts.rankFull = await rank(c);
     facts.rankSubFull = rankSub();
@@ -281,14 +364,29 @@ __SNAPSHOT__
       seg('Train').click(); await settle();
       await snap('train dow variant', c);
       seg('Full').click(); await settle();
-      facts.fullVariant = { counts: counts(), status: status() };
+      facts.fullVariant = { counts: counts(), status: status(), panel: panel() };
       sel.value = 'all'; sel.dispatchEvent(new Event('change', { bubbles: true }));
       await until(() => c.variantSel === 'all'); await settle();
+      // A PARAMETER FILTER is variant selection too: untick one value of the
+      // first parameter, BY CLICK, in Full view; read the panel; tick it back.
+      const pcard = card(FIX.param.name);
+      const pbox = [...pcard.querySelectorAll('.ob-check')].find(l => txt(l).startsWith(String(FIX.param.value)));
+      const before2 = c.filteredCount;
+      pbox.querySelector('input').click(); await until(() => c.filteredCount !== before2); await settle();
+      facts.fullParam = { panel: panel() };
+      // Between two PARTIAL selections the spec is present on both sides, so
+      // only the ticked values tell them apart: {other} -> {} -> {this}.
+      const other = [...pcard.querySelectorAll('.ob-check')].find(l => !txt(l).startsWith(String(FIX.param.value)));
+      other.querySelector('input').click(); await settle();
+      facts.fullParamNone = { panel: panel() };
+      pbox.querySelector('input').click(); await settle();
+      facts.fullParamSwap = { panel: panel() };
+      other.querySelector('input').click(); await until(() => c.filteredCount === before2); await settle();
     }
 
     // ── the date range moves the universe, never the cutoff ─────────────
     await typeDate('from', FIX.dateFrom);
-    facts.afterDate = { cutoff: cutoffEl().value, counts: counts(), status: status(), sumSub: sumSub() };
+    facts.afterDate = { cutoff: cutoffEl().value, counts: counts(), status: status(), sumSub: sumSub(), panel: panel() };
     seg('Train').click(); await settle();
     facts.afterDateTrain = { cutoff: cutoffEl().value, sumSub: sumSub(), status: status() };
     seg('Full').click(); await settle();
@@ -298,7 +396,7 @@ __SNAPSHOT__
     facts.cutoffs = [];
     for (const co of FIX.cutoffs) {
       await typeCutoff(co);
-      const full = { cutoff: cutoffEl().value, counts: counts(), status: status() };
+      const full = { cutoff: cutoffEl().value, counts: counts(), status: status(), panel: panel() };
       seg('Train').click(); await settle();
       const train = { counts: counts(), status: status(), empty: emptyShown(), sumSub: sumSub() };
       await snap('train at ' + co, c);
@@ -345,30 +443,19 @@ def drive(browser: str, fix: dict, exclude: str = "__nothing__") -> dict:
     page = html.replace("</head>", DRIVER.replace("__SNAPSHOT__", O.SNAPSHOT_JS).replace("__FIX__", json.dumps(fix))
                         .replace("__EXCLUDE__", exclude) + "</head>", 1)
     import os
+
+    import edge_cdp
     tmp = ROOT / "scripts" / f"_oo_split_ui_{os.getpid()}.html"   # unique: a gate may run beside itself
     tmp.write_text(page, encoding="utf-8")
-    import tempfile
-    prof = tempfile.mkdtemp(prefix="edge-gate-")
+    # REAL TIME, over the DevTools protocol (edge_cdp): the page's own report
+    # is waited for, and a timeout names the last step it marked. It ran on
+    # --virtual-time-budget until 2026-10-25, and twice the page was printed
+    # partway through under the parallel suite, cause not found.
     try:
-        p = subprocess.run(
-            # A PRIVATE profile per run: gates run six at a time, and a second
-            # Edge on the default profile hands its page to the first and exits
-            # with nothing -- "the page never reported".
-            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1200", f"--user-data-dir={prof}",
-             "--dump-dom", "--virtual-time-budget=90000", tmp.as_uri()],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        text = edge_cdp.run_page(browser, tmp, timeout_s=300)
     finally:
         tmp.unlink(missing_ok=True)
-        import shutil
-        shutil.rmtree(prof, ignore_errors=True)
-    m = re.search(r'<pre id="report">(.*?)</pre>', p.stdout, re.S)
-    if not m:
-        prog = re.search(r'data-progress="([^"]*)"', p.stdout)
-        alpine = "Alpine loaded" if "_x_dataStack" in p.stdout or 'x-data="ooBacktest"' in p.stdout else ""
-        raise RuntimeError("the page never reported -- it did not get that far: "
-                           f"last step {prog.group(1) if prog else '(none: before the first snapshot)'}, "
-                           f"{len(p.stdout):,} bytes of DOM, exit {p.returncode}, stderr: {(p.stderr or '').strip()[-300:]}")
-    out = json.loads(_html.unescape(m.group(1)))
+    out = json.loads(text)
     if out.get("error"):
         check(False, "the driver ran to the end", out["error"])
     check(not out.get("errs"), "no console errors", " ~ ".join(out.get("errs") or [])[:600])
@@ -430,7 +517,14 @@ def no_bad_text(run: dict, label: str) -> None:
     # bars" -- the stubbed market status leaves that hidden pane half-filled.
     hits = [l for s in run["steps"] for l in s["dom"]
             if l.split("|")[3] != "H" and BAD_TEXT.search(l.replace("zero/NaN bars", ""))]
-    facts_txt = json.dumps({k: v for k, v in run["facts"].items() if k not in ("csvTrain", "csvFull", "rankTrain", "rankFull")})
+    def shown_only(v):
+        # What reached the screen: not the panel's raw numbers ("data"), not
+        # the component's state, not request bodies.
+        if isinstance(v, dict):
+            return {k: shown_only(x) for k, x in v.items() if k not in ("data", "panelState")}
+        return [shown_only(x) for x in v] if isinstance(v, list) else v
+    facts_txt = json.dumps(shown_only({k: v for k, v in run["facts"].items()
+                                       if k not in ("csvTrain", "csvFull", "rankTrain", "rankFull")}))
     hits += [m.group(0) for m in BAD_TEXT.finditer(facts_txt)]
     check(not hits, f"{label}: no NaN, undefined or Infinity on any screen", "; ".join(map(str, hits[:4])))
 
@@ -455,10 +549,15 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
 
     b_files = {n: alter_test(c, cut) for n, c in files.items()}
     c_files = {n: duplicate_test(c, cut) for n, c in files.items()}
+    vfile, param = None, None
     if variant:
+        p0 = pa["sweep"]["params"][0]
+        param = {"name": p0, "value": pa["sweep"]["values"][p0][0]}
+        vfile = pa["sweep"]["variants"][2]["file"]
         variant = str(pa["sweep"]["variants"][2]["id"])
     base = {"registry": registry_with_coverage(None), "catalog": CATALOG, "rankRows": RANK_ROWS, "names": list(files),
-            "cutoffs": cutoffs, "dateFrom": date_from, "outside": outside, "variant": variant}
+            "cutoffs": cutoffs, "dateFrom": date_from, "outside": outside, "variant": variant,
+            "param": param}
     A = drive(browser, {**base, "payload": pa})
     B = drive(browser, {**base, "payload": payload(b_files)})
     C = drive(browser, {**base, "payload": payload(c_files)})
@@ -602,6 +701,119 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
     check(len(dtr) == int((nomon_all["d"] <= cut).sum()) and all(x <= cut for x in dtr),
           f"Export CSV in Train view: the {len(dtr)} filtered train trades, none after the cutoff")
     check(len(dfu) == len(nomon_all), f"Export CSV in Full view: all {len(dfu)} filtered trades")
+
+    # ── the Train vs Test panel ──────────────────────────────────────────
+    per_v = variant is not None
+    check(fa.get("afterOn", {}).get("panel") is None and fa.get("afterOn", {}).get("panelState") is None
+          and fa.get("trainDow", {}).get("panel") is None and fa.get("trainDow", {}).get("panelState") is None,
+          "Train view: the panel is not in the DOM and was not even computed")
+    check(fa.get("afterOff", {}).get("panel") is None and fa.get("afterOff", {}).get("panelState") is None,
+          "Split Off: no panel")
+
+    def check_panel(pn, d_all, d_filt, what, cutoff, pv=None):
+        pv = per_v if pv is None else pv
+        if not pn:
+            check(False, f"{what}: the panel is on the page in Full view")
+            return
+        ok_all, why = True, []
+        for key, sel in (("train", lambda d: d[d["d"] <= cutoff]), ("test", lambda d: d[d["d"] > cutoff])):
+            for side, src in (("u", d_all), ("f", d_filt)):
+                want = panel_ref(sel(src), pv)
+                got = (pn["data"] or {}).get(key, {}).get(side)
+                if want is None or got is None:
+                    if (want is None) != (got is None):
+                        ok_all = False
+                        why.append(f"{key}.{side}: {got} vs {want}")
+                    continue
+                for f in ("n", "win", "avg", "total", "dd", "calmar", "pf", "k"):
+                    if not close(got.get(f), want[f]):
+                        ok_all = False
+                        why.append(f"{key}.{side}.{f}: page {got.get(f)} vs reference {want[f]}")
+        check(ok_all, f"{what}: all four rows equal pandas + stats.py on their trades"
+                      + (" (total / Max DD / Calmar as the mean of each variant's own)" if pv else ""),
+              "; ".join(why[:6]))
+        return ok_all
+
+    fdp = fa.get("fullDow", {}).get("panel")
+    check_panel(fa.get("afterFull", {}).get("panel"), df, df, "Full view, no filter", cut)
+    check_panel(fdp, df, nomon_all, "Full view, Mon unticked", cut)
+    if fdp:
+        # The lift row, against the brief's formulas, as printed.
+        tr_u, tr_f = panel_ref(df[df["d"] <= cut], per_v), panel_ref(nomon_all[nomon_all["d"] <= cut], per_v)
+        lift = [""] + fdp["rows"][2]          # the lift row has no group cell; pad so indices match
+        want_kept = f"{tr_f['n'] / tr_u['n'] * 100:.0f}% kept"
+        dpp = tr_f["win"] - tr_u["win"]
+        want_pp = ("+" if dpp > 0 else "") + f"{dpp:.1f}pp"
+        ddl = (abs(tr_u["dd"]) - abs(tr_f["dd"])) / abs(tr_u["dd"]) * 100 if tr_u["dd"] else None
+        want_dd = "—" if ddl is None else ("+" if ddl > 0 else "") + f"{ddl:.0f}%"
+        apct = (tr_f["avg"] - tr_u["avg"]) / abs(tr_u["avg"]) * 100
+        check(lift[1] == "lift" and lift[2] == want_kept and lift[3] == want_pp and lift[5] == "n/a" and lift[6] == want_dd
+              and lift[4].endswith(("+" if apct > 0 else "") + f"{apct:.1f}%"),
+              f"train lift row: {lift[2:]} (kept, pp, avg with its %, n/a, Max DD %)",
+              json.dumps([want_kept, want_pp, apct, want_dd]))
+        rows = [r for r in fdp["rows"]]
+        check(len(rows) == 6 and rows[0][0].startswith("TRAIN") and rows[3][0].startswith("TEST"),
+              "two blocks of three rows, periods as rows: TRAIN then TEST", json.dumps([r[:2] for r in rows]))
+        note = fdp["note"]
+        check("drawdown measured within each period from zero, not read off the full curve" in note,
+              "the header says drawdown is per period, from zero", note)
+        pooled_note = "MEANS PER VARIANT" in note
+        check(pooled_note == per_v, ("the header says Total P/L, Max DD and Calmar are per-variant means"
+                                     if per_v else "a single log: no per-variant note"), note)
+        if per_v:
+            ks = [r[2] for r in rows if r[1] in ("unfiltered", "filtered")]
+            check(all(re.search(r"\d+ variants?$", k) for k in ks), f"each row shows its variant count: {ks}")
+    # ── the cache: what rebuilds it and what does not ────────────────────
+    b_full, b_dow = (fa.get("afterFull", {}).get("panel") or {}).get("builds"), (fdp or {}).get("builds")
+    check(b_full is not None and b_full == b_dow,
+          f"the unfiltered rows are NOT rebuilt by a clicked metric filter or by Off / Train / Full (builds {b_full} → {b_dow})")
+    ad_p = fa.get("afterDate", {}).get("panel")
+    if ad_p:
+        check(ad_p["builds"] > (b_dow or 0), f"a typed date range rebuilds them (builds {b_dow} → {ad_p['builds']})")
+        check_panel(ad_p, df[df["d"] >= date_from], nomon_all[nomon_all["d"] >= date_from],
+                    f"after typing the date range {date_from}: the unfiltered rows are the narrowed universe's", cut)
+    cut_builds = [(e["co"], (e["full"].get("panel") or {}).get("builds")) for e in fa.get("cutoffs", [])]
+    check(all(b2 > b1 for (_, b1), (_, b2) in zip(cut_builds, cut_builds[1:])),
+          f"every typed cutoff rebuilds them: {cut_builds}")
+    fv = fa.get("fullVariant", {}).get("panel")
+    if variant is not None and fv:
+        vf = vfile
+        check(fv["builds"] > (b_dow or 0), f"picking a variant rebuilds them (builds {b_dow} → {fv['builds']})")
+        check_panel(fv, df[df["vfile"] == vf], nomon_all[nomon_all["vfile"] == vf],
+                    f"one variant picked ({vf}): every row is that variant's alone", cut, pv=False)
+        fp = fa.get("fullParam", {}).get("panel")
+        keep = [v["file"] for v in pa["sweep"]["variants"] if v["params"][param["name"]] != param["value"]]
+        check(fp is not None and fp["builds"] > fv["builds"],
+              f"unticking {param['name']}={param['value']} (a parameter filter) rebuilds them")
+        if fp:
+            check_panel(fp, df[df["vfile"].isin(keep)], nomon_all[nomon_all["vfile"].isin(keep)],
+                        f"{param['name']}={param['value']} unticked: the universe is the {len(keep)} remaining variants", cut)
+        fn = fa.get("fullParamNone", {}).get("panel")
+        check(fn is not None and all(fn["data"][k]["u"] is None for k in ("train", "test")),
+              f"every {param['name']} value unticked: no unfiltered rows at all (not the previous selection's)",
+              json.dumps(fn and fn["rows"]))
+        fs = fa.get("fullParamSwap", {}).get("panel")
+        only = [v["file"] for v in pa["sweep"]["variants"] if v["params"][param["name"]] == param["value"]]
+        if fs:
+            check_panel(fs, df[df["vfile"].isin(only)], nomon_all[nomon_all["vfile"].isin(only)],
+                        f"only {param['name']}={param['value']} ticked (from the other value alone, via none): "
+                        f"the {len(only)} variants holding it", cut)
+    if variant is not None and fv:
+        ks = [fv["data"][k][side]["k"] for k in ("train", "test") for side in ("u", "f") if fv["data"][k][side]]
+        check("MEANS PER VARIANT" not in fv["note"] and ks and all(x == 1 for x in ks),
+              f"one variant picked: no per-variant note, every row one variant ({ks})", fv["note"])
+    for e in fa.get("cutoffs", []):
+        pn = e["full"].get("panel")
+        if e["co"] < d0:
+            check(pn and any("no trades in the train period" in " ".join(r) for r in pn["rows"]),
+                  f"cutoff {e['co']} before the first trade: the panel's TRAIN block says 'no trades in the train period'",
+                  json.dumps(pn and pn["rows"]))
+        elif e["co"] > d1:
+            check(pn and any("no trades in the test period" in " ".join(r) for r in pn["rows"]),
+                  f"cutoff {e['co']} after the last trade: the TEST block says 'no trades in the test period'",
+                  json.dumps(pn and pn["rows"]))
+        else:
+            check_panel(pn, df, nomon_all, f"panel at typed cutoff {e['co']}", e["co"])
 
     no_bad_text(A, label)
     print()

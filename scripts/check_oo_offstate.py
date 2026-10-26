@@ -33,6 +33,13 @@ card may hold while Off is asserted separately, by the split's own gate.
   python scripts/check_oo_offstate.py            compare with the recording
   python scripts/check_oo_offstate.py --record   (re)record -- only on a
       commit whose page is the one to keep; say why in the commit message
+  python scripts/check_oo_offstate.py --rerecord-from REF
+      re-record with THIS driver but the page (templates, static) exactly
+      as it was at REF, and the recording's own inputs -- for a change in
+      how the page is DRIVEN, never in what it is. Used once (2026-10-25):
+      the move from --virtual-time-budget to real time, where virtual time
+      had recorded an artifact (Alpine never shows an x-show element on
+      virtual time once hidden: the drop zone's label after a second upload).
 
 No browser (the VPS) -> SKIP.
 """
@@ -117,8 +124,14 @@ SNAPSHOT_JS = r"""
 
 DRIVER = r"""
 <script>
-window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 0);
-window.cancelAnimationFrame = id => clearTimeout(id);
+// NO requestAnimationFrame shim. It mapped frames to setTimeout(0) because
+// virtual time runs no frames; this page now runs in REAL time (edge_cdp),
+// where real frames run -- and the shim was itself a race: Alpine shows an
+// x-show element on the next frame and hides one at once, so with frames as
+// zero-delay timers and a stubbed upload that finishes instantly, a late
+// SHOW landed after the hide and "Parsing 4 files..." stuck on screen after
+// every sweep upload that followed a single file (12 of 12 with the shim,
+// 0 of 12 without, 2026-10-25). The drop zone read either way run to run.
 window.__errs = [];
 window.onerror = (m) => window.__errs.push('error: ' + m);
 window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
@@ -161,6 +174,7 @@ window.addEventListener('load', () => setTimeout(async () => {
   const until = async (cond, ms = 6000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
   const steps = [], notes = [];
 __SNAPSHOT__  const snap = async (name, c) => {
+    document.documentElement.setAttribute('data-progress', name);
     await wait(300);
     window.__excluded = 0;
     const d = scrub(dom());
@@ -258,26 +272,16 @@ def drive(browser: str, fix: dict) -> dict:
     page = html.replace("</head>", DRIVER.replace("__SNAPSHOT__", SNAPSHOT_JS).replace("__FIX__", json.dumps(fix)).replace("__EXCLUDE__", EXCLUDE)
                         + "</head>", 1)
     import os
+
+    import edge_cdp
     tmp = ROOT / "scripts" / f"_oo_offstate_{os.getpid()}.html"   # unique: a gate may run beside itself
     tmp.write_text(page, encoding="utf-8")
-    import tempfile
-    prof = tempfile.mkdtemp(prefix="edge-gate-")
+    # REAL TIME over the DevTools protocol (edge_cdp), not --virtual-time-budget:
+    # see edge_cdp's docstring for the flake that retired the budget.
     try:
-        p = subprocess.run(
-            # A PRIVATE profile per run: gates run six at a time, and a second
-            # Edge on the default profile hands its page to the first and exits
-            # with nothing -- "the page never reported".
-            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1200", f"--user-data-dir={prof}",
-             "--dump-dom", "--virtual-time-budget=60000", tmp.as_uri()],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
+        return json.loads(edge_cdp.run_page(browser, tmp, timeout_s=240))
     finally:
         tmp.unlink(missing_ok=True)
-        import shutil
-        shutil.rmtree(prof, ignore_errors=True)
-    m = re.search(r'<pre id="report">(.*?)</pre>', p.stdout, re.S)
-    if not m:
-        raise RuntimeError("the page never reported -- it did not get that far")
-    return json.loads(_html.unescape(m.group(1)))
 
 
 def first_diffs(a, b, path="", out=None, limit=12):
@@ -312,19 +316,34 @@ def dom_diff(a: list[str], b: list[str], limit=12) -> list[str]:
 
 def main() -> int:
     record = "--record" in sys.argv
+    rerecord = sys.argv[sys.argv.index("--rerecord-from") + 1] if "--rerecord-from" in sys.argv else None
+    wt = None
     browser = N.find_browser()
     if browser is None:
         print("  SKIP  no Edge/Chromium on this host -- the page was NOT driven")
         return EXIT_SKIPPED
     if record:
         fix = inputs()
+    elif rerecord:
+        # The page from REF, in a worktree beside this one; the inputs from
+        # the recording; this driver.
+        old = json.loads(gzip.decompress(BASELINE.read_bytes()))
+        fix = old["inputs"]
+        wt = ROOT.parent / f"_offstate_rerecord_{rerecord}"
+        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(wt), rerecord], cwd=ROOT, check=True)
+        N.ROOT = wt
     else:
         if not BASELINE.exists():
             print(f"  FAIL  no recording at {BASELINE.relative_to(ROOT)} -- nothing to compare against")
             return 1
         base = json.loads(gzip.decompress(BASELINE.read_bytes()))
         fix = base["inputs"]
-    got = drive(browser, fix)
+    try:
+        got = drive(browser, fix)
+    finally:
+        if wt is not None:
+            N.ROOT = ROOT
+            subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT)
     fails = 0
     if got.get("error"):
         print(f"  FAIL  the driver threw: {got['error'][:600]}")
@@ -332,6 +351,16 @@ def main() -> int:
     if got.get("errs"):
         print(f"  FAIL  console: {' ~ '.join(got['errs'][:6])[:600]}")
         fails += 1
+    if rerecord:
+        if fails:
+            print("\nnot re-recorded: the run itself failed")
+            return 1
+        rec = {"recorded_at": rerecord, "page_from": rerecord, "driver": "real time (edge_cdp)",
+               "dirty": False, "inputs": fix, "result": got}
+        BASELINE.write_bytes(gzip.compress(json.dumps(rec, sort_keys=True).encode(), mtime=0))
+        n = sum(len(st["dom"]) for st in got["steps"])
+        print(f"re-recorded {len(got['steps'])} steps ({n:,} DOM lines) from the page at {rerecord}, driven in real time")
+        return 0
     if record:
         if fails:
             print("\nnot recorded: the run itself failed")

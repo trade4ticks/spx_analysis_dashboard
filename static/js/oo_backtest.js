@@ -392,6 +392,77 @@ function obVariantFigures(cols, idx, sessions) {
   return out;
 }
 
+/* THE SUMMARY'S RULE, in one place (2026-10-25): scale-free figures POOL the
+ * trades; at ALL over several variants the scale-dependent ones are the MEAN
+ * of each variant's own (a variant counts when it has a trade in idx). It was
+ * written out twice, in recompute() and recomputeCapital(); the Summary and
+ * the Train vs Test panel now both call these, so they cannot disagree.
+ *
+ * obSummaryStats -> { pooled, stats, vm }: `per` is one entry per variant
+ *   with a trade in idx ({ id, rows, stats[, conc] }, obVariantFigures'
+ *   shape), or [] for a single log / one variant; vm is per when it holds
+ *   several variants, else null.
+ * obSummaryExtra -> obExtraStats' figures by the same rule. A variant's own
+ *   concurrency peak is used when it has one (the Summary); the panel passes
+ *   variants without it, and asks for nothing that needs capital. */
+function obSummaryStats(cols, idx, per) {
+  const pooled = obStats(cols, idx);
+  const vm = per.length > 1 ? per : null;
+  const stats = vm
+    ? { ...pooled, total_pnl: obMeanOf(per.map(f => f.stats.total_pnl)),
+        max_drawdown: obMeanOf(per.map(f => f.stats.max_drawdown)) }
+    : pooled;
+  return { pooled, stats, vm };
+}
+
+function obSummaryExtra(cols, idx, pooled, vm, capital, peak) {
+  let extra = obExtraStats(cols, idx, pooled, capital, peak);
+  if (vm) {
+    // Profit factor and Avg P/L % pool; the annual figures are each
+    // variant's own over its own span and peak, averaged.
+    const per = vm.map(f => obExtraStats(cols, f.rows, f.stats, capital, f.conc ? f.conc.peak : 0));
+    extra = { ...extra, years: null,
+              avg_annual_pnl: obMeanOf(per.map(e => e.avg_annual_pnl)),
+              calmar: obMeanOf(per.map(e => e.calmar)),
+              avg_annual_return_pct: obMeanOf(per.map(e => e.avg_annual_return_pct)) };
+  }
+  return extra;
+}
+
+/* One row of the Train vs Test panel: the Summary's figures for the trades
+ * in idx, by the Summary's rule (obSummaryStats / obSummaryExtra), or null
+ * when there are none. `perVariant` at ALL over a sweep. No concurrency: the
+ * panel shows nothing that needs it. k = variants with a trade here. */
+function obPanelRow(cols, idx, perVariant) {
+  if (!idx.length) return null;
+  const per = perVariant ? [...obByVariant(cols, idx)].map(([id, rows]) => ({ id, rows, stats: obStats(cols, rows) })) : [];
+  const { pooled, stats, vm } = obSummaryStats(cols, idx, per);
+  const extra = obSummaryExtra(cols, idx, pooled, vm, null, 0);
+  const d = cols.date_opened;
+  let lo = null, hi = null;
+  for (const i of idx) { if (d[i] && (lo === null || d[i] < lo)) lo = d[i]; if (d[i] && (hi === null || d[i] > hi)) hi = d[i]; }
+  return { n: stats.num_trades, win: stats.win_pct, avg: stats.avg_pnl, total: stats.total_pnl,
+           dd: stats.max_drawdown, calmar: extra.calmar, pf: extra.profit_factor, k: per.length || 1, from: lo, to: hi };
+}
+
+/* Filtered minus unfiltered, per column, as the brief defines it. Anything
+ * with nothing to divide by, or a side without the figure, is null ("—"). */
+function obLift(u, f) {
+  if (!u) return null;
+  if (!f) return { kept: 0, win: null, avg: null, avgPct: null, dd: null, calmar: null, pf: null };
+  const diff = (a, b) => (a === null || b === null || !Number.isFinite(a) || !Number.isFinite(b) ? null : a - b);
+  return {
+    kept: f.n / u.n * 100,
+    win: f.win - u.win,
+    avg: f.avg - u.avg,
+    avgPct: u.avg ? (f.avg - u.avg) / Math.abs(u.avg) * 100 : null,
+    // A SMALLER drawdown is a positive lift.
+    dd: u.dd ? (Math.abs(u.dd) - Math.abs(f.dd)) / Math.abs(u.dd) * 100 : null,
+    calmar: diff(f.calmar, u.calmar),
+    pf: diff(f.pf, u.pf),
+  };
+}
+
 /* Mean of the non-null values; null when there are none. */
 function obMeanOf(values) {
   let s = 0, n = 0;
@@ -707,6 +778,9 @@ document.addEventListener('alpine:init', () => {
     // {uTrain, uTest, fTrain, fTest}: the universe (date range + variant
     // selection) and the filtered trades, per period. Null while off.
     splitCounts: null,
+    // The Train vs Test panel's rows, computed in FULL VIEW ONLY (null
+    // otherwise): { cutoff, perVariant, train: {u, f}, test: {u, f} }.
+    panel: null,
 
     market: null,
     marketLoading: false,
@@ -1374,6 +1448,85 @@ document.addEventListener('alpine:init', () => {
       return v.label + ' (' + n.toLocaleString() + ' trades)';
     },
 
+    /* ── the Train vs Test panel (Full view only) ─────────────────────── */
+
+    /* THE ONE CACHE (2026-10-25, the user's decision after measuring): the
+     * two UNFILTERED rows are most of the panel's cost at sweep scale
+     * (~190-250 ms at 288,000 trades / 90 variants) and depend on exactly
+     * three things -- the date range, the variant selection (the selector
+     * and the parameter filters) and the cutoff -- plus, trivially, which
+     * log is loaded. Those, and nothing broader, are the key: a metric
+     * filter moving does not rebuild them. A stale entry would be a wrong
+     * panel, so check_oo_split_ui changes each trigger and holds the rows to
+     * pandas, and a planted stale key fails it. */
+    panelUnfiltered(cols, uni, cut, perV) {
+      const key = JSON.stringify([
+        OB_DATA.logToken, this.variantSel, cut,
+        this.universeSpecs().map(sp => [sp.kind, sp.column, sp.from ?? null, sp.to ?? null,
+                                        sp.allowed ? [...sp.allowed].map(String).sort() : null]),
+      ]);
+      const hit = OB_DATA.panelU;
+      if (hit && hit.key === key) return hit;
+      OB_DATA.panelUBuilds = (OB_DATA.panelUBuilds || 0) + 1;
+      OB_DATA.panelU = { key, train: obPanelRow(cols, obInPeriod(cols, uni, cut, 'train'), perV),
+                         test: obPanelRow(cols, obInPeriod(cols, uni, cut, 'test'), perV) };
+      return OB_DATA.panelU;
+    },
+
+    /* The muted right-hand slot: what a drawdown here is, and -- at ALL over
+     * several variants -- that the scale-dependent figures are per-variant
+     * means, or Total P/L reads as total dollars. */
+    panelNote() {
+      const p = this.panel;
+      if (!p) return '';
+      const rows = [p.train.u, p.train.f, p.test.u, p.test.f].filter(Boolean);
+      const means = p.perVariant && rows.some(r => r.k > 1);
+      return (means ? 'Total P/L, Max DD and Calmar are MEANS PER VARIANT · ' : '') +
+             'drawdown measured within each period from zero, not read off the full curve · ' +
+             `cutoff ${p.cutoff} by entry date`;
+    },
+
+    /* Two blocks of three rows (unfiltered, filtered, lift), cells already
+     * worded: { text, sub, cls }. A period with no trades is one line that
+     * says so; nothing here is ever NaN. */
+    panelBlocks() {
+      const p = this.panel;
+      if (!p) return [];
+      const money = (v, d) => obMoney(v, d);
+      const signed = (v, fmt) => (v === null ? { text: '—', cls: 'muted' }
+        : { text: (v > 0 ? '+' : '') + fmt(v), cls: v > 0 ? 'pos' : v < 0 ? 'neg' : 'muted' });
+      const figures = r => [
+        { text: r.n.toLocaleString(), sub: p.perVariant ? `${r.k} variant${r.k === 1 ? '' : 's'}` : '' },
+        { text: r.win.toFixed(1) + '%' },
+        { text: money(r.avg, 2), cls: r.avg < 0 ? 'neg' : '' },
+        { text: money(r.total), cls: r.total < 0 ? 'neg' : '' },
+        { text: money(r.dd), cls: r.dd < 0 ? 'neg' : '' },
+        { text: r.calmar === null ? '—' : r.calmar.toFixed(2), cls: r.calmar === null ? 'muted' : '' },
+        { text: r.pf === null ? '—' : r.pf === Infinity ? '∞' : r.pf.toFixed(2), cls: r.pf === null ? 'muted' : '' },
+      ];
+      const liftCells = l => [
+        { text: `${l.kept.toFixed(0)}% kept`, cls: 'muted' },
+        signed(l.win, v => v.toFixed(1) + 'pp'),
+        { ...signed(l.avg, v => money(v, 2)),
+          sub: l.avgPct === null ? '' : (l.avgPct > 0 ? '+' : '') + l.avgPct.toFixed(1) + '%' },
+        { text: 'n/a', cls: 'muted' },
+        signed(l.dd, v => v.toFixed(0) + '%'),
+        signed(l.calmar, v => v.toFixed(2)),
+        signed(l.pf, v => v.toFixed(2)),
+      ];
+      return ['train', 'test'].map(key => {
+        const b = p[key], label = key.toUpperCase();
+        if (!b.u) {
+          return { key, label, from: '', to: '', rows: [{ label: '', span: `no trades in the ${key} period`, cls: 'empty' }] };
+        }
+        const rows = [{ label: 'unfiltered', cells: figures(b.u), cls: 'unf' }];
+        rows.push(b.f ? { label: 'filtered', cells: figures(b.f), cls: 'filt' }
+                      : { label: 'filtered', span: `no ${key} trades pass the filters`, cls: 'filt empty' });
+        rows.push({ label: 'lift', cells: liftCells(obLift(b.u, b.f)), cls: 'lift' });
+        return { key, label, from: b.u.from, to: b.u.to, rows };
+      });
+    },
+
     /* What the surface ranking is computed on: the filtered trades, and with
      * the split on, ONLY their train part -- in Full view as well. A
      * 452-metric list carrying test correlations is a list to scroll until
@@ -1556,25 +1709,37 @@ document.addEventListener('alpine:init', () => {
         const uTrain = obInPeriod(cols, uni, cut, 'train').length;
         const train = obInPeriod(cols, idx, cut, 'train');
         this.splitCounts = { uTrain, uTest: uni.length - uTrain, fTrain: train.length, fTest: idx.length - train.length };
+        if (this.viewFull()) {
+          // The panel: unfiltered = the universe, filtered = every filter,
+          // each split at the cutoff. Never computed in Train view.
+          const perV = !!this.sweep && this.variantSel === 'all';
+          const row = rows => obPanelRow(cols, rows, perV);
+          const u = this.panelUnfiltered(cols, uni, cut, perV);
+          this.panel = {
+            cutoff: cut, perVariant: perV,
+            train: { u: u.train, f: row(train) },
+            test: { u: u.test, f: row(obInPeriod(cols, idx, cut, 'test')) },
+          };
+        } else {
+          this.panel = null;
+        }
         if (this.viewTrain()) idx = train;
       } else {
         this.splitCounts = null;
+        this.panel = null;
       }
       OB_DATA.idx = idx;
       this.idxTick++;
       this.filteredCount = idx.length;
-      const pooled = obStats(cols, idx);
-      OB_DATA.pooledStats = pooled;
       // ALL over several variants: the scale-dependent figures are the mean
-      // of each variant's own (see obVariantFigures).
+      // of each variant's own (obSummaryStats; see obVariantFigures).
       const per = this.sweep && this.variantSel === 'all' ? obVariantFigures(cols, idx, OB_DATA.sessions) : [];
-      OB_DATA.vm = per.length > 1 ? per : null;
+      const sum = obSummaryStats(cols, idx, per);
+      OB_DATA.pooledStats = sum.pooled;
+      OB_DATA.vm = sum.vm;
       OB_DATA.per = per;            // every variant with a trade in view, even one alone (the grid)
       this.vk = OB_DATA.vm ? per.length : (per.length || 1);
-      this.stats = OB_DATA.vm
-        ? { ...pooled, total_pnl: obMeanOf(per.map(f => f.stats.total_pnl)),
-            max_drawdown: obMeanOf(per.map(f => f.stats.max_drawdown)) }
-        : pooled;
+      this.stats = sum.stats;
       OB_DATA.conc = obConcurrency(cols, idx, OB_DATA.sessions);
       OB_DATA.eq = OB_DATA.vm ? obMeanEquity(cols, idx, OB_DATA.vm) : obEquity(cols, idx);
       // Nothing in view: the cards hide, but a canvas keeps what it last drew
@@ -1700,7 +1865,12 @@ document.addEventListener('alpine:init', () => {
           // once per variant, so n -- and every p-value -- is inflated.
           variants: this.splitOn() ? this.variantsIn(rIdx) : (OB_DATA.vm ? OB_DATA.vm.length : 1),
         };
-        this.$nextTick(() => this.renderRanking());
+        // On the frame AFTER Alpine's: the chart area is shown by x-show on
+        // a frame, and renderRanking sizes the chart from its container. Run
+        // on the tick, it raced that frame -- a hidden container measures 0
+        // and a ranking of under ~90 bars drew 88 px wide (found when the
+        // gates moved to real frames, 2026-10-25).
+        this.$nextTick(() => requestAnimationFrame(() => this.renderRanking()));
       } catch (e) {
         console.error('oo-backtest surface rank', e);
         this.surf.error = `Ranking failed: ${e.message}`;
@@ -2181,17 +2351,8 @@ document.addEventListener('alpine:init', () => {
     recomputeCapital() {
       if (!OB_DATA.columns || !this.stats) return;
       const conc = OB_DATA.conc, cap = this.capital(), vm = OB_DATA.vm;
-      let extra = obExtraStats(OB_DATA.columns, OB_DATA.idx, OB_DATA.pooledStats || this.stats, cap, conc ? conc.peak : 0);
-      if (vm) {
-        // Profit factor and Avg P/L % pool; the annual figures are each
-        // variant's own over its own span and peak, averaged.
-        const per = vm.map(f => obExtraStats(OB_DATA.columns, f.rows, f.stats, cap, f.conc.peak));
-        extra = { ...extra, years: null,
-                  avg_annual_pnl: obMeanOf(per.map(e => e.avg_annual_pnl)),
-                  calmar: obMeanOf(per.map(e => e.calmar)),
-                  avg_annual_return_pct: obMeanOf(per.map(e => e.avg_annual_return_pct)) };
-      }
-      this.extra = extra;
+      this.extra = obSummaryExtra(OB_DATA.columns, OB_DATA.idx, OB_DATA.pooledStats || this.stats, vm, cap,
+                                  conc ? conc.peak : 0);
       this.deploy = conc && { peak: vm ? obMeanOf(vm.map(f => f.conc.peak)) : conc.peak,
                               curvePeak: vm ? conc.peak / vm.length : conc.peak,
                               pooled: !!vm, peakDay: conc.peakDay, offSession: conc.offSession,

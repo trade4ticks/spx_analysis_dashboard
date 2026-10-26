@@ -127,6 +127,22 @@
     .ob-split .ob-split-note { margin-top:5px; line-height:1.4; }
     .ob-split .ob-split-note b { color:var(--text); font-weight:600; }
     .ob-split .ob-split-counts { margin-top:8px; font-size:12px; line-height:1.5; }
+    /* Train vs Test: periods as rows, stats as columns; the existing type
+       scale, blue / pink for lift, a rule between the two periods. */
+    .ob-tt .ob-card-sub { white-space:normal; text-align:right; max-width:60%; }
+    .ob-tt-table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+    .ob-tt-table th { font-size:10px; font-weight:600; color:var(--dim); text-transform:uppercase; letter-spacing:.04em;
+                      text-align:right; padding:4px 8px; }
+    .ob-tt-table td { text-align:right; padding:5px 8px; vertical-align:top; }
+    .ob-tt-table td small { display:block; font-size:10.5px; color:var(--dim); }
+    .ob-tt-table tbody + tbody tr:first-child td { border-top:1px solid var(--border); }
+    .ob-tt-table td.ob-tt-grp { text-align:left; font-weight:700; font-size:12px; letter-spacing:.04em; width:1%; white-space:nowrap; }
+    .ob-tt-table td.ob-tt-rl { text-align:left; color:var(--muted); width:1%; white-space:nowrap; }
+    .ob-tt-table td.ob-tt-span { text-align:left; color:var(--dim); }
+    .ob-tt-table tr.filt td { font-weight:600; }
+    .ob-tt-table tr.lift td.ob-tt-rl, .ob-tt-table td.muted { color:var(--dim); }
+    .ob-tt-table td.pos { color:#3498db; }
+    .ob-tt-table td.neg { color:#e84393; }
     .ob-variant-sel { flex:1; min-width:0; }
     .ob-variant-note { margin-top:4px; font-size:12px; line-height:1.4; }
     .ob-param-off .ob-checks { opacity:.45; }
@@ -511,6 +527,40 @@
           {{ m.stat_box('Avg Days', "stat('avg_days_in_trade')") | indent(10) | safe }}
         </div>
       </div>
+
+      <!-- Train vs Test (P2). FULL VIEW ONLY, and x-if: in Train view the
+           panel does not exist at all -- not hidden, not greyed -- because
+           the point of Train is that no test figure is on the page. -->
+      <template x-if="viewFull()">
+        <div class="ob-card ob-tt" x-show="loaded">
+          <div class="ob-card-hdr"><span class="ob-card-title">Train vs Test</span>
+            <span class="ob-card-sub" x-text="panelNote()"></span></div>
+          <div class="ob-card-body">
+            <table class="ob-tt-table">
+              <thead><tr><th></th><th></th><th>Trades</th><th>Win %</th><th>Avg P/L</th><th>Total P/L</th>
+                <th>Max DD</th><th>Calmar</th><th>PF</th></tr></thead>
+              <template x-for="blk in panelBlocks()" :key="blk.key">
+                <tbody :class="'ob-tt-' + blk.key">
+                  <template x-for="(r, i) in blk.rows" :key="blk.key + i">
+                    <tr :class="r.cls">
+                      <template x-if="i === 0">
+                        <td class="ob-tt-grp" :rowspan="blk.rows.length"><span x-text="blk.label"></span>
+                          <small x-show="blk.from" x-text="blk.from"></small><small x-show="blk.to" x-text="blk.to"></small></td>
+                      </template>
+                      <td class="ob-tt-rl" x-text="r.label"></td>
+                      <template x-if="r.span"><td class="ob-tt-span" colspan="7" x-text="r.span"></td></template>
+                      <template x-for="(cell, k) in (r.cells || [])" :key="k">
+                        <td :class="cell.cls"><span x-text="cell.text"></span>
+                          <small x-show="cell.sub" x-text="cell.sub"></small></td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </template>
+            </table>
+          </div>
+        </div>
+      </template>
 
       <!-- Kept in the DOM (x-show, not x-if) so the canvases exist before the
            first render and Chart.js can size them. -->
