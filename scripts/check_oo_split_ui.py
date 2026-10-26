@@ -30,6 +30,14 @@ THE CACHE of the two unfiltered rows: a clicked metric filter and a view
 switch do NOT rebuild them; a typed cutoff, a picked variant and a typed
 date range DO, and each time the rows equal pandas on the new universe.
 
+P3: the dashed cutoff line is drawn on BOTH performance charts in Full view
+-- at the cutoff's pixel, labelled "entry cutoff <date>", #8a8a8a, 1px,
+4 4 dash -- and on neither in Train view or with Split Off. A sweep's grid in
+Full view is two pivots: train on the left, test on the right, each cell
+against pandas on that variant's filtered trades of that period; the test
+pivot repeats no row labels; one shading scale across both. Train view: one
+pivot, the train trades, no test pivot in the DOM.
+
 Also, by click and against stats.py / an independent cutoff:
   * Split Off: the card holds only the Off/On control. On -> Train -> Full ->
     Off returns the page to exactly its pre-split state
@@ -300,6 +308,21 @@ __SNAPSHOT__
              data: JSON.parse(JSON.stringify(Alpine.$data(document.body).panel, (k, v) => (v === Infinity ? 'Infinity' : v))),
              builds: OB_DATA.panelUBuilds || 0 };
   };
+  const cutLine = () => ['ob-cum-chart', 'ob-dd-chart'].map(id => {
+    const ch = Chart.getChart(document.getElementById(id));
+    if (!ch) return 'no chart';
+    const d = ch.$cutoffDrawn;
+    return d ? { ...d, want: d.outside ? null : ch.scales.x.getPixelForValue(obDay(Alpine.$data(document.body).split.cutoff)) } : null;
+  });
+  const grids = () => {
+    const card = [...document.querySelectorAll('.ob-main .ob-card')].find(e => txt(e.querySelector('.ob-card-title')) === 'Parameter grid');
+    if (!card || !shown(card)) return null;
+    const read = t => t ? [...t.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(td => ({
+      text: txt(td.querySelector('.ob-pgrid-v')), sub: txt(td.querySelector('.ob-pgrid-n')), bg: getComputedStyle(td).backgroundColor }))) : null;
+    const left = card.querySelector('.ob-pgrid-wrap > table.ob-pgrid'), test = card.querySelector('.ob-pgrid-test table.ob-pgrid');
+    return { train: read(left), test: read(test), testRowLabels: test ? test.querySelectorAll('tbody th').length : null,
+             heads: [...card.querySelectorAll('.ob-pgrid-head')].map(txt), sub: txt(card.querySelector('.ob-card-sub')) };
+  };
   const emptyShown = () => { const e = [...document.querySelectorAll('.ob-main .ob-empty')].find(shown); return e ? txt(e) : ''; };
   const sumSub = () => { const e = document.querySelector('.ob-summary .ob-card-sub'); return e ? txt(e) : ''; };
   const rankSub = () => [...document.querySelectorAll('.ob-main .ob-card')].filter(e => /Surface metrics vs P\/L/.test(txt(e.querySelector('.ob-card-title'))))
@@ -325,13 +348,13 @@ __SNAPSHOT__
     seg('On').click(); await settle();
     facts.afterOn = { trainOn: seg('Train').classList.contains('on'), fullOn: seg('Full').classList.contains('on'),
                       cutoffShown: cutoffEl() ? cutoffEl().value : null, counts: counts(), status: status(), sumSub: sumSub(),
-                      panel: panel(), panelState: c.panel };
+                      panel: panel(), panelState: c.panel, line: cutLine() };
     await snap('train', c);
     seg('Full').click(); await settle();
-    facts.afterFull = { counts: counts(), status: status(), sumSub: sumSub(), panel: panel() };
+    facts.afterFull = { counts: counts(), status: status(), sumSub: sumSub(), panel: panel(), line: cutLine() };
     await snap('full', c);
     seg('Off').click(); await settle();
-    facts.afterOff = { panel: panel(), panelState: c.panel };
+    facts.afterOff = { panel: panel(), panelState: c.panel, line: cutLine() };
     await snap('off again', c);
 
     // ── Train view, a clicked filter ─────────────────────────────────────
@@ -340,7 +363,7 @@ __SNAPSHOT__
     facts.dowEnabled = !mon.querySelector('input').disabled;
     const before = c.filteredCount;
     mon.querySelector('input').click(); await until(() => c.filteredCount !== before); await settle();
-    facts.trainDow = { counts: counts(), status: status(), panel: panel(), panelState: c.panel };
+    facts.trainDow = { counts: counts(), status: status(), panel: panel(), panelState: c.panel, grids: grids(), line: cutLine() };
     await snap('train dow', c);
     facts.csvTrain = await exportText();
     facts.rankTrain = await rank(c);
@@ -349,7 +372,7 @@ __SNAPSHOT__
 
     // ── Full view ────────────────────────────────────────────────────────
     seg('Full').click(); await settle();
-    facts.fullDow = { counts: counts(), status: status(), stale: c.surfStale(), panel: panel() };
+    facts.fullDow = { counts: counts(), status: status(), stale: c.surfStale(), panel: panel(), grids: grids(), line: cutLine() };
     await snap('full dow', c);
     facts.rankFull = await rank(c);
     facts.rankSubFull = rankSub();
@@ -396,7 +419,7 @@ __SNAPSHOT__
     facts.cutoffs = [];
     for (const co of FIX.cutoffs) {
       await typeCutoff(co);
-      const full = { cutoff: cutoffEl().value, counts: counts(), status: status(), panel: panel() };
+      const full = { cutoff: cutoffEl().value, counts: counts(), status: status(), panel: panel(), line: cutLine() };
       seg('Train').click(); await settle();
       const train = { counts: counts(), status: status(), empty: emptyShown(), sumSub: sumSub() };
       await snap('train at ' + co, c);
@@ -578,8 +601,17 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
     ok, why = same(step(A, "off"), step(A, "off again"))
     check(ok, "On → Train → Full → Off: the DOM, every chart and every figure are the pre-split page's again", why)
     # Full computes what Off computes.
-    ok, why = same(step(A, "off"), step(A, "full"), parts=("charts", "state"))
-    check(ok, "Full view's charts and figures are exactly the Off page's (only headers differ)", why)
+    # Except the parameter grid: in Full view its left pivot is the TRAIN
+    # trades by design (P3) -- checked against pandas below.
+    # (and the calmar the Off grid caches onto each variant's entry as it
+    # draws -- a side effect of the grid, not a figure anything shows).
+    def no_grid(st):
+        state = {k: v for k, v in st["state"].items() if k != "grid"}
+        if state.get("vm"):
+            state["vm"] = [{k: v for k, v in f.items() if k != "calmar"} for f in state["vm"]]
+        return {**st, "state": state}
+    ok, why = same(no_grid(step(A, "off")), no_grid(step(A, "full")), parts=("charts", "state"))
+    check(ok, "Full view's charts and figures are exactly the Off page's (only headers differ; the grid is P3's train/test pair)", why)
 
     # ── THE DIFFERENTIAL ─────────────────────────────────────────────────
     # B and C change only trades entered after the DEFAULT cutoff, so the
@@ -814,6 +846,70 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
                   json.dumps(pn and pn["rows"]))
         else:
             check_panel(pn, df, nomon_all, f"panel at typed cutoff {e['co']}", e["co"])
+
+    # ── P3: the cutoff line ──────────────────────────────────────────────
+    def line_ok(ln):
+        return (isinstance(ln, list) and len(ln) == 2 and all(isinstance(x, dict) and not x.get("outside")
+                and x.get("label") == f"entry cutoff {cut}" and x.get("color") == "#8a8a8a" and x.get("width") == 1
+                and x.get("dash") == [4, 4] and abs(x["px"] - x["want"]) < 0.5 for x in ln))
+    check(line_ok(fa.get("afterFull", {}).get("line")) and line_ok(fa.get("fullDow", {}).get("line")),
+          f"Full view: the dashed cutoff line on BOTH charts at the cutoff's pixel, 'entry cutoff {cut}', #8a8a8a 1px 4 4",
+          json.dumps(fa.get("afterFull", {}).get("line")))
+    check(fa.get("afterOn", {}).get("line") == [None, None] and fa.get("trainDow", {}).get("line") == [None, None]
+          and fa.get("afterOff", {}).get("line") == [None, None],
+          "Train view and Split Off: no cutoff line on either chart",
+          json.dumps([fa.get("afterOn", {}).get("line"), fa.get("afterOff", {}).get("line")]))
+    late = next((e for e in fa.get("cutoffs", []) if e["co"] > d1), None)
+    if late:
+        check(all(isinstance(x, dict) and x.get("outside") for x in late["full"].get("line") or []),
+              f"a cutoff after the last close ({late['co']}): no line drawn off the chart",
+              json.dumps(late["full"].get("line")))
+
+    # ── P3: the two pivots ───────────────────────────────────────────────
+    if variant is not None:
+        sw = pa["sweep"]
+        gx, gy = sw["params"][0], sw["params"][1]
+
+        def money2(v):
+            return ("-" if v < 0 else "") + f"${abs(v):,.2f}"
+
+        def want_grid(frame_):
+            rows = []
+            for yv in sw["values"][gy]:
+                row = []
+                for xv in sw["values"][gx]:
+                    f = next(v["file"] for v in sw["variants"] if v["params"][gx] == xv and v["params"][gy] == yv)
+                    d = frame_[frame_["vfile"] == f]
+                    row.append({"text": money2(float(d["pnl"].mean())) if len(d) else "—",
+                                "sub": f"{len(d):,} trades" if len(d) else "no trades"})
+                rows.append(row)
+            return rows
+
+        def strip(g):
+            return [[{"text": c["text"], "sub": c["sub"]} for c in row] for row in g] if g else g
+        gd = fa.get("fullDow", {}).get("grids") or {}
+        w_tr, w_te = want_grid(nomon_all[nomon_all["d"] <= cut]), want_grid(nomon_all[nomon_all["d"] > cut])
+        check(strip(gd.get("train")) == w_tr, "Full view: the LEFT pivot is the train trades, every cell (avg P/L, trades) = pandas",
+              json.dumps([strip(gd.get("train")), w_tr]))
+        check(strip(gd.get("test")) == w_te, "Full view: the RIGHT pivot is the test trades, every cell = pandas",
+              json.dumps([strip(gd.get("test")), w_te]))
+        check(gd.get("testRowLabels") == 0 and len(gd.get("test") or []) == len(gd.get("train") or [None]),
+              "the test pivot repeats no row labels and has the train pivot's rows", json.dumps(gd.get("testRowLabels")))
+        check(len(gd.get("heads", [])) == 2 and gd["heads"][0].startswith("Train ·") and gd["heads"][1].startswith("Test ·"),
+              f"the two heads: {gd.get('heads')}")
+        # One scale: only the single strongest |value| across BOTH grids is at full strength.
+        alph = lambda bg: float(bg.rsplit(",", 1)[1].rstrip(")")) if bg.startswith("rgba") else 1.0  # noqa: E731
+        cells = [c for g in (gd.get("train") or [], gd.get("test") or []) for row in g for c in row if c["text"] not in ("", "—")]
+        vals = [abs(float(c["text"].replace("$", "").replace(",", ""))) for c in cells]
+        full_strength = [c for c in cells if alph(c["bg"]) >= 0.999]
+        top = max(vals) if vals else None
+        check(len(full_strength) == vals.count(top) and all(abs(float(c["text"].replace("$", "").replace(",", ""))) == top
+                                                             for c in full_strength),
+              "one shading scale across both pivots: only the largest |value| of the two is at full strength",
+              json.dumps([(c["text"], c["bg"]) for c in cells]))
+        tg = fa.get("trainDow", {}).get("grids") or {}
+        check(tg.get("test") is None and not tg.get("heads") and strip(tg.get("train")) == w_tr,
+              "Train view: one pivot -- the train trades -- and no test pivot in the DOM", json.dumps(tg)[:300])
 
     no_bad_text(A, label)
     print()

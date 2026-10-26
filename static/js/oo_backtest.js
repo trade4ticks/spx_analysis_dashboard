@@ -429,13 +429,52 @@ function obSummaryExtra(cols, idx, pooled, vm, capital, peak) {
   return extra;
 }
 
+/* The ONE new mark on the performance charts (P3): a faint dashed vertical
+ * line at the cutoff, labelled "entry cutoff YYYY-MM-DD" -- trades are
+ * assigned by ENTRY date but plotted by CLOSE date, so train trades keep
+ * closing past the line and the curve does not break there; the label says
+ * why. Drawn in Full view only (OB_DATA.cutoffLine is null otherwise), on
+ * both charts. It records what it drew on the chart ($cutoffDrawn) so the
+ * gate can check it without reading pixels. */
+const OB_CUTOFF_STYLE = { color: '#8a8a8a', width: 1, dash: [4, 4] };
+const OB_CUTOFF_LINE = {
+  id: 'obCutoffLine',
+  afterDatasetsDraw(chart) {
+    const c = OB_DATA.cutoffLine, x = chart.scales.x;
+    chart.$cutoffDrawn = null;
+    if (!c || !x) return;
+    const v = obDay(c.date);
+    if (v < x.min || v > x.max) { chart.$cutoffDrawn = { outside: true, date: c.date }; return; }
+    const px = x.getPixelForValue(v), area = chart.chartArea, ctx = chart.ctx;
+    const label = `entry cutoff ${c.date}`;
+    ctx.save();
+    ctx.strokeStyle = OB_CUTOFF_STYLE.color;
+    ctx.lineWidth = OB_CUTOFF_STYLE.width;
+    ctx.setLineDash(OB_CUTOFF_STYLE.dash);
+    ctx.beginPath();
+    ctx.moveTo(Math.round(px) + 0.5, area.top);
+    ctx.lineTo(Math.round(px) + 0.5, area.bottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = OB_CUTOFF_STYLE.color;
+    ctx.font = '10px sans-serif';
+    const w = ctx.measureText(label).width;
+    const right = px + 4 + w <= area.right;          // beside the line, inside the plot
+    ctx.textAlign = right ? 'left' : 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(label, right ? px + 4 : px - 4, area.top + 2);
+    ctx.restore();
+    chart.$cutoffDrawn = { date: c.date, px, label, ...OB_CUTOFF_STYLE };
+  },
+};
+
 /* One row of the Train vs Test panel: the Summary's figures for the trades
  * in idx, by the Summary's rule (obSummaryStats / obSummaryExtra), or null
  * when there are none. `perVariant` at ALL over a sweep. No concurrency: the
  * panel shows nothing that needs it. k = variants with a trade here. */
-function obPanelRow(cols, idx, perVariant) {
+function obPanelRow(cols, idx, perVariant, given) {
   if (!idx.length) return null;
-  const per = perVariant ? [...obByVariant(cols, idx)].map(([id, rows]) => ({ id, rows, stats: obStats(cols, rows) })) : [];
+  const per = perVariant ? (given || obPerVariantStats(cols, idx)) : [];
   const { pooled, stats, vm } = obSummaryStats(cols, idx, per);
   const extra = obSummaryExtra(cols, idx, pooled, vm, null, 0);
   const d = cols.date_opened;
@@ -443,6 +482,12 @@ function obPanelRow(cols, idx, perVariant) {
   for (const i of idx) { if (d[i] && (lo === null || d[i] < lo)) lo = d[i]; if (d[i] && (hi === null || d[i] > hi)) hi = d[i]; }
   return { n: stats.num_trades, win: stats.win_pct, avg: stats.avg_pnl, total: stats.total_pnl,
            dd: stats.max_drawdown, calmar: extra.calmar, pf: extra.profit_factor, k: per.length || 1, from: lo, to: hi };
+}
+
+/* Each variant's own rows and stats among idx: obVariantFigures without the
+ * concurrency, for the split's panel rows and its two parameter grids. */
+function obPerVariantStats(cols, idx) {
+  return [...obByVariant(cols, idx)].map(([id, rows]) => ({ id, rows, stats: obStats(cols, rows) }));
 }
 
 /* Filtered minus unfiltered, per column, as the brief defines it. Anything
@@ -763,6 +808,7 @@ document.addEventListener('alpine:init', () => {
     gridY: '',
     gridMetric: 'avg',
     grid: null,
+    gridTest: null,    // the test pivot beside it, Full view only (P3)
     paramRows: [],
     vk: 1,
     viewN: 0,
@@ -1105,19 +1151,34 @@ document.addEventListener('alpine:init', () => {
 
     computeGrid() {
       const sw = this.sweep;
-      if (!this.gridShown() || !this.gridX) { this.grid = null; return; }
-      const per = OB_DATA.per || [];
-      const figures = new Map(per.map(f => {
+      if (!this.gridShown() || !this.gridX) { this.grid = null; this.gridTest = null; return; }
+      const figuresOf = per => new Map(per.map(f => {
         if (f.calmar === undefined) f.calmar = obExtraStats(OB_DATA.columns, f.rows, f.stats, null, 0).calmar;
         return [f.id, f];
       }));
       // An axis lists only the TICKED values: filter pt to 75 and the grid
       // collapses to one column of it, which is the question being asked.
       const ticked = Object.fromEntries(sw.params.map(p => [p, (sw.values[p] || []).filter(v => this.paramTicked(p, v))]));
-      const g = obParamGrid(sw.variants, ticked, figures, this.gridX, this.gridY);
+      // Full view (P3): TWO pivots of the same shape -- train on the left,
+      // test on the right -- from the filtered trades of each period. One
+      // variant picked out of 90 by its train figure is a 90-way search;
+      // the test pivot beside it is how that pick is checked. Otherwise one
+      // grid, from the trades in view (train, in Train view).
+      const split = this.viewFull() && OB_DATA.splitPer;
+      const sets = split ? [OB_DATA.splitPer.train, OB_DATA.splitPer.test] : [OB_DATA.per || []];
+      const grids = sets.map(per => obParamGrid(sw.variants, ticked, figuresOf(per), this.gridX, this.gridY));
       const metric = OB_GRID_METRICS.find(m => m.key === this.gridMetric) || OB_GRID_METRICS[0];
-      const shown = g.cells.flat().filter(c => c.n && c[metric.key] !== null);
+      // ONE shading scale across both pivots, so a colour means the same
+      // value on either side; THIN is against each grid's own median (a test
+      // cell holds fewer trades by construction).
+      const shown = grids.flatMap(g => g.cells.flat().filter(c => c.n && c[metric.key] !== null));
       const maxAbs = Math.max(0, ...shown.map(c => Math.abs(c[metric.key])));
+      const built = grids.map(g => this.gridBuild(g, metric, maxAbs));
+      this.grid = built[0];
+      this.gridTest = built[1] || null;
+    },
+
+    gridBuild(g, metric, maxAbs) {
       const median = obMedian(g.cells.flat().filter(c => c.n).map(c => c.n));
       const thinBelow = median === null ? 0 : median * OB_GRID_THIN;
       const lab = (k, v) => `${k}=${v}`;
@@ -1142,8 +1203,20 @@ document.addEventListener('alpine:init', () => {
                  `Win ${fig('win', c.win)} · Max DD ${fig('maxdd', c.maxdd)} · Calmar ${fig('calmar', c.calmar)}`,
         };
       }));
-      this.grid = { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label,
-                    median, thin: rows.flat().filter(x => x.thin).length };
+      return { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label,
+               median, thin: rows.flat().filter(x => x.thin).length };
+    },
+
+    /* The heads over the two pivots in Full view. */
+    gridHead(which) {
+      const c = this.splitCounts, cut = this.split.cutoff;
+      if (!c) return '';
+      return which === 'train' ? `Train · entries on or before ${cut} · ${c.fTrain.toLocaleString()} trades`
+                               : `Test · entries after ${cut} · ${c.fTest.toLocaleString()} trades`;
+    },
+    gridSub() {
+      const m = this.grid ? this.grid.metric : '';
+      return this.viewFull() && this.gridTest ? `train and test · ${m}` : this.withPeriod(m);
     },
 
     /* Said under the grid: what a cell is when it holds several variants. */
@@ -1157,10 +1230,14 @@ document.addEventListener('alpine:init', () => {
                    `${Math.round(OB_GRID_THIN * 100)}% of the median cell's trades (median ` +
                    `${this.grid.median === null ? '—' : this.grid.median.toLocaleString()}; ${this.grid.thin} thin now). ` +
                    'All filters apply.';
-      if (!others.length) return 'Each cell is one variant. ' + rule;
+      const both = this.viewFull() && this.gridTest
+        ? ' Full view: the left grid is the TRAIN trades, the right the TEST trades, cell for cell, each by the rule ' +
+          'above; shade on ONE scale across both, the thin outline against each grid\'s own median.'
+        : '';
+      if (!others.length) return 'Each cell is one variant. ' + rule + both;
       const what = others.map(p => `${p} (${(sw.values[p] || []).filter(v => this.paramTicked(p, v)).length} values)`).join(', ');
       return `More than two parameters: each cell pools every variant sharing its ${this.gridX}` +
-             (this.gridY ? ` and ${this.gridY}` : '') + ` values, across ${what}. ` + rule;
+             (this.gridY ? ` and ${this.gridY}` : '') + ` values, across ${what}. ` + rule + both;
     },
 
     variantNote() {
@@ -1713,20 +1790,25 @@ document.addEventListener('alpine:init', () => {
           // The panel: unfiltered = the universe, filtered = every filter,
           // each split at the cutoff. Never computed in Train view.
           const perV = !!this.sweep && this.variantSel === 'all';
-          const row = rows => obPanelRow(cols, rows, perV);
           const u = this.panelUnfiltered(cols, uni, cut, perV);
+          // The filtered trades' per-variant figures, ONE pass per period:
+          // the panel's filtered rows and the two parameter grids share it.
+          const test = obInPeriod(cols, idx, cut, 'test');
+          OB_DATA.splitPer = perV ? { train: obPerVariantStats(cols, train), test: obPerVariantStats(cols, test) } : null;
           this.panel = {
             cutoff: cut, perVariant: perV,
-            train: { u: u.train, f: row(train) },
-            test: { u: u.test, f: row(obInPeriod(cols, idx, cut, 'test')) },
+            train: { u: u.train, f: obPanelRow(cols, train, perV, OB_DATA.splitPer && OB_DATA.splitPer.train) },
+            test: { u: u.test, f: obPanelRow(cols, test, perV, OB_DATA.splitPer && OB_DATA.splitPer.test) },
           };
         } else {
           this.panel = null;
+          OB_DATA.splitPer = null;
         }
         if (this.viewTrain()) idx = train;
       } else {
         this.splitCounts = null;
         this.panel = null;
+        OB_DATA.splitPer = null;
       }
       OB_DATA.idx = idx;
       this.idxTick++;
@@ -2580,6 +2662,8 @@ document.addEventListener('alpine:init', () => {
       const cum = pts.map(p => ({ x: obDay(p.date), y: p.cumulative, p }));
       const dd = pts.map(p => ({ x: obDay(p.date), y: p.drawdown, p }));
       const mark = eq.maxDD ? [{ x: obDay(eq.maxDD.date), y: eq.maxDD.drawdown, p: eq.maxDD }] : [];
+      // The cutoff line (OB_CUTOFF_LINE): Full view only.
+      OB_DATA.cutoffLine = this.viewFull() ? { date: this.split.cutoff } : null;
 
       const axis = (money) => ({
         type: 'linear',
@@ -2615,12 +2699,12 @@ document.addEventListener('alpine:init', () => {
 
       if (OB_CHARTS.cum) { OB_CHARTS.cum.data = cumData; Object.assign(OB_CHARTS.cum.options.scales.x, xr); OB_CHARTS.cum.update('none'); }
       else {
-        OB_CHARTS.cum = new Chart(cumEl.getContext('2d'), { type: 'line', data: cumData,
+        OB_CHARTS.cum = new Chart(cumEl.getContext('2d'), { type: 'line', data: cumData, plugins: [OB_CUTOFF_LINE],
           options: base(c => `Cumulative ${obMoney(c.raw.p.cumulative)} · day ${obMoney(c.raw.p.pnl)}`) });
       }
       if (OB_CHARTS.dd) { OB_CHARTS.dd.data = ddData; Object.assign(OB_CHARTS.dd.options.scales.x, xr); OB_CHARTS.dd.update('none'); }
       else {
-        OB_CHARTS.dd = new Chart(ddEl.getContext('2d'), { type: 'line', data: ddData,
+        OB_CHARTS.dd = new Chart(ddEl.getContext('2d'), { type: 'line', data: ddData, plugins: [OB_CUTOFF_LINE],
           options: base(c => (c.datasetIndex === 1 ? 'Max drawdown ' : 'Drawdown ') + `${obMoney(c.raw.p.drawdown)}` +
                              (c.raw.p.peak === null ? ' (mean per variant)' : ` · peak ${obMoney(c.raw.p.peak)}`)) });
       }

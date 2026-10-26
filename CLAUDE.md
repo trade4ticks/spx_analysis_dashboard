@@ -298,7 +298,7 @@ period never looked at. Phases: **P0** gates (crash/skip honesty, the
 off-state recording) — done; **P1** split mechanics, the Train/Full view
 through Summary, sections, ranking (train only) — done; **P2** the Train vs
 Test panel — done; **P3** the cutoff line + the test pivot beside the parameter
-grid; **P4** saving cutoff + Split on/off (View never saves; restore to
+grid — done; **P4** saving cutoff + Split on/off (View never saves; restore to
 Train). The portfolio page is out of scope, by decision.
 - **Split OFF is the page as it was** — `check_oo_offstate` holds it to a
   recording made at 8f996e8 (DOM, charts, figures, export, requests); the
@@ -356,6 +356,18 @@ Train). The portfolio page is out of scope, by decision.
   ratios): recompute per filter change Off 794 ms, Train 586, Full with the
   cache 1,007, Full without 1,211 — the panel adds ~27% to a Full-view drag
   instead of ~52%.
+- **P3.** The cutoff line is a Chart.js plugin (`OB_CUTOFF_LINE`) on both
+  performance charts, drawn only in Full view (`OB_DATA.cutoffLine`),
+  `#8a8a8a` 1px `4 4`, labelled "entry cutoff YYYY-MM-DD" (entry-assigned,
+  close-plotted: train trades keep closing past it); it records what it drew
+  (`chart.$cutoffDrawn`) for the gate. A cutoff outside the plotted span
+  draws nothing. **The parameter grid in Full view is two pivots**: train
+  (left, with the row labels) and test (right, none), from the filtered
+  trades of each period, by the grid's existing rule; ONE shading scale
+  across both, THIN against each grid's own median. One per-variant pass per
+  period (`OB_DATA.splitPer`) feeds both the grids and the panel's filtered
+  rows. Train view: one pivot of the train trades. No sortable table, no row
+  highlight (the user withdrew them).
 - **`check_oo_split_ui` is a DIFFERENTIAL**: the same log with every TEST
   trade's P/L and exit reason changed (B) and with every test trade doubled
   (C) must render Train view IDENTICALLY to the original — DOM, titles,
@@ -1664,6 +1676,21 @@ bar-count rule would restore exactly the hiding this removed.
    pre-fix count; 2,064 would mean untouched filters exclude null-valued trades).
 3. Zero-P/L trades count toward Avg Loss but not as a win (matches the old app). Confirm
    whether the logs contain any.
+4. **Split Off recompute at sweep scale** (the user's, 2026-10-25 — the page as it was,
+   not the split): ~794 ms per filter change at 288,000 trades / 90 variants, measured in
+   Edge on the real page (`recompute()` timed directly; the machine was loaded by other
+   apps — CLAUDE.md's earlier quiet-machine figure was 260–460 ms at 240k). It is what
+   will be felt dragging sliders. Not investigated, by instruction.
+5. Noted, not acted on (2026-10-25; the user stopped gate and doc work):
+   - The other seven browser gates still run on `--virtual-time-budget` with the
+     `requestAnimationFrame` → `setTimeout(0)` shim. On the OO page that shim hid a real
+     race (the ranking width) and created a false one (the drop zone); the same may hold
+     for the pages those gates drive. Converting them waits on the two converted gates
+     running clean for a while (the user's call).
+   - `check_oo_split_ui` takes ~200 s serial in real time (was ~40 s); the full `--slow`
+     suite ~3.5 min. Not parallelised, by decision.
+   - The `spx-dashboard` systemd unit file is not in the repo (only `deploy/spx-live.service`
+     is); its contents are quoted in `DEPLOYMENT_NOTES.md`'s procedure only in part.
 
 ---
 

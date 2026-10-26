@@ -163,6 +163,12 @@
     .ob-pgrid-v { font-weight:600; }
     .ob-pgrid-n { font-size:10px; opacity:.75; }
     .ob-pgrid-note { margin-top:6px; font-size:12px; line-height:1.4; }
+    /* Full view: train pivot left, test pivot right, rows aligned. */
+    .ob-pgrid-split { display:grid; grid-template-columns:max-content max-content; column-gap:28px; align-items:start; }
+    .ob-pgrid-split > .ob-pgrid-head { grid-column:1; grid-row:1; }
+    .ob-pgrid-split > table.ob-pgrid { grid-column:1; grid-row:2; }
+    .ob-pgrid-split > .ob-pgrid-test { grid-column:2; grid-row:1 / span 2; }
+    .ob-pgrid-head { font-size:11px; color:var(--dim); margin:0 0 2px 3px; white-space:nowrap; }
     .ob-rank-pooled { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px;
                       border:1px solid var(--border); color:var(--dim); }
 
@@ -651,7 +657,7 @@
       <div class="ob-card" x-show="loaded && filteredCount > 0 && gridShown()">
         <div class="ob-card-hdr">
           <span class="ob-card-title">Parameter grid</span>
-          <span class="ob-card-sub" x-text="withPeriod(grid ? grid.metric : '')"></span>
+          <span class="ob-card-sub" x-text="gridSub()"></span>
         </div>
         <div class="ob-card-body">
           <div class="ob-row ob-pgrid-ctl">
@@ -675,7 +681,8 @@
               </template>
             </select>
           </div>
-          <div class="ob-pgrid-wrap" x-show="grid">
+          <div class="ob-pgrid-wrap" x-show="grid" :class="{ 'ob-pgrid-split': viewFull() && !!gridTest }">
+            <template x-if="viewFull() && !!gridTest"><div class="ob-pgrid-head" x-text="gridHead('train')"></div></template>
             <table class="ob-pgrid">
               <thead>
                 <tr>
@@ -697,6 +704,30 @@
                 </template>
               </tbody>
             </table>
+            <!-- The TEST pivot (P3, Full view only): the same shape, the rows
+                 lined up with the train grid, the row labels not repeated. -->
+            <template x-if="viewFull() && !!gridTest">
+              <div class="ob-pgrid-test">
+                <div class="ob-pgrid-head" x-text="gridHead('test')"></div>
+                <table class="ob-pgrid">
+                  <thead>
+                    <tr><template x-for="xv in gridTest.xs" :key="xv"><th x-text="xv"></th></template></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(row, r) in gridTest.rows" :key="r">
+                      <tr>
+                        <template x-for="(cell, k) in row" :key="k">
+                          <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
+                            <div class="ob-pgrid-v" x-text="cell.text"></div>
+                            <div class="ob-pgrid-n" x-text="cell.sub"></div>
+                          </td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
           </div>
           <div class="ob-dim ob-pgrid-note" x-text="gridNote()"></div>
         </div>
