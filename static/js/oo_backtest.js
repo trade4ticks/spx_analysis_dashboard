@@ -580,6 +580,16 @@ function obParamGrid(variants, values, figures, x, y) {
   return { xs, ys, cells };
 }
 
+/* Every unordered pair of sweep parameters, in the sweep's own parameter
+ * order: (p0,p1), (p0,p2), ... (p1,p2), ... -- N-choose-2 grids, the first of
+ * each pair across, the second down. Depends on nothing but the parameter
+ * list, so the layout never reshuffles as filters or the view change. */
+function obParamPairs(params) {
+  const out = [];
+  for (let i = 0; i < params.length; i++) for (let j = i + 1; j < params.length; j++) out.push([params[i], params[j]]);
+  return out;
+}
+
 /* Grid shading is MAGNITUDE: |value| against the largest |value| in the grid,
  * from the bars' floor up (a balanced sweep gives every cell the same trade
  * count, so opacity by n -- the first spec -- showed nothing). A cell holding
@@ -804,11 +814,11 @@ document.addEventListener('alpine:init', () => {
     variantSel: 'all',
     // The parameter grid (P3): axes, metric, and the rendered cells; and the
     // per-parameter sections, registry-shaped, built once per sweep.
-    gridX: '',
-    gridY: '',
     gridMetric: 'avg',
-    grid: null,
-    gridTest: null,    // the test pivot beside it, Full view only (P3)
+    // EVERY pair of parameters at once (2026-10-27; it was one pivot with
+    // Across / Down selectors): [{ key, x, y, train, test, note }], test
+    // only in Full view. See computeGrid.
+    grids: [],
     paramRows: [],
     vk: 1,
     viewN: 0,
@@ -1098,7 +1108,7 @@ document.addEventListener('alpine:init', () => {
       const sw = this.sweep, full = OB_DATA.full;
       OB_DATA.vparams = new Map((sw ? sw.variants : []).map(v => [v.id, v.params]));
       this.paramRows = [];
-      this.grid = null;
+      this.grids = [];
       if (!sw) return;
       const vid = full.columns.variant || [];
       for (const p of sw.params) {
@@ -1112,8 +1122,6 @@ document.addEventListener('alpine:init', () => {
           basis: null, series: [], pane: null, format: null, removable: false,
         });
       }
-      this.gridX = sw.params[0] || '';
-      this.gridY = sw.params[1] || '';
       this.gridMetric = 'avg';
     },
 
@@ -1151,21 +1159,15 @@ document.addEventListener('alpine:init', () => {
 
     /* The parameter sections and grid compare variants, so they show at ALL. */
     paramSections() { return this.sweep && this.variantSel === 'all' ? this.paramRows : []; },
-    gridShown() { return !!this.sweep && this.variantSel === 'all'; },
+    // A pair needs two parameters: a one-parameter sweep has no grid (its
+    // parameter section shows the same comparison).
+    gridShown() { return !!this.sweep && this.variantSel === 'all' && this.sweep.params.length >= 2; },
     gridMetrics() { return OB_GRID_METRICS; },
-    gridYOptions() { return this.sweep ? this.sweep.params.filter(p => p !== this.gridX) : []; },
-
-    setGridX(p) {
-      if (p === this.gridY) this.gridY = this.gridX;     // the two axes swap, never coincide
-      this.gridX = p;
-      this.computeGrid();
-    },
-    setGridY(p) { this.gridY = p; this.computeGrid(); },
     setGridMetric(k) { this.gridMetric = k; this.computeGrid(); },
 
     computeGrid() {
       const sw = this.sweep;
-      if (!this.gridShown() || !this.gridX) { this.grid = null; this.gridTest = null; return; }
+      if (!this.gridShown()) { this.grids = []; return; }
       const figuresOf = per => new Map(per.map(f => {
         if (f.calmar === undefined) f.calmar = obExtraStats(OB_DATA.columns, f.rows, f.stats, null, 0).calmar;
         return [f.id, f];
@@ -1180,25 +1182,40 @@ document.addEventListener('alpine:init', () => {
       // grid, from the trades in view (train, in Train view).
       const split = this.viewFull() && OB_DATA.splitPer;
       const sets = split ? [OB_DATA.splitPer.train, OB_DATA.splitPer.test] : [OB_DATA.per || []];
-      const grids = sets.map(per => obParamGrid(sw.variants, ticked, figuresOf(per), this.gridX, this.gridY));
+      // The per-variant figures are built ONCE per set; every pair only
+      // regroups them (obParamGrid), which is cheap next to them.
+      const figs = sets.map(figuresOf);
+      const pairs = obParamPairs(sw.params);
+      const raw = pairs.map(([x, y]) => figs.map(f => obParamGrid(sw.variants, ticked, f, x, y)));
       const metric = OB_GRID_METRICS.find(m => m.key === this.gridMetric) || OB_GRID_METRICS[0];
-      // ONE shading scale across both pivots, so a colour means the same
-      // value on either side; THIN is against each grid's own median (a test
-      // cell holds fewer trades by construction).
-      const shown = grids.flatMap(g => g.cells.flat().filter(c => c.n && c[metric.key] !== null));
+      // ONE shading scale across EVERY grid and both periods: the same value
+      // is the same colour anywhere on the card. A pair averaging over more
+      // hidden variants looks washed out next to one averaging over fewer --
+      // intended: it shows which pair carries the variation, so it is never
+      // normalised per grid. THIN is against each pivot's OWN median: cells of
+      // different grids (and periods) hold systematically different counts.
+      const shown = raw.flat().flatMap(g => g.cells.flat().filter(c => c.n && c[metric.key] !== null));
       const maxAbs = Math.max(0, ...shown.map(c => Math.abs(c[metric.key])));
-      const built = grids.map(g => this.gridBuild(g, metric, maxAbs));
-      this.grid = built[0];
-      this.gridTest = built[1] || null;
+      this.grids = pairs.map(([x, y], i) => {
+        const [tr, te] = raw[i].map(g => this.gridBuild(g, metric, maxAbs, x, y));
+        const hidden = sw.params.filter(p => p !== x && p !== y);
+        const none = [x, y].filter(p => !ticked[p].length);
+        const thin = b => `median ${b.median === null ? '—' : b.median.toLocaleString()} trades, ${b.thin} thin`;
+        const note = (none.length ? `no ${none.join(' or ')} value ticked · ` : '') +
+          (hidden.length ? `each cell pools across ${hidden.map(p => `${p} (${ticked[p].length} value${ticked[p].length === 1 ? '' : 's'})`).join(', ')}`
+                         : 'each cell is one variant') +
+          ` · ${te ? `train ${thin(tr)}; test ${thin(te)}` : thin(tr)}`;
+        return { key: `${x}|${y}`, x, y, train: tr, test: te || null, note };
+      });
     },
 
-    gridBuild(g, metric, maxAbs) {
+    gridBuild(g, metric, maxAbs, gx, gy) {
       const median = obMedian(g.cells.flat().filter(c => c.n).map(c => c.n));
       const thinBelow = median === null ? 0 : median * OB_GRID_THIN;
       const lab = (k, v) => `${k}=${v}`;
       const rows = g.cells.map((row, r) => row.map((c, k) => {
         const v = c[metric.key];
-        const where = lab(this.gridX, g.xs[k]) + (this.gridY ? ' · ' + lab(this.gridY, g.ys[r]) : '');
+        const where = lab(gx, g.xs[k]) + ' · ' + lab(gy, g.ys[r]);
         if (!c.variants) return { text: '', sub: '', bg: 'transparent', title: `${where}: no variant has this combination`, empty: true };
         if (!c.n || v === null) {
           return { text: '—', sub: c.n ? `${c.n.toLocaleString()} trades` : 'no trades', bg: 'transparent', empty: true,
@@ -1217,7 +1234,7 @@ document.addEventListener('alpine:init', () => {
                  `Win ${fig('win', c.win)} · Max DD ${fig('maxdd', c.maxdd)} · Calmar ${fig('calmar', c.calmar)}`,
         };
       }));
-      return { xs: g.xs.map(String), ys: this.gridY ? g.ys.map(String) : [''], rows, metric: metric.label,
+      return { xs: g.xs.map(String), ys: g.ys.map(String), rows, metric: metric.label,
                median, thin: rows.flat().filter(x => x.thin).length };
     },
 
@@ -1229,29 +1246,24 @@ document.addEventListener('alpine:init', () => {
                                : `Test · entries after ${cut} · ${c.fTest.toLocaleString()} trades`;
     },
     gridSub() {
-      const m = this.grid ? this.grid.metric : '';
-      return this.viewFull() && this.gridTest ? `train and test · ${m}` : this.withPeriod(m);
+      const m = (OB_GRID_METRICS.find(x => x.key === this.gridMetric) || OB_GRID_METRICS[0]).label;
+      const pairs = this.grids.length;
+      const what = `${pairs} pair${pairs === 1 ? '' : 's'} · ${m}`;
+      return this.viewFull() && this.grids.some(g => g.test) ? `train and test · ${what}` : this.withPeriod(what);
     },
 
     /* Said under the grid: what a cell is when it holds several variants. */
     gridNote() {
-      const sw = this.sweep;
-      if (!sw || !this.grid) return '';
-      const others = sw.params.filter(p => p !== this.gridX && p !== this.gridY);
-      const rule = 'Avg P/L, win rate and trade count pool the cell\'s trades; total P/L, Max DD and Calmar are the ' +
-                   'mean of each variant\'s own figure. Shade: blue profit, pink loss (win rate and count always blue), ' +
-                   'stronger the larger the value against the largest in the grid. Dashed outline: a THIN cell, under ' +
-                   `${Math.round(OB_GRID_THIN * 100)}% of the median cell's trades (median ` +
-                   `${this.grid.median === null ? '—' : this.grid.median.toLocaleString()}; ${this.grid.thin} thin now). ` +
-                   'All filters apply.';
-      const both = this.viewFull() && this.gridTest
-        ? ' Full view: the left grid is the TRAIN trades, the right the TEST trades, cell for cell, each by the rule ' +
-          'above; shade on ONE scale across both, the thin outline against each grid\'s own median.'
-        : '';
-      if (!others.length) return 'Each cell is one variant. ' + rule + both;
-      const what = others.map(p => `${p} (${(sw.values[p] || []).filter(v => this.paramTicked(p, v)).length} values)`).join(', ');
-      return `More than two parameters: each cell pools every variant sharing its ${this.gridX}` +
-             (this.gridY ? ` and ${this.gridY}` : '') + ` values, across ${what}. ` + rule + both;
+      if (!this.sweep || !this.grids.length) return '';
+      return 'Every pair of parameters, one grid each; a cell pools every variant sharing its two values, across the ' +
+             'parameters not on its axes (said under each grid). Avg P/L, win rate and trade count pool the cell\'s ' +
+             'trades; total P/L, Max DD and Calmar are the mean of each variant\'s own figure. Shade: blue profit, pink ' +
+             'loss (win rate and count always blue), stronger the larger the value -- on ONE scale across every grid' +
+             (this.grids.some(g => g.test) ? ' and both periods' : '') + ', so a grid that averages over more hidden ' +
+             'variants looks paler: it carries less of the variation. Dashed outline: a THIN cell, under ' +
+             `${Math.round(OB_GRID_THIN * 100)}% of the median cell's trades in its OWN grid. ` +
+             (this.grids.some(g => g.test) ? 'Full view: in each pair the left grid is the TRAIN trades, the right the ' +
+                                             'TEST trades, cell for cell. ' : '') + 'All filters apply.';
     },
 
     variantNote() {

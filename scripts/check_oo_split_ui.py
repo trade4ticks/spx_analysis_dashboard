@@ -345,13 +345,17 @@ __SNAPSHOT__
     return d ? { ...d, want: d.outside ? null : ch.scales.x.getPixelForValue(obDay(Alpine.$data(document.body).split.cutoff)) } : null;
   });
   const grids = () => {
-    const card = [...document.querySelectorAll('.ob-main .ob-card')].find(e => txt(e.querySelector('.ob-card-title')) === 'Parameter grid');
-    if (!card || !shown(card)) return null;
+    const outer = [...document.querySelectorAll('.ob-main .ob-card')].find(e => txt(e.querySelector('.ob-card-title')) === 'Parameter grid');
+    if (!outer || !shown(outer)) return null;
+    // A 2-parameter sweep: one pair box (every pair is its own box).
+    const card = outer.querySelector('.ob-pgrid-pair');
+    if (!card) return { pairs: 0 };
     const read = t => t ? [...t.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(td => ({
       text: txt(td.querySelector('.ob-pgrid-v')), sub: txt(td.querySelector('.ob-pgrid-n')), bg: getComputedStyle(td).backgroundColor }))) : null;
     const left = card.querySelector('.ob-pgrid-wrap > table.ob-pgrid'), test = card.querySelector('.ob-pgrid-test table.ob-pgrid');
     return { train: read(left), test: read(test), testRowLabels: test ? test.querySelectorAll('tbody th').length : null,
-             heads: [...card.querySelectorAll('.ob-pgrid-head')].map(txt), sub: txt(card.querySelector('.ob-card-sub')) };
+             heads: [...card.querySelectorAll('.ob-pgrid-head')].map(txt), sub: txt(outer.querySelector('.ob-card-sub')),
+             pairs: outer.querySelectorAll('.ob-pgrid-pair').length };
   };
   const emptyShown = () => { const e = [...document.querySelectorAll('.ob-main .ob-empty')].find(shown); return e ? txt(e) : ''; };
   const sumSub = () => { const e = document.querySelector('.ob-summary .ob-card-sub'); return e ? txt(e) : ''; };
@@ -808,7 +812,7 @@ def check_log(browser: str, label: str, files: dict[str, str], variant: str | No
     # (and the calmar the Off grid caches onto each variant's entry as it
     # draws -- a side effect of the grid, not a figure anything shows).
     def no_grid(st):
-        state = {k: v for k, v in st["state"].items() if k != "grid"}
+        state = {k: v for k, v in st["state"].items() if k not in ("grid", "grids")}
         if state.get("vm"):
             state["vm"] = [{k: v for k, v in f.items() if k != "calmar"} for f in state["vm"]]
         return {**st, "state": state}

@@ -36,12 +36,18 @@ with payloads the REAL router built (analyze_batch, no database):
     /strategies/sweep as one strategy; a single file saves as before; a
     saved sweep loads back with ALL selected, and a changed variant list is
     said
-  * the parameter grid (P3): default axes, all six metrics, swapped and
-    single-row axes, every cell against stats.py on the variants it holds --
-    on a three-parameter sweep, where a cell pools across the hidden one and
-    the note says so -- with and without a filter; hidden for one variant
-  * grid shading is magnitude (|value| / largest |value|), and a cell under
-    half the median cell's trades is outlined, the threshold said beneath
+  * the parameter grid, EVERY PAIR AT ONCE (2026-10-27; it had Across /
+    Down selectors): a 2-parameter sweep renders one pair, a 3-parameter
+    sweep three -- dte×pt, dte×sl, pt×sl, in the sweep's parameter order --
+    a 1-parameter sweep, a single log and one variant none; every cell of
+    every grid against stats.py for all six metrics, with and without a
+    filter; ONE colour scale across every grid (each cell's shade is its
+    |value| against the largest anywhere; no grid normalised to its own
+    range); the thin outline per grid (a fixture where per-grid and global
+    medians disagree); the order stable across a filter, a variant switch
+    and Train / Full; Full view one box per pair holding two pivots
+  * grid shading is magnitude, and a cell under half its grid's median cell
+    trades is outlined
   * the parameter sections: avg and win rate pool, a value's TOTAL is the
     mean over the variants holding that value
   * no console errors (an Alpine expression error leaves a control inert)
@@ -119,6 +125,39 @@ def cell(figs: list[dict]) -> dict:
             "calmar": sum(cal) / len(cal) if cal else None}
 
 
+def pair_cells(frames: dict, variants: list, params: list, frame_filter=None) -> dict:
+    """{ "x|y": { "xv,yv": cell } } for every pair, by the page's rule, from
+    each variant's own frame (optionally filtered)."""
+    out = {}
+    for i in range(len(params)):
+        for j in range(i + 1, len(params)):
+            x, y = params[i], params[j]
+            grid = {}
+            for xv in sorted({v[x] for v, _ in variants}):
+                for yv in sorted({v[y] for v, _ in variants}):
+                    ns = [n for v, n in variants if v[x] == xv and v[y] == yv]
+                    if ns:
+                        fr = [frames[n] if frame_filter is None else frame_filter(frames[n]) for n in ns]
+                        grid[f"{xv},{yv}"] = cell([figures(f) for f in fr])
+            out[f"{x}|{y}"] = grid
+    return out
+
+
+def thin_cells(grids: dict) -> dict:
+    """Per grid, the cells under half that grid's OWN median trade count."""
+    import statistics
+    out = {}
+    for k, g in grids.items():
+        med = statistics.median([c["n"] for c in g.values() if c["n"]])
+        out[k] = sorted(key for key, c in g.items() if c["n"] and c["n"] < 0.5 * med)
+    return out
+
+
+VARIANTSP = [(d, p, sl) for d in (30, 45) for p in (25, 50) for sl in (50, 100, 150, 200)]
+NAMESP = [f"pairs_dte{d}_pt{p}_sl{sl}.csv" for d, p, sl in VARIANTSP]
+NAMES1 = ["one_dte30.csv", "one_dte45.csv"]
+
+
 def payloads() -> tuple[dict, dict, dict, dict]:
     """(sweep payload, the third variant's file alone, expected figures, files)."""
     import logging
@@ -179,7 +218,36 @@ def payloads() -> tuple[dict, dict, dict, dict]:
     expect.update({"grid3": grid3, "grid3_nomon": grid3_nomon, "sec_dte": sec,
                    "slice_pt25": cell([figures(fr3[n]) for n in pt25]), "slice_one": cell([figures(fr3[one])]),
                    "n3": sum(len(f) for f in fr3.values())})
+    # EVERY PAIR: the 3-parameter sweep's three grids, with and without the
+    # Monday filter; the parameter-filter slice (pt=25 only).
+    v3 = [({"dte": d, "pt": p_, "sl": sl}, n) for (d, p_, sl), n in zip(VARIANTS3, NAMES3)]
+    nomon = lambda f: f[f["date_opened"].dt.dayofweek != 0]  # noqa: E731
+    expect["pairs3"] = pair_cells(fr3, v3, ["dte", "pt", "sl"])
+    expect["pairs3_nomon"] = pair_cells(fr3, v3, ["dte", "pt", "sl"], nomon)
+    expect["pairs3_pt25"] = pair_cells(fr3, [x for x in v3 if x[0]["pt"] == 25], ["dte", "pt", "sl"])
+    # A sweep where the thin outline per GRID differs from a GLOBAL one: sl
+    # has four values, so dte×pt cells pool four variants and the others two;
+    # the dte=45 pt=50 variants are thin (25 trades against 60). dte×pt's
+    # (45,50) cell, 100 trades, is under half ITS median (240) but not under
+    # half the median of every cell on the card (120).
+    filesP = {n: make_csv(40 + i, 25 if VARIANTSP[i][:2] == (45, 50) else 60) for i, n in enumerate(NAMESP)}
+    sweepP = with_sessions(asyncio.run(analyze_batch([(n, c.encode()) for n, c in filesP.items()], None)))
+    frP = {n: data_loader.parse_upload(filesP[n].encode(), n) for n in NAMESP}
+    vP = [({"dte": d, "pt": p_, "sl": sl}, n) for (d, p_, sl), n in zip(VARIANTSP, NAMESP)]
+    expect["pairsP"] = pair_cells(frP, vP, ["dte", "pt", "sl"])
+    expect["thinP"] = thin_cells(expect["pairsP"])
+    all_n = sorted(c["n"] for g in expect["pairsP"].values() for c in g.values())
+    import statistics
+    gmed = statistics.median(all_n)
+    expect["thinP_global"] = {k: sorted(key for key, c in g.items() if c["n"] < 0.5 * gmed)
+                              for k, g in expect["pairsP"].items()}
+    # A ONE-parameter sweep: no pair, no grid.
+    files1 = {n: make_csv(70 + i) for i, n in enumerate(NAMES1)}
+    sweep1 = with_sessions(asyncio.run(analyze_batch([(n, c.encode()) for n, c in files1.items()], None)))
     files.update(files3)
+    files.update(filesP)
+    files.update(files1)
+    expect["sweepP"], expect["sweep1"] = sweepP, sweep1
     return sweep, alone, expect, files, sweep3
 
 
@@ -227,7 +295,8 @@ window.fetch = async (u, init) => {
     for (const f of parts) { const b = new Uint8Array(await f.slice(0, 2).arrayBuffer()); heads.push(b[0] === 0x1f && b[1] === 0x8b); }
     window.__sent.push({ names: parts.map(f => f.name), gz: heads });
     if (window.__next === 'refuse') return reply(400, { detail: 'sweep_x.csv has dte; the other files have dte, pt. Nothing was loaded.' });
-    return reply(200, window.__next === 'alone' ? FIX.alone : window.__next === 'sweep3' ? FIX.sweep3 : FIX.sweep);
+    return reply(200, window.__next === 'alone' ? FIX.alone : window.__next === 'sweep3' ? FIX.sweep3
+                     : window.__next === 'sweepP' ? FIX.expect.sweepP : window.__next === 'sweep1' ? FIX.expect.sweep1 : FIX.sweep);
   }
   if (/\/surface\/catalog$/.test(url)) return reply(200, FIX.catalog);
   if (/\/surface\/rank$/.test(url)) {
@@ -374,41 +443,54 @@ window.addEventListener('load', () => setTimeout(async () => {
          .every(t => /mean per variant/.test(t)), true);
     ok('the deployment title is the mean of the variants\' peaks', /mean peak [\d.]+ per variant/.test(c.deployTitle()), true);
 
-    // ── the parameter grid (2 parameters: each cell one variant) ────────
+    // ── the parameter grid: EVERY pair (2 parameters -> one) ────────────
     const gridCard = () => [...document.querySelectorAll('.ob-card')].find(e => /Parameter grid/.test(txt(e.querySelector('.ob-card-title'))));
-    const cellText = (r, k) => txt(gridCard().querySelectorAll('.ob-pgrid tbody tr')[r].querySelectorAll('td')[k].querySelector('.ob-pgrid-v'));
-    const heads = () => [...gridCard().querySelectorAll('.ob-pgrid thead th')].slice(1).map(txt);
-    const rowHeads = () => [...gridCard().querySelectorAll('.ob-pgrid tbody th')].map(txt);
     const setSel = async (id, v) => { const e = document.getElementById(id); e.value = v; e.dispatchEvent(new Event('change', { bubbles: true })); await wait(150); };
-    ok('the grid is on screen at ALL', await until(() => shown(gridCard()) && !!c.grid), true);
-    ok('default axes: the first two parameters, metric Avg P/L', [document.getElementById('ob-grid-x').value,
-       document.getElementById('ob-grid-y').value, document.getElementById('ob-grid-m').value, heads(), rowHeads()],
-       ['dte', 'pt', 'avg', ['30', '45'], ['25', '50']]);
-    const G2 = FIX.expect.grid2;
+    // Every pair box as data: its key, axes, and cells (train pivot; the
+    // test pivot too in Full view).
+    const readPairs = () => [...gridCard().querySelectorAll('.ob-pgrid-pair')].map(box => {
+      const tbl = t => !t ? null : {
+        xs: [...t.querySelectorAll('thead th')].filter(th => !th.classList.contains('ob-pgrid-corner')).map(txt),
+        ys: [...t.querySelectorAll('tbody th')].map(txt),
+        cells: [...t.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(td => ({
+          text: txt(td.querySelector('.ob-pgrid-v')), thin: td.classList.contains('thin'),
+          bg: getComputedStyle(td).backgroundColor, inl: td.style.background }))) };
+      return { key: box.dataset.pair.replace('|', '×'), title: txt(box.querySelector('.ob-pgrid-pair-title')),
+               train: tbl(box.querySelector('.ob-pgrid-wrap > table.ob-pgrid')), test: tbl(box.querySelector('.ob-pgrid-test table.ob-pgrid')),
+               note: txt(box.querySelector('.ob-pgrid-pair-note')) };
+    });
     const FMT = { avg: v => money(v), total: v => money(v), maxdd: v => money(v), win: v => parseFloat(v), calmar: v => parseFloat(v),
                   n: v => Number(String(v).replace(/,/g, '')) };
     const TOL = { avg: 0.006, total: 0.51, maxdd: 0.51, win: 0.051, calmar: 0.0051, n: 0 };
-    for (const mt of ['avg', 'total', 'win', 'maxdd', 'calmar', 'n']) {
-      await setSel('ob-grid-m', mt);
-      let worst = 0;
-      [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']].forEach(([d, p]) => {
-        const r = p === '25' ? 0 : 1, k = d === '30' ? 0 : 1;
-        worst = Math.max(worst, Math.abs(FMT[mt](cellText(r, k)) - G2[d + ',' + p][mt]));
-      });
-      out.push((worst <= TOL[mt] ? 'ok|' : 'FAIL|') + `grid ${mt}: every cell equals stats.py on its variant|worst diff ${worst}|<= ${TOL[mt]}`);
-    }
-    await setSel('ob-grid-m', 'avg');
-    await setSel('ob-grid-x', 'pt');
-    ok('choosing the other parameter across swaps the axes', [document.getElementById('ob-grid-y').value, heads(), rowHeads()],
-       ['dte', ['25', '50'], ['30', '45']]);
-    near('and the cells follow (dte=45, pt=25 now row 2, column 1)', money(cellText(1, 0)), G2['45,25'].avg, 0.006);
-    await setSel('ob-grid-y', '');
-    ok('Down (none): one row, aggregating across dte', [rowHeads().length, heads()], [1, ['25', '50']]);
-    ok('a 2-parameter grid says each cell is one variant... while it shows both', true, true);
-    await setSel('ob-grid-x', 'dte'); await setSel('ob-grid-y', 'pt');
-    ok('the note: each cell one variant, the rule stated', /Each cell is one variant/.test(txt(gridCard().querySelector('.ob-pgrid-note'))) &&
-       /mean of each variant's own figure/.test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
-    const pg = gridCard().querySelectorAll('.ob-pgrid td')[0];
+    const alphaOf = bg => { const m = bg.match(/rgba?\(([^)]+)\)/); const p = m[1].split(','); return p.length === 4 ? +p[3] : 1; };
+    // Every cell of every pair against the reference, for all six metrics.
+    const checkPairs = async (E, label) => {
+      for (const mt of ['avg', 'total', 'win', 'maxdd', 'calmar', 'n']) {
+        await setSel('ob-grid-m', mt);
+        let worst = 0, cells = 0, missing = [];
+        for (const pr of readPairs()) {
+          const G = E[pr.key.replace('×', '|')] || E[pr.key];
+          if (!G) { missing.push(pr.key); continue; }
+          pr.train.ys.forEach((yv, r) => pr.train.xs.forEach((xv, k) => {
+            const want = G[xv + ',' + yv];
+            if (!want) return;
+            cells++;
+            worst = Math.max(worst, want[mt] === null ? (pr.train.cells[r][k].text === '—' ? 0 : 1e9)
+                                                      : Math.abs(FMT[mt](pr.train.cells[r][k].text) - want[mt]));
+          }));
+        }
+        out.push((worst <= TOL[mt] && !missing.length ? 'ok|' : 'FAIL|') +
+                 `${label} ${mt}: every cell of every grid = stats.py on its variants (${cells} cells)|worst diff ${worst} ${missing}|<= ${TOL[mt]}`);
+      }
+      await setSel('ob-grid-m', 'avg');
+    };
+    ok('the grid is on screen at ALL', await until(() => shown(gridCard()) && c.grids.length > 0), true);
+    ok('2 parameters: ONE pair -- dte × pt, dte across, pt down -- and no Across / Down selectors',
+       [readPairs().map(p => [p.key, p.title, p.train.xs, p.train.ys]), !!document.getElementById('ob-grid-x'),
+        !!document.getElementById('ob-grid-y'), document.getElementById('ob-grid-m').value],
+       [[['dte×pt', 'dte × pt', ['30', '45'], ['25', '50']]], false, false, 'avg']);
+    await checkPairs({ 'dte×pt': FIX.expect.grid2 }, '2-param');
+    ok('the box says each cell is one variant', /each cell is one variant/.test(readPairs()[0].note), true);
     const bgs = [...gridCard().querySelectorAll('.ob-pgrid td')].map(td => getComputedStyle(td).backgroundColor);
     ok('cells shade blue (profit) or pink (loss): ' + bgs.join(' '),
        bgs.every(b => /^rgba?\((52, 152, 219|232, 67, 147)(, [\d.]+)?\)$/.test(b)), true);
@@ -457,6 +539,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     await until(() => c.loaded && !c.sweep && window.__sent.length === 2);
     await wait(400);
     ok('a single file: one part, no selector', [window.__sent[1].names, shown(sel)], [[FIX.names[2]], false]);
+    ok('a single log: no parameter grid, no pair box', [shown(gridCard()), c.grids.length,
+       document.querySelectorAll('.ob-pgrid-pair').length], [false, 0, 0]);
     ok('a single log: Day of Week enabled, and a click filters', await clickWorks('Day of Week'), [true, true, true, true]);
     const alone = snapshot(c);
     ok('the comparison has something to compare: sections with subtitles, a deployment title',
@@ -510,42 +594,46 @@ window.addEventListener('load', () => setTimeout(async () => {
     // ── three parameters: cells pool across the hidden one ──────────────
     window.__next = 'sweep3';
     drop(FIX.names3);
-    await until(() => c.sweep && c.sweep.params.length === 3 && !!c.grid);
+    await until(() => c.sweep && c.sweep.params.length === 3 && c.grids.length === 3);
     await wait(300);
-    ok('8 variants, three parameters, grid on dte × pt', [c.sweep.variants.length, c.sweep.params, heads(), rowHeads()],
-       [8, ['dte', 'pt', 'sl'], ['30', '45'], ['25', '50']]);
-    ok('the note says cells pool across sl', /each cell pools every variant sharing its dte and pt values, across sl \(2 values\)/
-       .test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
-    const check3 = async (G, label) => {
-      for (const mt of ['avg', 'total', 'win', 'maxdd', 'calmar', 'n']) {
-        await setSel('ob-grid-m', mt);
-        let worst = 0;
-        [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']].forEach(([d, p]) => {
-          const r = p === '25' ? 0 : 1, k = d === '30' ? 0 : 1;
-          worst = Math.max(worst, Math.abs(FMT[mt](cellText(r, k)) - G[d + ',' + p][mt]));
-        });
-        out.push((worst <= TOL[mt] ? 'ok|' : 'FAIL|') + `${label} ${mt}: each cell = its two sl variants by the rule (stats.py)|worst diff ${worst}|<= ${TOL[mt]}`);
+    const PAIRS3 = ['dte×pt', 'dte×sl', 'pt×sl'];
+    ok('3 parameters: THREE pairs, in the sweep\'s parameter order', [c.sweep.variants.length, c.sweep.params,
+       readPairs().map(p => [p.key, p.title, p.train.xs, p.train.ys])],
+       [8, ['dte', 'pt', 'sl'], [['dte×pt', 'dte × pt', ['30', '45'], ['25', '50']], ['dte×sl', 'dte × sl', ['30', '45'], ['100', '200']],
+                                ['pt×sl', 'pt × sl', ['25', '50'], ['100', '200']]]]);
+    ok('each box says what its cells pool across', readPairs().map(p => p.note.split(' · ')[0]),
+       ['each cell pools across sl (2 values)', 'each cell pools across pt (2 values)', 'each cell pools across dte (2 values)']);
+    await checkPairs(FIX.expect.pairs3, '3-param');
+    // ONE colour scale across every grid: each cell's alpha is ITS |value|
+    // against the largest |value| on the whole card.
+    {
+      const E = FIX.expect.pairs3;
+      const maxAbs = Math.max(...Object.values(E).flatMap(g => Object.values(g).map(x => Math.abs(x.avg))));
+      let worst = 0, perGridMax = [], worstAt = '', domWorst = 0;
+      for (const pr of readPairs()) {
+        let gmax = 0;
+        pr.train.ys.forEach((yv, r) => pr.train.xs.forEach((xv, k) => {
+          const want = OB_ALPHA_FLOOR + (1 - OB_ALPHA_FLOOR) * Math.abs(E[pr.key.replace('×', '|')][xv + ',' + yv].avg) / maxAbs;
+          // The alpha the page COMPUTED (its cell's bg string, 3 decimals):
+          // the browser quantises any read-back to 8 bits (0.587 -> "0.59").
+          const gi = c.grids.findIndex(x => x.key === pr.key.replace('×', '|'));
+          const a = alphaOf(c.grids[gi].train.rows[r][k].bg);
+          // ...and what is ON SCREEN is that colour, to the browser's precision.
+          domWorst = Math.max(domWorst, Math.abs(alphaOf(pr.train.cells[r][k].bg) - a));
+          if (Math.abs(a - want) > worst) worstAt = `${pr.key} ${xv},${yv}: set ${a}, want ${want.toFixed(4)}`;
+          worst = Math.max(worst, Math.abs(a - want)); gmax = Math.max(gmax, a);
+        }));
+        perGridMax.push(gmax);
       }
-    };
-    await check3(FIX.expect.grid3, '3-param grid');
-    // Magnitude shading and the thin outline, on Avg P/L.
-    await setSel('ob-grid-m', 'avg');
-    const tds = () => [...gridCard().querySelectorAll('.ob-pgrid tbody tr')].map(tr => [...tr.querySelectorAll('td')]);
-    const alphaOf = td => { const m = getComputedStyle(td).backgroundColor.match(/rgba?\(([^)]+)\)/); const p = m[1].split(','); return p.length === 4 ? +p[3] : 1; };
-    const G3 = FIX.expect.grid3, at = [['30', '25'], ['45', '25'], ['30', '50'], ['45', '50']];
-    const maxAbs = Math.max(...at.map(([d, p]) => Math.abs(G3[d + ',' + p].avg)));
-    let worstA = 0;
-    for (const [d, p] of at) {
-      const td = tds()[p === '25' ? 0 : 1][d === '30' ? 0 : 1];
-      const want = OB_ALPHA_FLOOR + (1 - OB_ALPHA_FLOOR) * Math.abs(G3[d + ',' + p].avg) / maxAbs;
-      worstA = Math.max(worstA, Math.abs(alphaOf(td) - want));
+      out.push((worst < 0.0006 ? 'ok|' : 'FAIL|') + 'ONE scale: every cell\'s shade is its abs(value) against the largest abs(value) on the card|worst alpha diff ' + worst + ' at ' + worstAt + '|< 0.0006 (3-decimal rounding)');
+      out.push((domWorst < 0.006 ? 'ok|' : 'FAIL|') + 'and each cell on screen wears that shade|worst diff ' + domWorst + '|< 0.006 (8-bit alpha)');
+      ok('no grid is normalised to its own range: only the grid holding the card\'s largest value reaches full strength',
+         perGridMax.filter(a => a >= 0.999).length, 1);
     }
-    out.push((worstA < 0.003 ? 'ok|' : 'FAIL|') + 'shade is |value| against the largest |value| (from the floor)|worst alpha diff ' + worstA + '|< 0.003');
-    const thinCells = tds().flatMap((row, r) => row.map((td, k) => [r, k, td])).filter(([, , td]) => td.classList.contains('thin'));
-    ok('exactly the thin combination (dte=45, pt=50: 40 trades against a median of 120) is outlined',
-       [thinCells.map(([r, k]) => r + ',' + k), getComputedStyle(thinCells[0] ? thinCells[0][2] : document.body).outlineStyle], [['1,1'], 'dashed']);
-    ok('the note gives the threshold and the median', /dashed outline: a thin cell, under 50% of the median cell's trades \(median 120; 1 thin now\)/i
-       .test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
+    // The dte×pt (45, 50) cell is thin in its own grid.
+    ok('the thin outline: dte×pt (45, 50), 40 trades against its grid\'s median 120', readPairs().map(p =>
+       p.train.cells.flatMap((row, r) => row.map((cl, k) => cl.thin ? p.train.xs[k] + ',' + p.train.ys[r] : null)).filter(Boolean)),
+       [['45,50'], [], []]);
     // The dte section: pooled avg and win, total = mean over that value's 4 variants.
     const chartData = which => OB_CHARTS.sec[`ob-sec-param__dte-${which}`].data.datasets[0].data;
     ok('a section per parameter, in order, before the metric sections', [...document.querySelectorAll('[id^="ob-sec-card-param__"]')]
@@ -557,11 +645,12 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('no scatter in a parameter section', shown(document.getElementById('ob-sec-param__dte-scatter')), false);
     // A filter: every cell follows it.
     const dow3 = c.registry.find(m => m.key === 'day_of_week');
+    const order0 = readPairs().map(p => p.key);       // BEFORE the filter
     c.toggleCat(dow3, 0);
     await until(() => c.activeCount() === 1);
     await wait(300);
-    await check3(FIX.expect.grid3_nomon, 'filtered (no Mondays)');
-    await setSel('ob-grid-m', 'avg');
+    await checkPairs(FIX.expect.pairs3_nomon, 'filtered (no Mondays)');
+    ok('the pair order does not move with a filter', readPairs().map(p => p.key), order0);
 
     // ── parameter filters ───────────────────────────────────────────────
     c.setAllCats(dow3, true);
@@ -590,8 +679,11 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('the selector lists only the surviving variants', [...sel.options].map(o => txt(o).replace(/ \(\d+ trades\)$/, '')),
        ['ALL — 4 of 8 variants (parameter filters)', 'dte=30 · pt=25 · sl=100', 'dte=30 · pt=25 · sl=200',
         'dte=45 · pt=25 · sl=100', 'dte=45 · pt=25 · sl=200']);
-    ok('the grid collapses: pt down shows only 25', [heads(), rowHeads()], [['30', '45'], ['25']]);
-    ok('and the note counts the ticked values of the hidden parameter', /across sl \(2 values\)/.test(txt(gridCard().querySelector('.ob-pgrid-note'))), true);
+    ok('every grid keeps its place; pt shows only 25 where it is an axis -- a one-row / one-column grid, never a missing one',
+       readPairs().map(p => [p.key, p.train.xs, p.train.ys]),
+       [['dte×pt', ['30', '45'], ['25']], ['dte×sl', ['30', '45'], ['100', '200']], ['pt×sl', ['25'], ['100', '200']]]);
+    ok('and dte×sl, which pools across pt, counts its 1 ticked value', /pools across pt \(1 value\)/.test(readPairs()[1].note), true);
+    await checkPairs(FIX.expect.pairs3_pt25, 'pt=25 slice');
     // Down to ONE surviving variant: the page is single-variant in effect.
     pbox('dte', 45).click(); await wait(100);
     pbox('sl', 200).click();
@@ -636,6 +728,53 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('reset all filters ticks every parameter value again', [['dte', 30], ['dte', 45], ['pt', 25], ['pt', 50], ['sl', 100], ['sl', 200]]
        .map(([p, v]) => pbox(p, v).checked).concat([sel.options[0].textContent.trim()]),
        [true, true, true, true, true, true, 'ALL — 8 variants']);
+
+    // ── the order is stable: a variant and back, Train / Full ───────────
+    const keys = () => readPairs().map(p => p.key);
+    sel.value = '3'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => c.variantSel === '3'); await wait(300);
+    ok('one variant picked: no pair boxes', [c.grids.length, document.querySelectorAll('.ob-pgrid-pair').length], [0, 0]);
+    sel.value = 'all'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => c.variantSel === 'all' && c.grids.length === 3); await wait(300);
+    ok('back to ALL: the same three pairs in the same order', keys(), ['dte×pt', 'dte×sl', 'pt×sl']);
+    const tt = document.querySelector('[data-gate-exclude="train-test-card"]');
+    const segB = l => [...tt.querySelectorAll('.seg-btn')].find(b => txt(b) === l);
+    segB('On').click(); await wait(400);
+    ok('Train view: the same three pairs, one pivot each', [keys(), readPairs().map(p => !!p.test)],
+       [['dte×pt', 'dte×sl', 'pt×sl'], [false, false, false]]);
+    segB('Full').click(); await wait(400);
+    ok('Full view: ONE box per pair (3, not 6), each holding the train and test pivots, in the same order',
+       [document.querySelectorAll('.ob-pgrid-pair').length, keys(), readPairs().map(p => !!p.train && !!p.test),
+        readPairs().map(p => p.test ? p.test.cells.length === p.train.cells.length && p.test.xs.join() === p.train.xs.join() : false)],
+       [3, ['dte×pt', 'dte×sl', 'pt×sl'], [true, true, true], [true, true, true]]);
+    segB('Off').click(); await wait(400);
+    ok('Split Off: the same three pairs again', keys(), ['dte×pt', 'dte×sl', 'pt×sl']);
+
+    // ── thin outlines are PER GRID ───────────────────────────────────────
+    // sl has four values here, so dte×pt cells pool four variants and the
+    // other grids two: the grids' medians differ, and per-grid and global
+    // thresholds outline different cells.
+    window.__next = 'sweepP';
+    drop(FIX.namesP);
+    await until(() => c.sweep && c.sweep.variants.length === 16 && readPairs().length === 3
+                      && readPairs()[1].train.ys.length === 4, 8000); await wait(400);
+    const EP = FIX.expect.pairsP;
+    ok('16 variants: three pairs, sl with four values', readPairs().map(p => [p.key, p.train.xs, p.train.ys]),
+       [['dte×pt', ['30', '45'], ['25', '50']], ['dte×sl', ['30', '45'], ['50', '100', '150', '200']],
+        ['pt×sl', ['25', '50'], ['50', '100', '150', '200']]]);
+    await checkPairs(EP, '16-variant');
+    const thinNow = Object.fromEntries(readPairs().map(p => [p.key.replace('×', '|'),
+      p.train.cells.flatMap((row, r) => row.map((cl, k) => cl.thin ? p.train.xs[k] + ',' + p.train.ys[r] : null)).filter(Boolean).sort()]));
+    ok('the fixture separates the rules: per-grid and global thresholds outline different cells',
+       JSON.stringify(FIX.expect.thinP) !== JSON.stringify(FIX.expect.thinP_global), true);
+    ok('thin outlines are per grid, each against its OWN median: ' + JSON.stringify(thinNow), thinNow, FIX.expect.thinP);
+
+    // ── one parameter: no pair, no grid ──────────────────────────────────
+    window.__next = 'sweep1';
+    drop(FIX.names1);
+    await until(() => c.sweep && c.sweep.params.length === 1); await wait(400);
+    ok('a ONE-parameter sweep: no grid card, no pair box', [shown(gridCard()), c.grids.length,
+       document.querySelectorAll('.ob-pgrid-pair').length], [false, 0, 0]);
   } catch (e) {
     out.push('FAIL|the driver threw|' + e + (e && e.stack ? ' ' + e.stack.split(String.fromCharCode(10))[1] : '') + '|nothing');
   }
@@ -662,7 +801,7 @@ def main() -> int:
             "min_date": "2020-01-02", "units": None, "description": f"metric {j}", "formula": None} for j in range(6)]
     fix = {
         "registry": registry_with_coverage(None), "sweep": sweep, "alone": alone, "expect": expect, "sweep3": sweep3,
-        "names3": NAMES3,
+        "names3": NAMES3, "namesP": NAMESP, "names1": NAMES1,
         "files": files, "names": NAMES, "variants": VARIANTS,
         "catalog": {"metrics": cat, "family_groups": [{"label": "IV", "color": "#3498db", "families": ["iv"]}],
                     "other_group": None, "form_labels": {"level": "level"}, "unit_formats": {},

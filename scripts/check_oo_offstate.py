@@ -114,7 +114,7 @@ SNAPSHOT_JS = r"""
   });
   const state = (c) => JSON.parse(JSON.stringify({
     stats: c.stats, extra: c.extra, filteredCount: c.filteredCount, activeCount: c.activeCount(),
-    idx: OB_DATA.idx, eq: OB_DATA.eq, conc: OB_DATA.conc, vk: c.vk, variantSel: c.variantSel, grid: c.grid,
+    idx: OB_DATA.idx, eq: OB_DATA.eq, conc: OB_DATA.conc, vk: c.vk, variantSel: c.variantSel, grids: c.grids,
     dateBounds: c.dateBounds, autoSteps: c.autoSteps,
     vm: OB_DATA.vm && OB_DATA.vm.map(f => ({ id: f.id, stats: f.stats, calmar: f.calmar })),
   }));

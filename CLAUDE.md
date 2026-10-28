@@ -168,6 +168,28 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   where every variant could have traded. The UI gate holds every cell of a
   2- and a 3-parameter sweep to stats.py per variant file, with and without
   a filter, and fails when a cell's total is summed instead of averaged.
+- **EVERY PAIR AT ONCE (2026-10-27; the user's ask).** The grid's Across /
+  Down selectors are gone: one box per unordered parameter pair (N-choose-2;
+  `obParamPairs`, in `sweep.params` order, first across, second down —
+  stable under filters, variants and view). Boxes take their tables' natural
+  width in a wrapping flex row — no breakpoints. Full view: each box holds the
+  train and test pivots (N-choose-2 boxes in both views, not double). ONE
+  colour scale across every grid and both periods — a pair averaging over
+  more hidden variants looks paler, which is the point (it carries less of
+  the variation), so never normalise per grid; the THIN outline stays per
+  pivot (each grid's own median). A parameter with one ticked value still
+  has its grids (one row / column); none ticked says so in the box; a
+  one-parameter sweep has no grid. The per-variant figures are built once
+  per recompute and every pair regroups them: three pairs cost 0.9 ms
+  against one pair's 0.4 ms at 108 variants / 345,600 trades (the figures
+  themselves, ~134 ms there, already existed for the Summary). Gate:
+  `check_oo_sweep_ui` — 1 / 3 / 0 pairs, every cell of every grid vs
+  stats.py, the scale from the page's own cell colours, per-grid thin on a
+  16-variant fixture where per-grid and global medians disagree, order
+  stable; planted faults (per-grid normalisation, a missing pair, order
+  from the filter state, a global median) each fail it. It also found the
+  sidebar filter cards' teardown trap (`catOf(m).options` read on a dying
+  card when a sweep with other parameters loads) — guarded.
 - **Parameter FILTERS (2026-10-19).** The middle ground between one
   variant and ALL: each parameter is an ordinary categorical filter card
   (`paramRows` have `filter: true`; `filterDefs()` = parameters first, then

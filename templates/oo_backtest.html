@@ -170,6 +170,12 @@
     .ob-pgrid-split > table.ob-pgrid { grid-column:1; grid-row:2; }
     .ob-pgrid-split > .ob-pgrid-test { grid-column:2; grid-row:1 / span 2; }
     .ob-pgrid-head { font-size:11px; color:var(--dim); margin:0 0 2px 3px; white-space:nowrap; }
+    /* Every pair at once: each box its table's natural width, the browser
+       packing them -- no breakpoints. */
+    .ob-pgrid-pairs { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-start; }
+    .ob-pgrid-pair { flex:0 0 auto; max-width:100%; border:1px solid var(--border); border-radius:4px; padding:6px 8px; }
+    .ob-pgrid-pair-title { font-size:12px; font-weight:600; margin:0 0 4px 3px; }
+    .ob-pgrid-pair-note { margin:4px 0 0 3px; font-size:11px; }
     .ob-rank-pooled { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px;
                       border:1px solid var(--border); color:var(--dim); }
 
@@ -455,9 +461,12 @@
             <template x-if="loaded && m.type === 'categorical' && catOf(m)">
               <div>
                 <div class="ob-checks">
-                  <template x-for="o in catOf(m).options" :key="String(o.value)">
+                  <!-- Guarded: a sweep with other parameters tears these cards
+                       down, and Alpine reads a dying card once more with its
+                       filter state already gone (2026-10-27). -->
+                  <template x-for="o in (catOf(m) || { options: [] }).options" :key="String(o.value)">
                     <label class="ob-check">
-                      <input type="checkbox" :checked="catOf(m).selected.includes(o.value)" @change="toggleCat(m, o.value)"
+                      <input type="checkbox" :checked="(catOf(m) || { selected: [] }).selected.includes(o.value)" @change="toggleCat(m, o.value)"
                              :disabled="paramLocked(m)">
                       <span x-text="o.label"></span>
                       <span class="ob-dim" x-text="optCount(m, o)"></span>
@@ -672,19 +681,6 @@
         </div>
         <div class="ob-card-body">
           <div class="ob-row ob-pgrid-ctl">
-            <label class="ob-lbl" for="ob-grid-x">Across</label>
-            <select id="ob-grid-x" class="ob-sel" @change="setGridX($event.target.value)">
-              <template x-for="p in (sweep ? sweep.params : [])" :key="p">
-                <option :value="p" :selected="gridX === p" x-text="p"></option>
-              </template>
-            </select>
-            <label class="ob-lbl" for="ob-grid-y">Down</label>
-            <select id="ob-grid-y" class="ob-sel" @change="setGridY($event.target.value)">
-              <option value="" :selected="gridY === ''">(none)</option>
-              <template x-for="p in gridYOptions()" :key="p">
-                <option :value="p" :selected="gridY === p" x-text="p"></option>
-              </template>
-            </select>
             <label class="ob-lbl" for="ob-grid-m">Metric</label>
             <select id="ob-grid-m" class="ob-sel" @change="setGridMetric($event.target.value)">
               <template x-for="mt in gridMetrics()" :key="mt.key">
@@ -692,51 +688,65 @@
               </template>
             </select>
           </div>
-          <div class="ob-pgrid-wrap" x-show="grid" :class="{ 'ob-pgrid-split': viewFull() && !!gridTest }">
-            <template x-if="viewFull() && !!gridTest"><div class="ob-pgrid-head" x-text="gridHead('train')"></div></template>
-            <table class="ob-pgrid">
-              <thead>
-                <tr>
-                  <th class="ob-pgrid-corner" x-text="(gridY ? gridY + ' ↓ / ' : '') + gridX + ' →'"></th>
-                  <template x-for="xv in (grid ? grid.xs : [])" :key="xv"><th x-text="xv"></th></template>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="(row, r) in (grid ? grid.rows : [])" :key="r">
-                  <tr>
-                    <th x-text="grid ? grid.ys[r] : ''"></th>
-                    <template x-for="(cell, k) in row" :key="k">
-                      <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
-                        <div class="ob-pgrid-v" x-text="cell.text"></div>
-                        <div class="ob-pgrid-n" x-text="cell.sub"></div>
-                      </td>
-                    </template>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-            <!-- The TEST pivot (P3, Full view only): the same shape, the rows
-                 lined up with the train grid, the row labels not repeated. -->
-            <template x-if="viewFull() && !!gridTest">
-              <div class="ob-pgrid-test">
-                <div class="ob-pgrid-head" x-text="gridHead('test')"></div>
-                <table class="ob-pgrid">
-                  <thead>
-                    <tr><template x-for="xv in gridTest.xs" :key="xv"><th x-text="xv"></th></template></tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="(row, r) in gridTest.rows" :key="r">
+          <!-- EVERY pair of parameters at once (2026-10-27), one box each, in
+               the sweep's parameter order; boxes take their tables' natural
+               width and the browser packs them -- no breakpoints. In Full
+               view a box holds the train and test pivots side by side. -->
+          <div class="ob-pgrid-pairs">
+            <template x-for="g in grids" :key="g.key">
+              <!-- Every read guarded: Alpine evaluates a dying x-for item once
+                   more as it tears it down (the teardown trap in CLAUDE.md). -->
+              <div class="ob-pgrid-pair" :data-pair="g ? g.key : ''">
+                <div class="ob-pgrid-pair-title" x-text="g ? g.x + ' × ' + g.y : ''"></div>
+                <div class="ob-pgrid-wrap" :class="{ 'ob-pgrid-split': !!(g && g.test) }">
+                  <template x-if="!!(g && g.test)"><div class="ob-pgrid-head" x-text="gridHead('train')"></div></template>
+                  <table class="ob-pgrid">
+                    <thead>
                       <tr>
-                        <template x-for="(cell, k) in row" :key="k">
-                          <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
-                            <div class="ob-pgrid-v" x-text="cell.text"></div>
-                            <div class="ob-pgrid-n" x-text="cell.sub"></div>
-                          </td>
-                        </template>
+                        <th class="ob-pgrid-corner" x-text="g ? g.y + ' ↓ / ' + g.x + ' →' : ''"></th>
+                        <template x-for="xv in (g && g.train ? g.train.xs : [])" :key="xv"><th x-text="xv"></th></template>
                       </tr>
-                    </template>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      <template x-for="(row, r) in (g && g.train ? g.train.rows : [])" :key="r">
+                        <tr>
+                          <th x-text="g && g.train ? g.train.ys[r] : ''"></th>
+                          <template x-for="(cell, k) in row" :key="k">
+                            <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
+                              <div class="ob-pgrid-v" x-text="cell.text"></div>
+                              <div class="ob-pgrid-n" x-text="cell.sub"></div>
+                            </td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                  <!-- The TEST pivot (Full view): the same shape, the rows lined
+                       up with the train grid, the row labels not repeated. -->
+                  <template x-if="!!(g && g.test)">
+                    <div class="ob-pgrid-test">
+                      <div class="ob-pgrid-head" x-text="gridHead('test')"></div>
+                      <table class="ob-pgrid">
+                        <thead>
+                          <tr><template x-for="xv in (g && g.test ? g.test.xs : [])" :key="xv"><th x-text="xv"></th></template></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="(row, r) in (g && g.test ? g.test.rows : [])" :key="r">
+                            <tr>
+                              <template x-for="(cell, k) in row" :key="k">
+                                <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
+                                  <div class="ob-pgrid-v" x-text="cell.text"></div>
+                                  <div class="ob-pgrid-n" x-text="cell.sub"></div>
+                                </td>
+                              </template>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                </div>
+                <div class="ob-dim ob-pgrid-pair-note" x-text="g ? g.note : ''"></div>
               </div>
             </template>
           </div>
