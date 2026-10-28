@@ -440,8 +440,14 @@ complete. The portfolio page is out of scope, by decision.
   container measured 0 and a ranking of under ~90 bars drew 88 px wide (3
   of 4 runs with the old line, 0 of 6 now; it renders on the next frame).
   Real time costs: split gate ~200 s serial (was ~40 s), off-state ~12 s.
-  The other seven browser gates stay on virtual time with the shim until
-  these two have run clean for a while (the user's call).
+  The other browser gates stay on virtual time with the shim until these
+  have run clean for a while (the user's call). **`check_oo_sweep_ui` was
+  converted too (2026-10-27)**, after it flaked under the suite's load: its
+  wait for a dropped sweep ran on virtual time while the gzip upload is real
+  async work, expired, and the checks after it read the PREVIOUS sweep. Its
+  waits are now two kinds: `poll` (inside an assertion, which fails on false)
+  and `until`, which THROWS on expiry naming its condition — a planted stale
+  sweep stops the run there (84 of 152 assertions, also under COVERS' 96).
 
 **Editing a saved strategy's notes** (2026-10-14). With a SAVED strategy
 loaded, *Edit notes* (or *Add notes*) under it opens a box; Save writes
@@ -1736,11 +1742,12 @@ bar-count rule would restore exactly the hiding this removed.
      race (the ranking width) and created a false one (the drop zone); the same may hold
      for the pages those gates drive. Converting them waits on the two converted gates
      running clean for a while (the user's call).
-   - `check_oo_sweep_ui` still runs on virtual time and FLAKES under the suite's load
-     (2026-10-27, reproduced 2 of 4 beside the parallel split gate): its 4 s wait for a
-     dropped sweep runs on virtual time while the page's gzip upload is real async work,
-     so the wait is skipped through and the next assertions read the previous sweep.
-     Cause found; the fix (real-time driving, or less parallelism) awaits the user's call.
+   - **Waits that can expire and let assertions run anyway** (counted 2026-10-27, report
+     only — the user's call): 40 call sites in 5 gates — `check_oo_split_ui` 15 `until` +
+     1 inline loop, `check_oo_offstate` 9, `check_oo_notes_ui` 11 of 14, 
+     `check_strategy_signal_ui` 3 inline loops, `check_ft_filters_ui` 1. Fixed sleeps with no
+     condition (several gates) are a separate shape, not counted. `check_oo_sweep_ui` was
+     the sixth and is fixed (below).
    - The `spx-dashboard` systemd unit file is not in the repo (only `deploy/spx-live.service`
      is); its contents are quoted in `DEPLOYMENT_NOTES.md`'s procedure only in part.
 

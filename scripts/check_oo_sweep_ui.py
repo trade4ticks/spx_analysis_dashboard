@@ -257,8 +257,8 @@ def payloads() -> tuple[dict, dict, dict, dict]:
 
 DRIVER = r"""
 <script>
-window.requestAnimationFrame = cb => setTimeout(() => cb(performance.now()), 0);
-window.cancelAnimationFrame = id => clearTimeout(id);
+// No requestAnimationFrame shim: this page runs in REAL time (edge_cdp),
+// where real frames run; the shim was itself a race there (CLAUDE.md).
 window.__errs = [];
 window.onerror = (m) => window.__errs.push('error: ' + m);
 window.addEventListener('unhandledrejection', e => window.__errs.push('promise: ' + e.reason));
@@ -317,7 +317,19 @@ window.addEventListener('load', () => setTimeout(async () => {
                                          JSON.stringify(got) + '|' + JSON.stringify(want));
   const near = (k, got, want, tol) => out.push((Math.abs(got - want) <= tol ? 'ok|' : 'FAIL|') + k + '|' + got + '|' + want);
   const wait = ms => new Promise(r => setTimeout(r, ms));
-  const until = async (cond, ms = 4000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
+  // TWO KINDS OF WAIT (2026-10-27). `poll` answers whether a condition came
+  // to hold, and is used ONLY inside an assertion, which fails on false.
+  // `until` is a WAIT before further checks: if it expires it THROWS, naming
+  // the condition -- it used to return false and let the assertions after it
+  // run on the page as it still was. Under the suite's load a dropped sweep
+  // had not loaded when its wait (on virtual time) ran out, and the checks
+  // read the PREVIOUS sweep: they failed only because that sweep differed; a
+  // similar one would have passed them having tested nothing.
+  const poll = async (cond, ms = 8000) => { for (let t = 0; t < ms; t += 25) { if (cond()) return true; await wait(25); } return cond(); };
+  const until = async (cond, ms = 8000) => {
+    if (await poll(cond, ms)) return true;
+    throw new Error(`WAIT EXPIRED after ${ms} ms -- the checks after it did not run: ${String(cond).replace(/\s+/g, ' ')}`);
+  };
   const report = () => {
     const pre = document.createElement('pre');
     pre.id = 'report';
@@ -401,7 +413,7 @@ window.addEventListener('load', () => setTimeout(async () => {
 
     // ── one request, every file, gzipped ────────────────────────────────
     drop(FIX.names);
-    ok('the sweep loads', await until(() => c.loaded && !!c.sweep && c.filteredCount > 0), true);
+    ok('the sweep loads', await poll(() => c.loaded && !!c.sweep && c.filteredCount > 0), true);
     ok('one request with all four files', window.__sent.length === 1 && window.__sent[0].names, FIX.names);
     ok('each part gzipped before upload', window.__sent[0].gz, [true, true, true, true]);
 
@@ -527,7 +539,7 @@ window.addEventListener('load', () => setTimeout(async () => {
       }
       await setSel('ob-grid-m', 'avg');
     };
-    ok('the grid is on screen at ALL', await until(() => shown(gridCard()) && c.grids.length > 0), true);
+    ok('the grid is on screen at ALL', await poll(() => shown(gridCard()) && c.grids.length > 0), true);
     ok('2 parameters: ONE pair -- dte × pt, dte across, pt down -- and no Across / Down selectors',
        [readPairs().map(p => [p.key, p.title, p.train.xs, p.train.ys]), !!document.getElementById('ob-grid-x'),
         !!document.getElementById('ob-grid-y'), document.getElementById('ob-grid-m').value],
@@ -551,7 +563,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     // ── the ranking: no significance over pooled variants ───────────────
     await c.rankSurface();
     await until(() => !!c.surf.result);
-    ok('pooled: the note says significance is not marked', await until(() => shown(document.querySelector('.ob-rank-pooled'))) &&
+    ok('pooled: the note says significance is not marked', await poll(() => shown(document.querySelector('.ob-rank-pooled'))) &&
        /same market day appears once per variant/.test(txt(document.querySelector('.ob-rank-pooled'))), true);
     ok('pooled: no Benjamini-Hochberg in the footer', /Benjamini/.test(c.surfFooter()), false);
 
@@ -565,11 +577,11 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('one variant: Day of Week still enabled, and a click still filters', await clickWorks('Day of Week'), [true, true, true, true]);
     ok('one variant: Exit Reason still enabled, and a click still filters', await clickWorks('Exit Reason'), [true, true, true, true]);
     ok('one variant: no parameter grid, no parameter sections',
-       [await until(() => !shown(gridCard())), c.paramSections().length, !!document.getElementById('ob-sec-card-param__dte')], [true, 0, false]);
+       [await poll(() => !shown(gridCard())), c.paramSections().length, !!document.getElementById('ob-sec-card-param__dte')], [true, 0, false]);
     ok('one variant: the ranking is stale (another sample)', c.surfStale(), true);
     await c.rankSurface();
     await until(() => !c.surf.busy);
-    ok('one variant: no pooled note, BH in the footer', [await until(() => !shown(document.querySelector('.ob-rank-pooled'))),
+    ok('one variant: no pooled note, BH in the footer', [await poll(() => !shown(document.querySelector('.ob-rank-pooled'))),
        /Benjamini/.test(c.surfFooter())], [true, true]);
     // Clear the filter so both sides start from the same untouched page.
     c.setAllCats(dow, true);
@@ -593,7 +605,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('variant view == its file alone: every section subtitle', asVariant.subs, alone.subs);
     ok('variant view == its file alone: date bounds, auto-bin steps, drawdown and deployment titles',
        [asVariant.bounds, asVariant.steps, asVariant.dd, asVariant.deploy], [alone.bounds, alone.steps, alone.dd, alone.deploy]);
-    ok('a single uploaded file can be saved', await until(() => shown(document.querySelector('.ob-save'))), true);
+    ok('a single uploaded file can be saved', await poll(() => shown(document.querySelector('.ob-save'))), true);
     ok('labelled as a log, not a sweep', txt(document.querySelector('.ob-save .ob-lbl')), 'Save this log');
 
     // ── a refused batch leaves the page alone ───────────────────────────
@@ -602,7 +614,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     await until(() => !!c.sweep);
     // ── saving a sweep: every file, gzipped, one strategy ───────────────
     ok('a multi-file sweep offers Save, labelled for the sweep',
-       [await until(() => shown(document.querySelector('.ob-save'))),
+       [await poll(() => shown(document.querySelector('.ob-save'))),
         txt(document.querySelector('.ob-save .ob-lbl'))], [true, 'Save this sweep (every file, one strategy)']);
     const nameBox = document.querySelector('.ob-save input[type=text]');
     nameBox.value = 'dte sweep'; nameBox.dispatchEvent(new Event('input', { bubbles: true }));
@@ -611,7 +623,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     await until(() => !!window.__saved);
     ok('Save sends every file, gzipped, with the name, to /strategies/sweep',
        [window.__saved.names, window.__saved.gz, window.__saved.name, window.__saved.single], [FIX.names, [true, true, true, true], 'dte sweep', null]);
-    ok('and says it was saved, as a sweep', await until(() => /Saved as dte sweep \(240 trades, sweep of 4 variants/.test(c.saveMsg)), true);
+    ok('and says it was saved, as a sweep', await poll(() => /Saved as dte sweep \(240 trades, sweep of 4 variants/.test(c.saveMsg)), true);
     // ── loading a saved sweep: ALL, the record, a changed list said ─────
     c.setVariant('2'); await wait(150);
     c.selectedSavedId = '9';
@@ -743,7 +755,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     await c.rankSurface();
     await until(() => !c.surf.busy && !!c.surf.result);
     ok('one survivor: the ranking marks significance again (BH in the footer, no pooled note)',
-       [/Benjamini/.test(c.surfFooter()), await until(() => !shown(document.querySelector('.ob-rank-pooled')))], [true, true]);
+       [/Benjamini/.test(c.surfFooter()), await poll(() => !shown(document.querySelector('.ob-rank-pooled')))], [true, true]);
     // Picking a variant greys the cards; ALL brings the slice back.
     sel.value = String(c.sliceVariants()[0].id);
     sel.dispatchEvent(new Event('change', { bubbles: true }));
@@ -766,7 +778,7 @@ window.addEventListener('load', () => setTimeout(async () => {
     pbox('pt', 25).click();
     await until(() => c.filteredCount === 0);
     const noTrades = [...document.querySelectorAll('.ob-main .ob-empty')].find(e => /No trades match/.test(txt(e)));
-    ok('every pt value unticked: the ordinary no-trades state', [await until(() => shown(noTrades)), sel.options[0].textContent.trim()],
+    ok('every pt value unticked: the ordinary no-trades state', [await poll(() => shown(noTrades)), sel.options[0].textContent.trim()],
        [true, 'ALL — 0 of 8 variants (parameter filters)']);
     // "reset all filters" clears them.
     [...document.querySelectorAll('.ob-status a')].find(a => /reset all filters/.test(txt(a))).click();
@@ -867,21 +879,24 @@ def main() -> int:
     except Exception as exc:                              # noqa: BLE001
         print(f"  the page could not be rendered: {type(exc).__name__}: {exc}")
         return 1
-    tmp = ROOT / "scripts" / "_oo_sweep_ui.html"
+    import uuid
+
+    import edge_cdp
+    # REAL TIME over the DevTools protocol (2026-10-27), not
+    # --virtual-time-budget: a wait on virtual time is skipped through while
+    # the page's real async work (the gzip upload) runs, so under load it
+    # expired before a dropped sweep had loaded (see `until` in the driver).
+    tmp = ROOT / "scripts" / f"_oo_sweep_ui_{uuid.uuid4().hex[:12]}.html"
     tmp.write_text(page, encoding="utf-8")
     try:
-        p = subprocess.run(
-            [browser, "--headless=new", "--disable-gpu", "--window-size=1600,1200",
-             "--dump-dom", "--virtual-time-budget=60000", tmp.as_uri()],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
+        report = edge_cdp.run_page(browser, tmp, timeout_s=300)
+    except edge_cdp.PageDidNotReport as exc:
+        print(f"  FAIL  the page never reported: {exc}")
+        return 1
     finally:
         tmp.unlink(missing_ok=True)
-    m = re.search(r'<pre id="report">(.*?)</pre>', p.stdout, re.S)
-    if not m:
-        print("  the page never reported — it did not get that far")
-        return 1
     fails = n = 0
-    for line in _html.unescape(m.group(1)).strip().splitlines():
+    for line in report.strip().splitlines():
         parts = line.split("|")
         if parts[0] == "errs":
             clean = parts[1] == "clean"
