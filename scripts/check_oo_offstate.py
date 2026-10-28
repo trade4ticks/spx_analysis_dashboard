@@ -34,12 +34,21 @@ card may hold while Off is asserted separately, by the split's own gate.
   python scripts/check_oo_offstate.py --record   (re)record -- only on a
       commit whose page is the one to keep; say why in the commit message
   python scripts/check_oo_offstate.py --rerecord-from REF
-      re-record with THIS driver but the page (templates, static) exactly
-      as it was at REF, and the recording's own inputs -- for a change in
-      how the page is DRIVEN, never in what it is. Used once (2026-10-25):
-      the move from --virtual-time-budget to real time, where virtual time
-      had recorded an artifact (Alpine never shows an x-show element on
-      virtual time once hidden: the drop zone's label after a second upload).
+      re-record with THIS driver, the page (templates, static) exactly as it
+      was at REF, and the recording's own inputs. TWO legitimate reasons,
+      and only these:
+      1. A change in how the page is DRIVEN, not in what it is (REF = the
+         recorded commit). 2026-10-25: the move from --virtual-time-budget
+         to real time, where virtual time had recorded an artifact.
+      2. A deliberate change to what Split Off RENDERS, approved by the user
+         in the browser first (REF = the commit holding it). 2026-10-27: the
+         parameter grid became every pair at once with header bands --
+         a sweep feature, part of the Split Off page.
+      Either way: before re-recording, check the current page against the
+      recording and confirm every difference falls inside the part that
+      changed (and that the check DOES flag a change outside it); after,
+      run that check on the actual old and new recordings and report it.
+      Never to make a failing comparison pass.
 
 No browser (the VPS) -> SKIP.
 """

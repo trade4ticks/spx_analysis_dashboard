@@ -1856,7 +1856,16 @@ the new real-time driver on real frames: the old recording held the shim's
 artifact (the drop zone reading "Parsing 4 files…" after the upload had
 finished). The two recordings differ in exactly those 8 DOM lines on each
 of the three sweep steps; every figure, chart, the export and every request
-are identical.
+are identical. **Re-recorded again, 2026-10-27, `--rerecord-from 1c01a4f`
+— the SECOND legitimate reason (documented in the gate):** a deliberate,
+user-approved change to what Split Off renders (the every-pair parameter
+grid with header bands). Containment checked before (against the live page)
+and after (old vs new recording): every DOM change inside the Parameter grid
+card (12–115 lines a step: the Across/Down controls and the single table
+out, the pair boxes and bands in), state only `grid` → `grids`, every chart,
+the export and every request identical; the check was first shown to flag a
+change outside the card. Reasons are only these two; never to make a failing
+comparison pass.
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

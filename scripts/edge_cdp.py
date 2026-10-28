@@ -96,7 +96,13 @@ def _devtools_port(prof: Path, proc: subprocess.Popen, wait_s: float = 30.0) -> 
         if proc.poll() is not None:
             raise RuntimeError(f"Edge exited at start ({proc.returncode}): {(proc.stderr.read() or b'')[-400:]!r}")
         if f.exists():
-            first = f.read_text(encoding="utf-8").splitlines()
+            # Edge may still hold the file open for writing: on Windows a read
+            # then raises PermissionError (seen 2026-10-27, which killed a
+            # re-record). Not ready yet -- poll again.
+            try:
+                first = f.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                first = []
             if first and first[0].strip().isdigit():
                 return int(first[0])
         time.sleep(0.05)
