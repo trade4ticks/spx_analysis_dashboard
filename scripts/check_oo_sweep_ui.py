@@ -36,6 +36,10 @@ with payloads the REAL router built (analyze_batch, no database):
     /strategies/sweep as one strategy; a single file saves as before; a
     saved sweep loads back with ALL selected, and a changed variant list is
     said
+  * HEADER BANDS (2026-10-27): on every pivot a column band naming the
+    COLUMN parameter over exactly the data columns, and per box ONE row band
+    naming the ROW parameter beside exactly the data rows -- names, spans
+    and measured positions, in Train and Full view and on a 1-value axis
   * the parameter grid, EVERY PAIR AT ONCE (2026-10-27; it had Across /
     Down selectors): a 2-parameter sweep renders one pair, a 3-parameter
     sweep three -- dte×pt, dte×sl, pt×sl, in the sweep's parameter order --
@@ -450,8 +454,8 @@ window.addEventListener('load', () => setTimeout(async () => {
     // test pivot too in Full view).
     const readPairs = () => [...gridCard().querySelectorAll('.ob-pgrid-pair')].map(box => {
       const tbl = t => !t ? null : {
-        xs: [...t.querySelectorAll('thead th')].filter(th => !th.classList.contains('ob-pgrid-corner')).map(txt),
-        ys: [...t.querySelectorAll('tbody th')].map(txt),
+        xs: [...t.querySelectorAll('thead tr:not(.ob-pgrid-bandrow) th')].map(txt).filter(Boolean),
+        ys: [...t.querySelectorAll('tbody th:not(.ob-pgrid-band)')].map(txt),
         cells: [...t.querySelectorAll('tbody tr')].map(tr => [...tr.querySelectorAll('td')].map(td => ({
           text: txt(td.querySelector('.ob-pgrid-v')), thin: td.classList.contains('thin'),
           bg: getComputedStyle(td).backgroundColor, inl: td.style.background }))) };
@@ -462,6 +466,45 @@ window.addEventListener('load', () => setTimeout(async () => {
     const FMT = { avg: v => money(v), total: v => money(v), maxdd: v => money(v), win: v => parseFloat(v), calmar: v => parseFloat(v),
                   n: v => Number(String(v).replace(/,/g, '')) };
     const TOL = { avg: 0.006, total: 0.51, maxdd: 0.51, win: 0.051, calmar: 0.0051, n: 0 };
+    // The header bands of every box, against its axes: the column band names
+    // the COLUMN parameter and spans exactly the data columns (colspan AND
+    // measured edges), the row band names the ROW parameter and spans exactly
+    // the data rows; ONE row band per box. Returns the problems found.
+    const bandProblems = () => {
+      const bad = [];
+      const near = (a, b) => Math.abs(a - b) <= 1.5;
+      for (const box of gridCard().querySelectorAll('.ob-pgrid-pair')) {
+        const [x, y] = box.dataset.pair.split('|');
+        const rowBands = box.querySelectorAll('th.ob-pgrid-band-row');
+        if (rowBands.length !== 1) bad.push(`${x}×${y}: ${rowBands.length} row bands`);
+        const tables = [box.querySelector('.ob-pgrid-wrap > table.ob-pgrid'), box.querySelector('.ob-pgrid-test table.ob-pgrid')].filter(Boolean);
+        tables.forEach((t, ti) => {
+          const which = ti ? 'test' : 'train';
+          const cb = t.querySelector('th.ob-pgrid-band-col');
+          const heads = [...t.querySelectorAll('thead tr:not(.ob-pgrid-bandrow) th')].filter(th => txt(th));
+          if (!cb) { bad.push(`${x}×${y} ${which}: no column band`); return; }
+          if (txt(cb) !== x) bad.push(`${x}×${y} ${which}: column band says "${txt(cb)}", the columns are ${x}`);
+          if (cb.colSpan !== heads.length) bad.push(`${x}×${y} ${which}: column band spans ${cb.colSpan} of ${heads.length} columns`);
+          const r = cb.getBoundingClientRect(), a = heads[0].getBoundingClientRect(), z = heads[heads.length - 1].getBoundingClientRect();
+          if (!near(r.left, a.left) || !near(r.right, z.right)) bad.push(`${x}×${y} ${which}: column band ${r.left}-${r.right} vs columns ${a.left}-${z.right}`);
+        });
+        const rb = rowBands[0], t0 = tables[0];
+        if (rb) {
+          const rows = [...t0.querySelectorAll('tbody tr')];
+          if (txt(rb) !== y) bad.push(`${x}×${y}: row band says "${txt(rb)}", the rows are ${y}`);
+          if (rb.rowSpan !== rows.length) bad.push(`${x}×${y}: row band spans ${rb.rowSpan} of ${rows.length} rows`);
+          const r = rb.getBoundingClientRect(), a = rows[0].getBoundingClientRect(), z = rows[rows.length - 1].getBoundingClientRect();
+          if (!near(r.top, a.top) || !near(r.bottom, z.bottom)) bad.push(`${x}×${y}: row band ${r.top}-${r.bottom} vs rows ${a.top}-${z.bottom}`);
+          // In Full view the test pivot's rows sit level with the band's.
+          if (tables[1]) {
+            const tr = [...tables[1].querySelectorAll('tbody tr')];
+            if (tr.length !== rows.length || !near(tr[0].getBoundingClientRect().top, a.top) || !near(tr[tr.length - 1].getBoundingClientRect().bottom, z.bottom))
+              bad.push(`${x}×${y}: the test pivot's rows are not level with the row band`);
+          }
+        }
+      }
+      return bad;
+    };
     const alphaOf = bg => { const m = bg.match(/rgba?\(([^)]+)\)/); const p = m[1].split(','); return p.length === 4 ? +p[3] : 1; };
     // Every cell of every pair against the reference, for all six metrics.
     const checkPairs = async (E, label) => {
@@ -601,6 +644,8 @@ window.addEventListener('load', () => setTimeout(async () => {
        readPairs().map(p => [p.key, p.title, p.train.xs, p.train.ys])],
        [8, ['dte', 'pt', 'sl'], [['dte×pt', 'dte × pt', ['30', '45'], ['25', '50']], ['dte×sl', 'dte × sl', ['30', '45'], ['100', '200']],
                                 ['pt×sl', 'pt × sl', ['25', '50'], ['100', '200']]]]);
+    ok('header bands, every box: the column band names the column parameter over exactly its columns, ONE row band ' +
+       'names the row parameter beside exactly its rows', bandProblems(), []);
     ok('each box says what its cells pool across', readPairs().map(p => p.note.split(' · ')[0]),
        ['each cell pools across sl (2 values)', 'each cell pools across pt (2 values)', 'each cell pools across dte (2 values)']);
     await checkPairs(FIX.expect.pairs3, '3-param');
@@ -679,7 +724,9 @@ window.addEventListener('load', () => setTimeout(async () => {
     ok('the selector lists only the surviving variants', [...sel.options].map(o => txt(o).replace(/ \(\d+ trades\)$/, '')),
        ['ALL — 4 of 8 variants (parameter filters)', 'dte=30 · pt=25 · sl=100', 'dte=30 · pt=25 · sl=200',
         'dte=45 · pt=25 · sl=100', 'dte=45 · pt=25 · sl=200']);
-    ok('every grid keeps its place; pt shows only 25 where it is an axis -- a one-row / one-column grid, never a missing one',
+    ok('header bands on a ONE-value axis: the bands span the single row / column', bandProblems(), []);
+    ok('THE SINGLE-VALUE CASE (one pt ticked, dte and sl still varying): every grid keeps its place -- dte×pt one row, pt×sl ' +
+       'one column -- never a missing one',
        readPairs().map(p => [p.key, p.train.xs, p.train.ys]),
        [['dte×pt', ['30', '45'], ['25']], ['dte×sl', ['30', '45'], ['100', '200']], ['pt×sl', ['25'], ['100', '200']]]);
     ok('and dte×sl, which pools across pt, counts its 1 ticked value', /pools across pt \(1 value\)/.test(readPairs()[1].note), true);
@@ -747,6 +794,8 @@ window.addEventListener('load', () => setTimeout(async () => {
        [document.querySelectorAll('.ob-pgrid-pair').length, keys(), readPairs().map(p => !!p.train && !!p.test),
         readPairs().map(p => p.test ? p.test.cells.length === p.train.cells.length && p.test.xs.join() === p.train.xs.join() : false)],
        [3, ['dte×pt', 'dte×sl', 'pt×sl'], [true, true, true], [true, true, true]]);
+    ok('Full view header bands: a column band on EACH pivot, ONE row band per box (not per pivot), the test rows level with it',
+       bandProblems(), []);
     segB('Off').click(); await wait(400);
     ok('Split Off: the same three pairs again', keys(), ['dte×pt', 'dte×sl', 'pt×sl']);
 
@@ -763,6 +812,7 @@ window.addEventListener('load', () => setTimeout(async () => {
        [['dte×pt', ['30', '45'], ['25', '50']], ['dte×sl', ['30', '45'], ['50', '100', '150', '200']],
         ['pt×sl', ['25', '50'], ['50', '100', '150', '200']]]);
     await checkPairs(EP, '16-variant');
+    ok('header bands on a four-value axis', bandProblems(), []);
     const thinNow = Object.fromEntries(readPairs().map(p => [p.key.replace('×', '|'),
       p.train.cells.flatMap((row, r) => row.map((cl, k) => cl.thin ? p.train.xs[k] + ',' + p.train.ys[r] : null)).filter(Boolean).sort()]));
     ok('the fixture separates the rules: per-grid and global thresholds outline different cells',

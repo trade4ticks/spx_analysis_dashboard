@@ -190,6 +190,14 @@ docs — done. **The feature is complete.** Code: `app/oo_backtest/sweep.py`,
   from the filter state, a global median) each fail it. It also found the
   sidebar filter cards' teardown trap (`catOf(m).options` read on a dying
   card when a sweep with other parameters loads) — guarded.
+  **Header bands (2026-10-27, option 2 of `axis-labels-mock.html`):** a
+  column band naming the column parameter over exactly the data columns, on
+  each pivot; one rotated row band per box beside exactly the data rows (in
+  Full view the test rows sit level with it, so it serves both); `#2b2b2b`
+  ground, accent text, 9.5px uppercase — the one rotated text on the page,
+  approved. The corner cell is empty. The gate checks names (column band =
+  column parameter), spans and measured edges; swapped or mis-spanned bands
+  fail it.
 - **Parameter FILTERS (2026-10-19).** The middle ground between one
   variant and ALL: each parameter is an ordinary categorical filter card
   (`paramRows` have `filter: true`; `filterDefs()` = parameters first, then
@@ -1728,6 +1736,11 @@ bar-count rule would restore exactly the hiding this removed.
      race (the ranking width) and created a false one (the drop zone); the same may hold
      for the pages those gates drive. Converting them waits on the two converted gates
      running clean for a while (the user's call).
+   - `check_oo_sweep_ui` still runs on virtual time and FLAKES under the suite's load
+     (2026-10-27, reproduced 2 of 4 beside the parallel split gate): its 4 s wait for a
+     dropped sweep runs on virtual time while the page's gzip upload is real async work,
+     so the wait is skipped through and the next assertions read the previous sweep.
+     Cause found; the fix (real-time driving, or less parallelism) awaits the user's call.
    - The `spx-dashboard` systemd unit file is not in the repo (only `deploy/spx-live.service`
      is); its contents are quoted in `DEPLOYMENT_NOTES.md`'s procedure only in part.
 

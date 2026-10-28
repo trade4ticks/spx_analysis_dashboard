@@ -176,6 +176,14 @@
     .ob-pgrid-pair { flex:0 0 auto; max-width:100%; border:1px solid var(--border); border-radius:4px; padding:6px 8px; }
     .ob-pgrid-pair-title { font-size:12px; font-weight:600; margin:0 0 4px 3px; }
     .ob-pgrid-pair-note { margin:4px 0 0 3px; font-size:11px; }
+    /* Header bands: the segmented controls' inactive ground (#2b2b2b) and the
+       accent -- no new colour. The row band's text reads bottom-to-top. */
+    .ob-pgrid th.ob-pgrid-band { background:#2b2b2b; color:#3498db; font-size:9.5px; font-weight:700;
+                                 text-transform:uppercase; letter-spacing:.1em; border-radius:3px; padding:3px 0;
+                                 text-align:center; }
+    .ob-pgrid th.ob-pgrid-band-row { width:19px; padding:0; vertical-align:middle; }
+    .ob-pgrid th.ob-pgrid-band-row span { writing-mode:vertical-rl; transform:rotate(180deg); display:inline-block; }
+    .ob-pgrid-bandrow th { padding-top:0; padding-bottom:0; }
     .ob-rank-pooled { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px;
                       border:1px solid var(--border); color:var(--dim); }
 
@@ -700,16 +708,29 @@
                 <div class="ob-pgrid-pair-title" x-text="g ? g.x + ' × ' + g.y : ''"></div>
                 <div class="ob-pgrid-wrap" :class="{ 'ob-pgrid-split': !!(g && g.test) }">
                   <template x-if="!!(g && g.test)"><div class="ob-pgrid-head" x-text="gridHead('train')"></div></template>
+                  <!-- HEADER BANDS (2026-10-27): the column parameter over exactly
+                       the data columns, the row parameter beside exactly the data
+                       rows (rotated). The row band is the train pivot's first
+                       column; in Full view the test pivot's rows line up with
+                       these, so it is the card's ONE row band. -->
                   <table class="ob-pgrid">
                     <thead>
+                      <tr class="ob-pgrid-bandrow">
+                        <th></th><th></th>
+                        <th class="ob-pgrid-band ob-pgrid-band-col" :colspan="g && g.train ? g.train.xs.length : 1" x-text="g ? g.x : ''"></th>
+                      </tr>
                       <tr>
-                        <th class="ob-pgrid-corner" x-text="g ? g.y + ' ↓ / ' + g.x + ' →' : ''"></th>
+                        <th></th>
+                        <th class="ob-pgrid-corner"></th>
                         <template x-for="xv in (g && g.train ? g.train.xs : [])" :key="xv"><th x-text="xv"></th></template>
                       </tr>
                     </thead>
                     <tbody>
                       <template x-for="(row, r) in (g && g.train ? g.train.rows : [])" :key="r">
                         <tr>
+                          <template x-if="r === 0">
+                            <th class="ob-pgrid-band ob-pgrid-band-row" :rowspan="g && g.train ? g.train.rows.length : 1"><span x-text="g ? g.y : ''"></span></th>
+                          </template>
                           <th x-text="g && g.train ? g.train.ys[r] : ''"></th>
                           <template x-for="(cell, k) in row" :key="k">
                             <td :class="{ empty: cell.empty, thin: cell.thin }" :style="{ background: cell.bg }" :title="cell.title">
@@ -728,6 +749,9 @@
                       <div class="ob-pgrid-head" x-text="gridHead('test')"></div>
                       <table class="ob-pgrid">
                         <thead>
+                          <tr class="ob-pgrid-bandrow">
+                            <th class="ob-pgrid-band ob-pgrid-band-col" :colspan="g && g.test ? g.test.xs.length : 1" x-text="g ? g.x : ''"></th>
+                          </tr>
                           <tr><template x-for="xv in (g && g.test ? g.test.xs : [])" :key="xv"><th x-text="xv"></th></template></tr>
                         </thead>
                         <tbody>
