@@ -14,6 +14,8 @@
 
 const SC_BLUE = '#3498db';
 const SC_PINK = '#e84393';
+// The session profile's $ vol/min series and its axis.
+const SC_DVOL = '#e0b341';
 const SC_CHARTS = { geom: null, overlay: null, mult: {}, profile: null };
 
 /* Constant-ratio lines for the spread-against-noise scatter.
@@ -280,6 +282,11 @@ document.addEventListener('alpine:init', () => {
     cand: null,
     candLoading: false,
     candError: '',
+    // THE LOOKBACK. One session lets an earnings-day spread blowout pass on
+    // that day alone; the table aggregates each metric over the window.
+    candWindow: 10,
+    candStat: 'median',          // 'median' | 'p25'
+    candEnd: '',                 // '' = the latest session (meta.date)
     // The selected noise metric. Everything about the variant -- which
     // midpoint, which horizon, which statistic -- is carried IN THE NAME,
     // so one string is the whole selection and there is no way for the
@@ -326,11 +333,16 @@ document.addEventListener('alpine:init', () => {
         this.filters = Object.assign({}, f.defaults || {});
         this.noise = j.default_noise || '';
         if (this.meta.connected) {
+          // A section in HIDDEN_SECTIONS is not on the page, so nothing is
+          // fetched for it.
+          const on = id => this.shown(id);
           await Promise.all([
             this.meta.date ? this.loadCandidates() : Promise.resolve(),
-            this.meta.date ? this.loadHealth() : Promise.resolve(),
-            this.loadFills(), this.loadCalibration(),
-            this.loadCorrelation(), this.loadStability(),
+            this.meta.date && on('health') ? this.loadHealth() : Promise.resolve(),
+            on('fills') ? this.loadFills() : Promise.resolve(),
+            on('calibration') ? this.loadCalibration() : Promise.resolve(),
+            on('correlation') ? this.loadCorrelation() : Promise.resolve(),
+            on('stability') ? this.loadStability() : Promise.resolve(),
           ]);
         }
       } catch (e) {
@@ -339,6 +351,13 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.loading = false;
       }
+    },
+
+    /* Is a section rendered? HIDDEN_SECTIONS in the router, sent as
+     * window.SC_HIDDEN by the template. */
+    shown(id) {
+      return !((typeof window !== 'undefined' && window.SC_HIDDEN) || [])
+        .includes(id);
     },
 
     range(k) {
@@ -608,6 +627,18 @@ document.addEventListener('alpine:init', () => {
         if (this.td.columns.ratio)
           sets.push({ label: 'ratio', data: pt('ratio'),
                       borderColor: '#4ec9a0', yAxisID: 'y2', borderDash: [4, 3] });
+        // $ VOL/MIN on its OWN axis: dollars per minute is neither bps nor a
+        // ratio, and sharing either axis would flatten one or the other.
+        // Each bucket is shares/min × that session's reference price,
+        // averaged across the sessions like the other three.
+        const dvKey = Object.keys(this.td.profile_derived || {})[0];
+        if (dvKey)
+          sets.push({ label: this.td.profile_derived[dvKey].label,
+                      data: pt(dvKey), borderColor: SC_DVOL, yAxisID: 'y3',
+                      borderDash: [1, 2] });
+        const fmtMoney = v => v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M'
+                            : v >= 1e3 ? '$' + (v / 1e3).toFixed(0) + 'k'
+                            : '$' + Math.round(v);
         SC_CHARTS.profile = new Chart(el.getContext('2d'), {
           type: 'line',
           data: { datasets: sets.map(s => Object.assign({
@@ -634,6 +665,12 @@ document.addEventListener('alpine:init', () => {
                     ticks: { font: { size: 9 }, color: '#4ec9a0' },
                     title: { display: true, text: 'ratio', color: '#4ec9a0',
                              font: { size: 9 } } },
+              y3: { display: !!dvKey, position: 'right',
+                    grid: { display: false }, beginAtZero: true,
+                    ticks: { font: { size: 9 }, color: SC_DVOL,
+                             callback: v => fmtMoney(v) },
+                    title: { display: true, text: '$ vol/min', color: SC_DVOL,
+                             font: { size: 9 } } },
             },
             plugins: {
               legend: { position: 'bottom',
@@ -644,7 +681,9 @@ document.addEventListener('alpine:init', () => {
                 const v = it[0].parsed.x;
                 return String(Math.floor(v / 60)).padStart(2, '0') + ':'
                      + String(v % 60).padStart(2, '0');
-              } } },
+              }, label: it => it.dataset.label + ': '
+                  + (it.dataset.yAxisID === 'y3' ? fmtMoney(it.parsed.y)
+                                                 : it.parsed.y.toFixed(2)) } },
             },
           },
           plugins: [scTradedHours],
@@ -1686,8 +1725,8 @@ document.addEventListener('alpine:init', () => {
           // Same rows, two more views. Drawn from this payload rather than
           // re-fetched, so the scatter cannot disagree with the table.
           this.geomInvalidate();
-          this.renderGeometry();
-          this.loadSeries();
+          if (this.shown('geometry')) this.renderGeometry();
+          if (this.shown('drift')) this.loadSeries();
         }
       } catch (e) {
         this.candError = String(e.message || e); this.cand = null;
@@ -1701,7 +1740,11 @@ document.addEventListener('alpine:init', () => {
      * second copy of the filter wiring, and the pane's constraints have
      * already gone missing from one copy of it (2026-09-24). */
     candidateQuery() {
-      const q = new URLSearchParams({ date: this.meta.date });
+      // The date is the window's END; every value is `candStat` across the
+      // `candWindow` sessions ending there.
+      const q = new URLSearchParams({ date: this.candEnd || this.meta.date,
+                                      window: String(this.candWindow),
+                                      stat: this.candStat });
       if (this.noise) q.set('noise', this.noise);
       let cols = this.activeRoleKeys();
       if (this.showTrade) {
@@ -1763,12 +1806,12 @@ document.addEventListener('alpine:init', () => {
         return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
       };
       const cols = cand.columns || [];
-      const head = ['ticker', ...cols.map(c => this.colLabel(c))];
+      const head = ['ticker', 'sessions', ...cols.map(c => this.colLabel(c))];
       if (showFails) head.push('passes', 'excluded_by');
       const rows = (cand.rows || []).filter(r => showFails || r.passes);
       const lines = [head.map(esc).join(',')];
       for (const r of rows) {
-        const cells = [r.symbol, ...cols.map(c => r.values[c.key])];
+        const cells = [r.symbol, r.sessions, ...cols.map(c => r.values[c.key])];
         if (showFails) {
           cells.push(r.passes ? 'yes' : 'no',
                      (r.fails || []).map(f => this.filterLabel(f)).join('; '));
@@ -1799,7 +1842,11 @@ document.addEventListener('alpine:init', () => {
       const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `scalp_candidates_${this.meta.date}_${tag}.csv`;
+      // The window and statistic are in the name: two exports of one end
+      // date over different windows are different tables.
+      const w = cand.window || {};
+      a.download = `scalp_candidates_${cand.date}_${w.requested}s_`
+                 + `${w.stat}_${tag}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();

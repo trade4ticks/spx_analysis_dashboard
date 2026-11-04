@@ -1381,6 +1381,30 @@ of the filter wiring is how the pane's constraints went missing once), and
 when the endpoint's 600-row `limit` cut the table short it asks again with
 `limit=5000`. Gated in `check_scalp_filters.py`.
 
+**Reduced page, lookback, $ vol/min profile (2026-11-03).**
+- `HIDDEN_SECTIONS` (top of `app/routers/equities_scalp.py`) is the one
+  switch: the page route passes it, the template leaves those panels out of
+  the jump bar and the DOM (`{% if '<id>' not in hidden %}`), the JS skips
+  their fetches (`shown(id)`, from `window.SC_HIDDEN`). Markup, JS and
+  endpoints are kept; empty the list to get the page back. Shown: Candidates,
+  Replay, Ticker detail. The render gates pass no context, so they still
+  check every panel.
+- **/candidates aggregates over a window**: `window` (1/5/10/20, default 10)
+  sessions ENDING at `date`, `stat` median | p25, per symbol per metric with
+  `percentile_cont` (the /health pattern), in ONE statement (`day` → `obs` →
+  `agg` → pivot). Derived columns ($ vol/min) are computed PER SESSION and
+  then aggregated — never a product of percentiles. `n_sessions` per row;
+  the pane's ranges (`metric_ranges`) and the sparkline follow the window.
+  `window=1` is the old single-date result. The export name carries
+  `<end>_<N>s_<stat>`. **p25 is the strict reading for a FLOOR only**
+  (spread, $ vol/min); for a ceiling (`max_noise_bps`) it is the lenient one.
+- **Ticker detail's profile has a 4th series, $ vol/min, on its own axis
+  (`y3`)**: per bucket, `shares_per_min` (intraday) × that session's
+  `reference_price` (daily_metrics, one value per date so the join cannot
+  multiply rows), averaged across sessions. The parts come from
+  `scalp_columns.DERIVED`. The monthly scope has no profile chart, so it has
+  no $ vol/min.
+
 ## Equities Wall (`/wall`, in progress — 2026-09-22)
 
 A page of dozens to ~100 small live tapes, so a whole watchlist can be

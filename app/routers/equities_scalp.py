@@ -39,6 +39,27 @@ from app import scalp_config, scalp_columns, scalp_fills, scalp_metric_docs
 router = APIRouter()
 
 
+# ── sections the page does not show ─────────────────────────────────────────
+#
+# The ONE switch. A section named here is left out of the jump bar and the
+# rendered page, and the page skips its fetches; its markup, its JS and its
+# endpoint all stay, so taking a name out of this list brings it back as it
+# was. Ids are the panels' own (`#geometry`, ...); 'correlation' covers both
+# the metric catalog and the metric-correlation panel. Hidden 2026-11-03 to
+# reduce the page to Use / Ticker detail / Replay.
+HIDDEN_SECTIONS: tuple[str, ...] = (
+    "now",            # Right now
+    "geometry",       # Spread × noise
+    "correlation",    # Metric catalog + Metric correlation
+    "stability",      # Rank stability
+    "fills",          # Results (fills upload)
+    "calibration",
+    "distributions",
+    "drift",          # Over time
+    "health",         # Data health
+)
+
+
 # The pipeline's own read-time thresholds and their slider bounds. Vendored
 # rather than restated: scripts/check_vendored.py diffs the whole file against
 # the pipeline's copy, so a threshold moved upstream cannot sit here at its old
@@ -1422,6 +1443,26 @@ def _intraday_roles():
     return scalp_columns.resolve_all(_intraday_cols(), v, h, suffix)
 
 
+def _dvol_parts() -> tuple[str, str] | None:
+    """The $ vol/min derived column split by table: (intraday rate column,
+    daily price metric). Read from scalp_columns.DERIVED, never restated, and
+    None -- no fourth series -- unless exactly one part is stored intraday and
+    the product is a multiplication."""
+    d = scalp_columns.BY_DERIVED.get(_DVOL_KEY)
+    if not d or d.op != "mul" or len(d.parts) != 2:
+        return None
+    intra = _intraday_cols()
+    inside = [p for p in d.parts if p in intra]
+    outside = [p for p in d.parts if p not in intra]
+    if len(inside) != 1 or len(outside) != 1:
+        return None
+    return inside[0], outside[0]
+
+
+_DVOL_KEY = "dollar_vol_per_min"
+_DVOL_PARTS = _dvol_parts()
+
+
 @router.get("/ticker-detail")
 async def ticker_detail(
     symbol:   str = Query(...),
@@ -1525,11 +1566,28 @@ async def ticker_detail(
         d_ = want if want in dates else dates[-1]
 
         sel = ", ".join(f'avg(m."{c}") AS "{k}"' for k, c in cols.items())
+        # $ VOL/MIN BY BUCKET. The derived column's parts split across two
+        # tables: the rate is stored per 15-minute bucket, the price only per
+        # day. So each bucket's rate is multiplied by THAT SESSION's price and
+        # the products are averaged, like every other series here -- not the
+        # average rate times an average price. The join is to one value per
+        # date, so it cannot multiply rows (and with them `sessions`).
+        dv_sql, dv_args = "", []
+        if _DVOL_PARTS:
+            rate_col, px_metric = _DVOL_PARTS
+            dv_sql = (f', avg(m."{rate_col}" * px.px) AS "{_DVOL_KEY}"')
+            dv_args = [px_metric]
         prows = await conn.fetch(
-            f"SELECT m.bucket_start::time AS t, count(*) AS sessions, {sel} "
+            f"SELECT m.bucket_start::time AS t, count(*) AS sessions, {sel}"
+            f"{dv_sql} "
             f"FROM {INTRADAY_TABLE} m "
-            f"WHERE m.symbol = $1 AND m.trade_date = ANY($2) "
-            f"GROUP BY 1 ORDER BY 1", sym, dates)
+            + (f"LEFT JOIN (SELECT trade_date, max(value) AS px "
+               f"  FROM daily_metrics WHERE symbol = $1 AND metric = $3 "
+               f"  AND trade_date = ANY($2) GROUP BY trade_date) px "
+               f"  ON px.trade_date = m.trade_date "
+               if dv_sql else "")
+            + f"WHERE m.symbol = $1 AND m.trade_date = ANY($2) "
+            f"GROUP BY 1 ORDER BY 1", sym, dates, *dv_args)
 
         rrows = []
         if ratio_col:
@@ -1575,7 +1633,14 @@ async def ticker_detail(
         "missing_roles": got["missing"],
         "buckets": buckets,
         "profile": [{"t": str(r["t"]), "sessions": int(r["sessions"] or 0),
-                     **{k: r[k] for k in cols}} for r in prows],
+                     **{k: r[k] for k in cols},
+                     **({_DVOL_KEY: r[_DVOL_KEY]} if _DVOL_PARTS else {})}
+                    for r in prows],
+        # Which series the profile carries beyond the role columns, and what
+        # they are built from, so the chart can label them without guessing.
+        "profile_derived": ({_DVOL_KEY: {
+            "label": scalp_columns.BY_DERIVED[_DVOL_KEY].label,
+            "parts": list(_DVOL_PARTS)}} if _DVOL_PARTS else {}),
         "repeat": matrix,
         "repeat_metric": ratio_col,
         "heat_range": _heat_range(
@@ -1728,6 +1793,25 @@ DASHBOARD_FILTER_RANGES = {
 _OPS = {"min": lambda x, t: x >= t, "max": lambda x, t: x <= t}
 
 
+# ── the candidates lookback ─────────────────────────────────────────────────
+#
+# One session is the failure this exists for: a name with earnings that day
+# shows a blown-out spread and a volume spike, passes, and is back to normal
+# the next morning. Each metric is aggregated per symbol across the window
+# with percentile_cont -- the /health endpoint's pattern -- and the 25th
+# percentile reads "cleared this level on at least three quarters of the
+# sessions", which is the stricter question for a floor.
+CAND_WINDOWS = (1, 5, 10, 20)
+CAND_WINDOW_DEFAULT = 10
+CAND_STATS = {"median": 0.5, "p25": 0.25}
+CAND_STAT_DEFAULT = "median"
+# Derived columns are computed PER SESSION and then aggregated, so the 25th
+# percentile of $ vol/min is a level the product itself held on three
+# quarters of the sessions -- not the product of two percentiles, which no
+# session need ever have shown. The tag cannot collide with a metric name.
+_DERIVED_TAG = "__derived__:"
+
+
 def _parse_constraints(raw: str | None) -> list[dict]:
     """`key:op:value,key:op:value`. A malformed clause is a 400, not a skip.
 
@@ -1765,6 +1849,11 @@ async def candidates(
     desc:     bool = Query(True),
     limit:    int = Query(600, ge=1, le=5000),
     spark_sessions: int = Query(10, ge=0, le=60),
+    # THE LOOKBACK. `date` is the window's END; every metric is aggregated per
+    # symbol across the `window` sessions ending there, so a name whose spread
+    # blew out on one earnings day does not pass on that day alone.
+    window:   int = Query(CAND_WINDOW_DEFAULT, ge=1, le=max(CAND_WINDOWS)),
+    stat:     str = Query(CAND_STAT_DEFAULT, description="median | p25"),
     # ANY column, as key:op:value. The named sliders below fold into this.
     filters:  str = Query(None, description="key:min:value,key:max:value"),
     # The pipeline's five read-time thresholds, declared rather than collected
@@ -1807,6 +1896,11 @@ async def candidates(
         return _no_db({"rows": [], "columns": []})
 
     want = _as_date(date)
+    if stat not in CAND_STATS:
+        raise HTTPException(400, f"stat must be one of {sorted(CAND_STATS)}, "
+                                 f"got {stat!r}")
+    pct = CAND_STATS[stat]
+    agg_stat = stat
     v = h = stat = None
     if noise:
         parsed = _parse_variant(noise)
@@ -1825,6 +1919,22 @@ async def candidates(
                     "note": "daily_metrics is empty — the pipeline has not "
                             "written a session yet."}
         d = want if want in available_dates else available_dates[0]
+        # The window ENDS at d. Newest first, so the first `window` dates on
+        # or before it; fewer when the table does not go back that far, and
+        # the response says how many it actually used.
+        async def _dates_ending(n: int) -> list:
+            # From the 90 already read when they reach back far enough;
+            # asked of the table only for an end date near the bottom of the
+            # picker, where slicing would silently shorten the window.
+            have = [x for x in available_dates if x <= d]
+            if len(have) >= n or len(available_dates) < 90:
+                return have[:n]
+            return [r["trade_date"] for r in await conn.fetch(
+                "SELECT DISTINCT trade_date FROM daily_metrics "
+                "WHERE trade_date <= $1 ORDER BY trade_date DESC LIMIT $2",
+                d, n)]
+
+        win_dates = await _dates_ending(window)
 
         # What this date actually holds, so a role resolves against reality
         # rather than against what the docs say could exist.
@@ -1873,32 +1983,57 @@ async def candidates(
 
         order = list(col_map)                       # stable key order
         metrics = [col_map[k] for k in order]
-        # Derived parts ride along in the same bind list; they are selected as
-        # an expression rather than a column, so they do not join `order`.
-        part_idx: dict = {}
-        params: list = [d]
-        sel = ["m.symbol"]
+        # ── the pivot, over the window ───────────────────────────────────
+        #
+        # ONE STATEMENT. `day` is the window's long rows; `obs` adds each
+        # derived column as a per-session pseudo-metric (its parts multiplied
+        # or divided WITHIN a session); `agg` is percentile_cont per
+        # (symbol, metric) -- the /health pattern -- and the outer SELECT
+        # pivots that, exactly as the single-date pivot did. With a 1-session
+        # window every percentile is of one value, so the result is the old
+        # single-date row.
+        #
+        # n_sessions: how many of the window's dates the symbol has rows on.
+        # A name present on 3 of 10 must not read like one present on all 10.
+        params: list = [win_dates, pct]               # $1, $2
+        sel = ["a.symbol"]
         for i, name in enumerate(metrics):
             params.append(name)
-            sel.append(f"max(m.value) FILTER (WHERE m.metric = ${len(params)}) "
+            sel.append(f"max(a.value) FILTER (WHERE a.metric = ${len(params)}) "
                        f"AS v{i}")
+        der_sql = []
         for dk, dv in derived_map.items():
             ex = []
             for pname in dv.parts:
                 params.append(pname)
-                ex.append(f"max(m.value) FILTER (WHERE m.metric = ${len(params)})")
-                part_idx.setdefault(dk, []).append(pname)
-            joiner = " * " if dv.op == "mul" else " / NULLIF("
-            if dv.op == "mul":
-                sel.append(f"({' * '.join(ex)}) AS d_{dk}")
-            else:
-                sel.append(f"({ex[0]} / NULLIF({ex[1]}, 0)) AS d_{dk}")
+                ex.append(f"max(day.value) FILTER "
+                          f"(WHERE day.metric = ${len(params)})")
+            expr = (" * ".join(ex) if dv.op == "mul"
+                    else f"{ex[0]} / NULLIF({ex[1]}, 0)")
+            params.append(_DERIVED_TAG + dk)
+            tag = len(params)
+            der_sql.append(
+                f"SELECT day.symbol, day.trade_date, ${tag}::text AS metric, "
+                f"({expr}) AS value FROM day "
+                f"GROUP BY day.symbol, day.trade_date")
+            sel.append(f"max(a.value) FILTER (WHERE a.metric = ${tag}::text) "
+                       f"AS d_{dk}")
+        sel.append("max(a.n_dates) AS n_sessions")
         params.append(metrics + [p for dv in derived_map.values()
                                  for p in dv.parts])
         rows = await conn.fetch(
-            f"SELECT {', '.join(sel)} FROM daily_metrics m "
-            f"WHERE m.trade_date = $1 AND m.metric = ANY(${len(params)}) "
-            f"GROUP BY m.symbol ORDER BY m.symbol",
+            f"WITH day AS ("
+            f"  SELECT symbol, trade_date, metric, value FROM daily_metrics "
+            f"  WHERE trade_date = ANY($1) AND metric = ANY(${len(params)})), "
+            f"obs AS (SELECT symbol, trade_date, metric, value FROM day"
+            + "".join(f" UNION ALL {s}" for s in der_sql) + "), "
+            f"agg AS ("
+            f"  SELECT symbol, metric, "
+            f"   percentile_cont($2) WITHIN GROUP (ORDER BY value) AS value, "
+            f"   count(*) AS n_dates "
+            f"  FROM obs GROUP BY symbol, metric) "
+            f"SELECT {', '.join(sel)} FROM agg a "
+            f"GROUP BY a.symbol ORDER BY a.symbol",
             *params,
         )
 
@@ -1917,15 +2052,23 @@ async def candidates(
         # wants a span and a median to seed a constraint at; pulling every
         # metric into the pivot to get them would change what the table shows,
         # and screening on one already pulls it in by itself.
+        #
+        # OVER THE WINDOW, like the table: each symbol's aggregate first (the
+        # same statistic the pivot uses), then the span across symbols. A
+        # range taken from one day's raw values would offer a slider over
+        # numbers the table is not showing.
         metric_ranges = {}
         for r in await conn.fetch(
-                "SELECT metric, min(value) AS lo, max(value) AS hi, "
-                "       count(value) AS n, "
-                "       percentile_cont(0.5) WITHIN GROUP (ORDER BY value) "
+                "SELECT metric, min(v) AS lo, max(v) AS hi, "
+                "       count(v) AS n, "
+                "       percentile_cont(0.5) WITHIN GROUP (ORDER BY v) "
                 "         AS mid "
-                "FROM daily_metrics "
-                "WHERE trade_date = $1 AND value IS NOT NULL "
-                "GROUP BY metric", d):
+                "FROM (SELECT symbol, metric, "
+                "        percentile_cont($2) WITHIN GROUP (ORDER BY value) AS v "
+                "      FROM daily_metrics "
+                "      WHERE trade_date = ANY($1) AND value IS NOT NULL "
+                "      GROUP BY symbol, metric) s "
+                "GROUP BY metric", win_dates, pct):
             # An all-null metric is PRESENT but has no range, and the pane
             # says so in the same words as an absent one -- which is right:
             # there is nothing to screen on either way.
@@ -1966,14 +2109,15 @@ async def candidates(
         spark_dates: list[str] = []
         ratio_col = col_map.get("ratio")
         if ratio_col and spark_sessions:
-            window = available_dates[:spark_sessions]
+            # Ending at the window's end date, not the newest in the table.
+            spark_win = await _dates_ending(spark_sessions)
             srows = await conn.fetch(
                 "SELECT trade_date, symbol, value FROM daily_metrics "
                 "WHERE metric = $1 AND trade_date = ANY($2) "
                 "ORDER BY symbol, trade_date",
-                ratio_col, window,
+                ratio_col, spark_win,
             )
-            spark_dates = [str(x) for x in sorted(window)]
+            spark_dates = [str(x) for x in sorted(spark_win)]
             idx = {dt: i for i, dt in enumerate(spark_dates)}
             for r in srows:
                 arr = spark.setdefault(r["symbol"], [None] * len(spark_dates))
@@ -2047,6 +2191,7 @@ async def candidates(
             rejected[tag] = rejected.get(tag, 0) + 1
         t = traded.get(r["symbol"])
         out.append({"symbol": r["symbol"],
+                    "sessions": int(r["n_sessions"] or 0),
                     "values": {**vals, **drow},
                     "passes": not fails, "fails": fails,
                     "spark": spark.get(r["symbol"]),
@@ -2102,6 +2247,9 @@ async def candidates(
     # through, because a sort that quietly ignores its key is worse than one
     # that refuses.
     by_symbol = (sort == "symbol")
+    # The window's session count is a row property, not a metric column, and
+    # is handled the same explicit way for the same reason.
+    by_sessions = (sort == "sessions")
     # DERIVED KEYS ARE SORTABLE KEYS. They are not in col_map -- that maps
     # role keys to METRIC columns, and a derived value has no single metric
     # behind it -- but they ARE in row["values"], which is assembled as
@@ -2131,6 +2279,9 @@ async def candidates(
         # Passing rows stay above failing ones in every ordering, so the top
         # of the table is always the tradeable set.
         out.sort(key=lambda r: 0 if r["passes"] else 1)
+    elif by_sessions:
+        out.sort(key=lambda r: (0 if r["passes"] else 1,
+                                sign * r["sessions"], r["symbol"]))
     else:
         out.sort(key=_sk)
 
@@ -2176,6 +2327,14 @@ async def candidates(
     return {
         "connected": True,
         "date": str(d),
+        # What every value in `rows` is: `stat` across the sessions in
+        # `dates` (which may be fewer than `requested` near the table's start).
+        "window": {"requested": window, "sessions": len(win_dates),
+                   "dates": [str(x) for x in sorted(win_dates)],
+                   "start": str(min(win_dates)), "end": str(d),
+                   "stat": agg_stat, "percentile": pct,
+                   "choices": list(CAND_WINDOWS),
+                   "stats": list(CAND_STATS)},
         "noise": noise,
         "filter_meta": filter_meta,
         "dashboard_filters": sorted(DASHBOARD_FILTERS),

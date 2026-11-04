@@ -389,6 +389,8 @@ class Conn:
                        "sessions": 11}
                 for k in scalp_columns.BY_KEY:
                     row[k] = 1.0 + b * 0.3
+                for k in scalp_columns.BY_DERIVED:
+                    row[k] = 50000.0 + b * 1000.0
                 out.append(row)
             return out
         if "FROM intraday_metrics" in sql:
@@ -563,14 +565,16 @@ class Conn:
             return out
         if "DISTINCT metric" in sql:
             return [{"metric": m} for m in FAKE_METRICS]
-        if "GROUP BY m.symbol" in sql:
+        if "GROUP BY a.symbol" in sql:
             # The pivot. Aliases are read OUT OF THE SQL rather than assumed
             # from the bind list: the statement now also selects derived
             # columns as `d_<key>` expressions, which are not columns and do
             # not appear in the metric list. Assuming the shape is what made
             # the first derived column a KeyError here rather than a finding.
+            # $1 the window's dates, $2 the percentile, then the bound
+            # metric names (and derived parts/tags), then the ANY() list.
             aliases = re.findall(r"AS (v\d+|d_\w+)", sql)
-            names = [a for a in args[1:-1]]
+            names = [a for a in args[2:-1]]
             out = []
             for i, sym in enumerate(FAKE_SYMBOLS):
                 row = _pivot_row(sym, i, names)
@@ -581,6 +585,9 @@ class Conn:
                         # varies by symbol does, or nothing can screen on it.
                         row[a] = (1000.0 + i * 250.0) * (10.0 + i)
                     row.setdefault(a, None)
+                # Sessions in the window: one symbol short of the window, so
+                # the column has something other than "all" to show.
+                row["n_sessions"] = len(args[0]) - (1 if i == 3 else 0)
                 out.append(row)
             return out
         if "trade_date = ANY(" in sql:
@@ -810,6 +817,7 @@ async def _cand(**over):
     """
     args = dict(date=None, noise=None, columns=None, extra=None, sort=None,
                 desc=True, limit=600, spark_sessions=10,
+                window=sc.CAND_WINDOW_DEFAULT, stat=sc.CAND_STAT_DEFAULT,
                 min_spread_cents=None, min_trades_per_min=None,
                 max_noise_bps=None, min_noise_bps=None,
                 min_quote_bucket_coverage=None,

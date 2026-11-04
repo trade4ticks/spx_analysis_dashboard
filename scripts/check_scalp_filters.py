@@ -110,11 +110,17 @@ const tail = `
     c.custom = [];
     await c.loadCandidates();
     out.cleared = asked[asked.length - 1];
+    // 5b. The lookback: window, statistic and end date reach the request.
+    c.candWindow = 20; c.candStat = 'p25'; c.candEnd = '2026-09-15';
+    await c.loadCandidates();
+    out.windowed = asked[asked.length - 1];
+    c.candWindow = 10; c.candStat = 'median'; c.candEnd = '';
 
     // 6. Export CSV. The table holds the first 600 rows of 700: the export
     // must ask again with the SAME filters and a higher limit, and write
     // what came back, not the truncated table.
     const mkRow = (i, passes) => ({ symbol: 'S' + i, passes,
+      sessions: i === 0 ? 7 : 10,
       fails: passes ? [] : ['min_spread_cents'],
       values: { price: i + 0.5, ratio: passes ? 1 / 3 : null } });
     const cols = [{ key: 'price', metric: 'px', derived: false },
@@ -122,7 +128,9 @@ const tail = `
                     label: 'ratio, "quiet"' }];
     c.cand = { columns: cols, roles: [{ key: 'price', label: 'price' }],
                rows: Array.from({ length: 600 }, (_, i) => mkRow(i, i < 500)),
-               n_shown: 600, n_total: 700 };
+               n_shown: 600, n_total: 700, date: '2026-09-18',
+               window: { requested: 10, sessions: 10, stat: 'p25' } };
+    c.candWindow = 10; c.candStat = 'p25'; c.candEnd = '2026-09-18';
     c.custom = [{ key: 'off_exchange_share', op: 'min', value: 0.4 }];
     c.showFails = false;
     const full = Array.from({ length: 700 }, (_, i) => mkRow(i, i < 550));
@@ -207,6 +215,18 @@ def main() -> int:
     check(param(out["one"], "date") == "2026-09-22",
           "the date fell out of the request")
 
+    # THE LOOKBACK: the default window and statistic go on every request,
+    # and a chosen end date replaces the latest.
+    check(param(out["none"], "window") == "10"
+          and param(out["none"], "stat") == "median",
+          f"default lookback sent as window={param(out['none'], 'window')!r} "
+          f"stat={param(out['none'], 'stat')!r}; expected 10 / median")
+    w = out.get("windowed") or ""
+    check(param(w, "window") == "20" and param(w, "stat") == "p25"
+          and param(w, "date") == "2026-09-15",
+          f"a chosen window went as window={param(w, 'window')!r} "
+          f"stat={param(w, 'stat')!r} date={param(w, 'date')!r}")
+
     # THE EXPORT. Same question as the table, past the table's 600-row cap.
     eu = out.get("exportUrl") or ""
     check(bool(eu), "a truncated table was exported without asking again — "
@@ -214,6 +234,9 @@ def main() -> int:
     check(param(eu, "filters") == "off_exchange_share:min:0.4",
           f"the export asked with filters={param(eu, 'filters')!r}; it must "
           f"carry the pane's constraints, or the CSV is a different table")
+    check(param(eu, "window") == "10" and param(eu, "stat") == "p25"
+          and param(eu, "date") == "2026-09-18",
+          f"the export asked a different window than the table: {eu!r}")
     check(param(eu, "limit") == "5000",
           f"the export asked with limit={param(eu, 'limit')!r}")
     csv = (out.get("exportCsv") or "").lstrip("﻿")
@@ -221,18 +244,20 @@ def main() -> int:
     check(len(lines) == 1 + 550,
           f"the export wrote {len(lines) - 1} rows; the 550 that pass were "
           f"expected (excluded rows only with 'show excluded')")
-    want_head = 'ticker,price,"ratio, ""quiet"""'
+    want_head = 'ticker,sessions,price,"ratio, ""quiet"""'
     check(lines[:1] == [want_head],
           f"header {lines[:1]!r}: labels as the table shows them, quoted "
           f"where they hold a comma or a quote")
-    check(lines[1:2] == ["S0,0.5,0.3333333333333333"],
+    check(lines[1:2] == ["S0,7,0.5,0.3333333333333333"],
           f"first row {lines[1:2]!r}: values are written as held, not as "
           f"displayed")
-    check(out.get("exportName") == "scalp_candidates_2026-09-22_pass_550.csv",
+    # The window and statistic are in the name, so exports can be told apart.
+    check(out.get("exportName")
+          == "scalp_candidates_2026-09-18_10s_p25_pass_550.csv",
           f"file named {out.get('exportName')!r}")
     wf = out["withFails"].split("\r\n")[:-1]
     check(len(wf) == 701 and wf[0].endswith(",passes,excluded_by")
-          and wf[-1].startswith("S699,699.5,,no,"),
+          and wf[-1].startswith("S699,10,699.5,,no,"),
           f"with 'show excluded' every row is written, with whether it "
           f"passed and why not; last row {wf[-1:]!r}")
 

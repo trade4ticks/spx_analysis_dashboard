@@ -195,7 +195,9 @@ async def equity_iv_page(request: Request):
 
 @app.get("/equities-scalp")
 async def equities_scalp_page(request: Request):
-    return templates.TemplateResponse(request, "equities_scalp.html")
+    return templates.TemplateResponse(
+        request, "equities_scalp.html",
+        {"scalp_hidden": list(equities_scalp.HIDDEN_SECTIONS)})
 
 
 @app.get("/oo-backtest")

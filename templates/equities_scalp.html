@@ -456,21 +456,34 @@
            everything in Research, so it sits at the end of the bar too — a
            bar listing sections in a different order from the page is worse
            than none. -->
+      <!-- HIDDEN SECTIONS: `scalp_hidden` is HIDDEN_SECTIONS in
+           app/routers/equities_scalp.py, passed by the page route. A hidden
+           section is left out of this bar AND the page; its markup, JS and
+           endpoint stay. Empty list = every section, as before. -->
+      {% set hidden = scalp_hidden | default([]) %}
+      {% set research_ids = ['geometry', 'correlation', 'stability', 'fills',
+                             'calibration', 'distributions', 'drift'] %}
+      {% set research_shown = research_ids | reject('in', hidden) | list %}
       <a href="#candidates">Candidates</a>
+      {% if 'replay' not in hidden %}<a href="#replay">Replay</a>{% endif %}
       <a href="#detail">Ticker detail</a>
-      <a href="#now">Right now</a>
+      {% if 'now' not in hidden %}<a href="#now">Right now</a>{% endif %}
+      {% if research_shown %}
       <span class="sc-jump-div"></span>
       <span class="sc-jump-lbl res">Research</span>
-      <a href="#geometry">Spread × noise</a>
-      <a href="#correlation">Correlation</a>
-      <a href="#stability">Rank stability</a>
-      <a href="#fills">Results</a>
-      <a href="#calibration">Calibration</a>
-      <a href="#distributions">Distributions</a>
-      <a href="#drift">Over time</a>
+      {% if 'geometry' not in hidden %}<a href="#geometry">Spread × noise</a>{% endif %}
+      {% if 'correlation' not in hidden %}<a href="#correlation">Correlation</a>{% endif %}
+      {% if 'stability' not in hidden %}<a href="#stability">Rank stability</a>{% endif %}
+      {% if 'fills' not in hidden %}<a href="#fills">Results</a>{% endif %}
+      {% if 'calibration' not in hidden %}<a href="#calibration">Calibration</a>{% endif %}
+      {% if 'distributions' not in hidden %}<a href="#distributions">Distributions</a>{% endif %}
+      {% if 'drift' not in hidden %}<a href="#drift">Over time</a>{% endif %}
+      {% endif %}
+      {% if 'health' not in hidden %}
       <span class="sc-jump-div"></span>
       <a href="#health" title="Consulted when something looks wrong, not part
                of either workflow — so it sits after both.">Data health</a>
+      {% endif %}
 
       <!-- ── which session this is ────────────────────────────────────
            At the right of the page's OWN bar, not the site's. The date is
@@ -624,6 +637,20 @@
                 @click="note('cand')" title="How to read this table">?</span>
           <span class="sc-panel-sub"
                 x-text="cand ? (cand.n_pass + ' pass of ' + cand.n_total) : ''"></span>
+          <!-- What every number in the table IS: one statistic over a window
+               of sessions, said in the header rather than implied. -->
+          <span class="sc-panel-sub" x-show="cand && cand.window" x-cloak
+                :title="cand && cand.window ? ('sessions: ' + cand.window.dates.join(', ')) : ''"
+                x-text="cand && cand.window
+                        ? ((cand.window.stat === 'p25' ? '25th pct' : 'median')
+                           + ' of ' + cand.window.sessions + ' session'
+                           + (cand.window.sessions === 1 ? '' : 's')
+                           + (cand.window.sessions > 1
+                              ? ' · ' + cand.window.start + ' → ' + cand.window.end
+                              : ' · ' + cand.window.end)
+                           + (cand.window.sessions < cand.window.requested
+                              ? ' (only ' + cand.window.sessions + ' in the table)' : ''))
+                        : ''"></span>
           <!-- What is applied, without opening anything. Sliders and pane
                constraints chip identically because they are one mechanism on
                the server; showing them as two lists would imply otherwise. -->
@@ -647,6 +674,32 @@
                coverage at that horizon and both halves of the decomposition
                all move together — they have to, or the row compares a 10s
                noise against 30s coverage and looks like a comparison. -->
+          <!-- THE LOOKBACK. The date is the window's END; each metric is
+               the chosen statistic across that many sessions per symbol, so
+               a one-day blowout (earnings) cannot pass on its own. -->
+          <span class="sc-panel-sub">window</span>
+          <select class="sc-sel" x-model.number="candWindow"
+                  @change="loadCandidates()" style="max-width:110px"
+                  title="Sessions each metric is aggregated over, per symbol">
+            <option value="1">1 session</option>
+            <option value="5">5 sessions</option>
+            <option value="10">10 sessions</option>
+            <option value="20">20 sessions</option>
+          </select>
+          <select class="sc-sel" x-model="candStat" @change="loadCandidates()"
+                  style="max-width:110px"
+                  title="median: the typical session. 25th pct: a level the name held on at least three quarters of the sessions (for a floor such as spread or $ vol/min).">
+            <option value="median">median</option>
+            <option value="p25">25th pct</option>
+          </select>
+          <span class="sc-panel-sub">ending</span>
+          <select class="sc-sel" x-model="candEnd" @change="loadCandidates()"
+                  style="max-width:120px" title="The window's last session">
+            <template x-for="dt in (meta.dates || [])" :key="dt">
+              <option :value="dt === meta.date ? '' : dt" x-text="dt"
+                      :selected="(candEnd || meta.date) === dt"></option>
+            </template>
+          </select>
           <span class="sc-panel-sub">variant</span>
           <select class="sc-sel" x-model="noise" @change="loadCandidates()">
             <template x-for="m in (meta.noise_metrics || [])" :key="m">
@@ -814,6 +867,16 @@
             <table class="sc-table">
               <thead><tr>
                 <th @click="setSort('symbol')" style="cursor:pointer">ticker</th>
+                <!-- How many of the window's sessions the name has data on.
+                     3 of 10 is a different reading from 10 of 10, whatever
+                     the statistic says. -->
+                <th class="sc-num" style="cursor:pointer"
+                    @click="setSort('sessions')"
+                    title="Sessions in the window this symbol has data for">
+                  sessions
+                  <span class="sc-sort" x-show="cand && cand.rows.length && sortKey === 'sessions'"
+                        x-cloak x-text="sortDesc ? '▾' : '▴'"></span>
+                </th>
                 <template x-for="c in (cand ? cand.columns : [])" :key="c.key">
                   <th class="sc-num" style="cursor:pointer"
                       @click="setSort(c.key)"
@@ -846,12 +909,15 @@
                            bubbles to window and the panel listens there,
                            which keeps the 83 KB scalp bundle out of it. -->
                       <b class="sc-pick"
-                         @click="pickTicker(row.symbol); $dispatch('replay-load', {symbol: row.symbol, date: (meta && meta.date) || ''})"
+                         @click="pickTicker(row.symbol); $dispatch('replay-load', {symbol: row.symbol, date: (cand && cand.date) || (meta && meta.date) || ''})"
                          :title="'Open ' + row.symbol + ' in Ticker detail and Replay'"
                          x-text="row.symbol"></b>
                       <span class="sc-tag warn" x-show="!row.passes" x-cloak
                             style="margin-left:5px">excluded</span>
                     </td>
+                    <td class="sc-num"
+                        :class="{dim: cand && cand.window && row.sessions < cand.window.sessions}"
+                        x-text="row.sessions + (cand && cand.window ? '/' + cand.window.sessions : '')"></td>
                     <template x-for="c in (cand ? cand.columns : [])" :key="c.key">
                       <td class="sc-num"
                           :class="{dim: row.values[c.key] == null}"
@@ -1228,6 +1294,7 @@
       </div>
 
       <!-- 1.6 intraday -->
+      {% if 'now' not in hidden %}
       <div class="sc-panel" id="now">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Right now</span>
@@ -1248,8 +1315,10 @@
           </div>
         </div>
       </div>
+      {% endif %}
 
     <!-- ══ SECTION 2 — RESEARCH ══════════════════════════════════════════ -->
+    {% if research_shown or 'health' not in hidden %}
     <div class="sc-mode sc-mode-research">
       <div class="sc-mode-hdr">
         <h2>Research</h2><span class="sc-when">read at weekends</span>
@@ -1264,6 +1333,7 @@
 
       <!-- 2.2's neighbour, and the one panel that is real in this phase:
            the metric set as the database actually holds it. -->
+      {% if 'correlation' not in hidden %}
       <div class="sc-panel" id="correlation" x-show="meta.connected && meta.date" x-cloak>
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Metric catalog</span>
@@ -1311,8 +1381,10 @@
           </div>
         </div>
       </div>
+      {% endif %}
 
       <!-- ── 2.1 spread against noise ─────────────────────────────────── -->
+      {% if 'geometry' not in hidden %}
       <div class="sc-panel" id="geometry">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Any column against any column</span>
@@ -1493,8 +1565,10 @@
           </div>
         </div>
       </div>
+      {% endif %}
 
       <!-- ── 2.3 rank stability ──────────────────────────────────────── -->
+      {% if 'stability' not in hidden %}
       <div class="sc-panel" id="stability">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Rank stability</span>
@@ -1641,8 +1715,10 @@
           </template>
         </div>
       </div>
+      {% endif %}
 
       <!-- ── 2.2 metric correlation ──────────────────────────────────── -->
+      {% if 'correlation' not in hidden %}
       <div class="sc-panel" id="correlation2">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Metric correlation</span>
@@ -1744,11 +1820,13 @@
           </template>
         </div>
       </div>
+      {% endif %}
 
       <!-- ── fills upload ─────────────────────────────────────────────
            In the RESEARCH half rather than the Use half: uploading a
            statement is a weekend act, and nothing above it depends on
            having done so. -->
+      {% if 'fills' not in hidden %}
       <div class="sc-panel" id="fills">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Realised results</span>
@@ -1857,8 +1935,10 @@
           </div>
         </div>
       </div>
+      {% endif %}
 
       <!-- ── 2.4 calibration ─────────────────────────────────── -->
+      {% if 'calibration' not in hidden %}
       <div class="sc-panel" id="calibration">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Calibration against realised results</span>
@@ -2030,7 +2110,9 @@
           </template>
         </div>
       </div>
+      {% endif %}
 
+      {% if 'distributions' not in hidden %}
       <div class="sc-panel" id="distributions">
         <div class="sc-panel-hdr"><span class="sc-panel-title">Distributions</span></div>
         <div class="sc-panel-body"><div class="sc-stub">
@@ -2042,8 +2124,10 @@
           order.
         </div></div>
       </div>
+      {% endif %}
 
       <!-- ── 2.6 stability over time ──────────────────────────────────── -->
+      {% if 'drift' not in hidden %}
       <div class="sc-panel" id="drift">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Stability over time</span>
@@ -2103,11 +2187,13 @@
           </template>
         </div>
       </div>
+      {% endif %}
       <!-- ── data health — LAST ON THE PAGE, and collapsed ──────────
            Not part of any workflow: it is what gets opened when
            something looks wrong. It sat between the filters and the
            results, then at the end of Use; neither is where a thing
            consulted occasionally belongs. One summary line by default. -->
+      {% if 'health' not in hidden %}
       <div class="sc-panel" id="health">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title" style="cursor:pointer"
@@ -2226,13 +2312,18 @@
           </template>
         </div>
       </div>
+      {% endif %}
       <!-- /data health -->
 
       </div><!-- /research panels -->
     </div><!-- /sc-mode-research -->
+    {% endif %}
 
   </div><!-- /sc-body -->
 
+  <!-- The same HIDDEN_SECTIONS, so the page does not fetch for panels it
+       did not render. -->
+  <script>window.SC_HIDDEN = {{ hidden | tojson }};</script>
   <script src={{ asset('js/equities_scalp.js') }}></script>
   <!-- Replay's own bundle, and NOT deferred. Alpine is loaded with `defer` in
        the head; a deferred bundle here runs after Alpine has already
