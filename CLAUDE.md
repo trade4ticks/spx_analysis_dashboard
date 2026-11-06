@@ -1520,12 +1520,53 @@ Window and share are saved server-side with the list (debounced 500 ms); pane
 WIDTH is local storage, because it is about this screen and the same list is
 read on a laptop and a 32-inch monitor.
 
+**300 symbols, 100 a page (2026-11-06).** `WALL_MAX_SYMBOLS` 120 → 300,
+`WALL_PER_PAGE` 100 (sent in `caps.per_page`). Pages fill in LIST ORDER
+(`wlPageSlice`); only the current page has panes in the DOM, but **every
+symbol stays subscribed and every frame still carries all 300**, so the
+browser keeps each tape warm and a flip draws a full page at once (`setPage`
+re-centres each pane, rebuilds the IntersectionObserver, calls `drawAll`
+immediately; it sends the server nothing). Unsubscribing off-page names was
+rejected: the two-minute window would refill from empty. The page number is
+local storage, like pane width. Measured: server side
+(`scripts/measure_wall_capacity.py`, offline, the scan's measured upper-bound
+rate as if the list were the 300 busiest names) ~30 ms ingest + ~25 ms frame a
+second here, ~18 MB of buffers — but that bench skips the socket, so the live
+ingest figure is the scan's 430-symbol measurement (~19% of the loop busy);
+browser (`check_wall_ui`, 2536 px wide) one draw of 100 panes ~25–33 ms, a
+300-symbol tick ~3 ms, a flip drawn in ~150–180 ms. At 2560×1440 a hundred fit
+without scrolling at pane width ≤160 (14–15 × 7–8, canvas ~159×99) maximised,
+≤180 full screen; the default 200 scrolls.
+
 Files: `live/wall.py` (the per-symbol store), `live/wall_store.py`,
 `live/wall_runner.py`, the wall tier in `live/hub.py`, `/wall/*` in
 `live/main.py`, `templates/equities_wall.html`, `static/js/equities_wall.js`.
-Gate: `scripts/check_wall.py`, 29 cases, no market needed — the last five
+Gates: `scripts/check_wall.py`, 30 cases, no market needed — the JS cases
 execute the shipped JS in node (the scale property: a half-spread move is the
-same fraction of the pane on a 7c name and a 50c one).
+same fraction of the pane on a 7c name and a 50c one; pages slice the list);
+`scripts/check_wall_ui.py` clicks the pager in Edge against a fake socket
+(`can_skip`).
+
+## Equities Scan: hidden, and held only while open (2026-11-06)
+
+**Not in the nav** — `nav_hidden` in `_nav.html` (one list, the
+`HIDDEN_SECTIONS` pattern; remove the key to restore). Its route, page and
+tier stay. Reason: the nav links `//<host>:8001/scan`, and through the
+Cloudflare hostname port 8001 is not forwarded, so the link never reached
+the page. `check_nav`'s `HIDDEN_KEYS` holds that a hidden page's nav marks
+nothing.
+
+**The scan tier is held only while a scan page is connected.** It was never
+eager at startup (nothing restores it — the page fills it with Seed/Apply),
+but once filled it stayed held until the next restart, page or no page. Now
+`ScanRunner` remembers the list (`wanted`), releases it
+`SCAN_IDLE_GRACE_S` (60 s) after the last scan socket closes, and re-holds it
+when one connects; a refresh inside the grace sends nothing upstream. Minutes
+nobody watched are a gap in the grid. Gates: four cases in `check_live_hub`
+(released, refresh does not churn, release spares pane/wall symbols, per-tier
+counters). `/status` now carries `tier_in` (lifetime arrivals per tier,
+counted before the wall's sampling); `scripts/live_rates.py` turns two
+readings into rates — read-only, safe on the VPS in session.
 
 ### Surface metrics exploration (P6, in progress)
 

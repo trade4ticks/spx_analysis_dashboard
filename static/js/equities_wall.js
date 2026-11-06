@@ -27,6 +27,13 @@
  * at 8), one frame a second, and a pane with nothing new is not redrawn —
  * the server does not even send it. Panes scrolled off the screen are not
  * drawn at all.
+ *
+ * PAGES (2026-11-06). Up to 300 symbols, `caps.per_page` (100) on screen.
+ * Only the current page has panes in the document; EVERY symbol's tape keeps
+ * arriving and accumulating in WL_DATA whichever page is showing, so a flip
+ * draws all hundred panes at once from two minutes that are already there.
+ * Nothing is unsubscribed when a page is not showing — refilling the window
+ * would take two minutes and make paging useless for scanning.
  */
 'use strict';
 
@@ -213,6 +220,19 @@ function wlFmtSpread(cents) {
 }
 
 
+/* The slice of the list one page shows, in list order. */
+function wlPageCount(n, perPage) {
+  return Math.max(1, Math.ceil(n / Math.max(1, perPage)));
+}
+
+function wlPageSlice(entries, page, perPage) {
+  const per = Math.max(1, perPage);
+  const last = wlPageCount(entries.length, per) - 1;
+  const p = Math.min(Math.max(0, page | 0), last);
+  return entries.slice(p * per, (p + 1) * per);
+}
+
+
 function wlFmtPrice(p) {
   if (p == null || !isFinite(p)) return '';
   return p >= 100 ? p.toFixed(2) : p.toFixed(2);
@@ -225,7 +245,8 @@ document.addEventListener('alpine:init', () => {
     // ── state ───────────────────────────────────────────────────────────
     entries: [],              // [{symbol, scale}] — the server's list
     settings: { window_s: 120, spread_share: 0.60, min_spread_cents: 0 },
-    caps: { symbols: 120, retain_s: 180, share_min: 0.05, share_max: 0.95 },
+    caps: { symbols: 300, per_page: 100, retain_s: 180, share_min: 0.05, share_max: 0.95 },
+    page: 0,                  // which hundred is on screen; local, like width
     head: {},                 // sym -> {sp, px, from} — the only reactive tape
     selected: '',
     paneWidth: 200,
@@ -246,6 +267,19 @@ document.addEventListener('alpine:init', () => {
     // ── lifecycle ───────────────────────────────────────────────────────
     init() {
       this.restore();
+      this.makeObserver();
+      this.connect();
+      // ONE TIMER for the whole page. Every pane is drawn from it, so a wall
+      // of a hundred is one frame's work a second rather than a hundred
+      // independent loops.
+      setInterval(() => this.drawAll(), 1000);
+      window.addEventListener('resize', () => this.dirtyAll());
+    },
+
+    /* Rebuilt on every page flip: an observer keeps hold of the elements it
+     * watches, and a flip throws a hundred of them away. */
+    makeObserver() {
+      if (this.observer) this.observer.disconnect();
       this.observer = new IntersectionObserver((rows) => {
         for (const r of rows) {
           const vis = r.isIntersecting ? '1' : '0';
@@ -256,12 +290,6 @@ document.addEventListener('alpine:init', () => {
           if (p && vis === '1') p.dirty = true;
         }
       }, { root: null, rootMargin: '120px' });
-      this.connect();
-      // ONE TIMER for the whole page. Every pane is drawn from it, so a wall
-      // of a hundred is one frame's work a second rather than a hundred
-      // independent loops.
-      setInterval(() => this.drawAll(), 1000);
-      window.addEventListener('resize', () => this.dirtyAll());
     },
 
     restore() {
@@ -272,6 +300,10 @@ document.addEventListener('alpine:init', () => {
       try {
         const w = localStorage.getItem('equitiesWall.paneWidth');
         if (w) this.paneWidth = Math.min(420, Math.max(120, Number(w) || 200));
+        // The page is about this screen too: a second monitor may sit on
+        // page two while the laptop shows page one.
+        const pg = localStorage.getItem('equitiesWall.page');
+        if (pg) this.page = Math.max(0, Number(pg) | 0);
       } catch (e) { /* private window: the default is fine */ }
     },
 
@@ -305,7 +337,10 @@ document.addEventListener('alpine:init', () => {
     takeState(m) {
       if (m.entries) this.entries = m.entries;
       if (m.settings) this.settings = m.settings;
-      if (m.caps) this.caps = m.caps;
+      if (m.caps) this.caps = Object.assign({}, this.caps, m.caps);
+      // A shorter list can leave the page past its end.
+      const last = this.pageCount() - 1;
+      if (this.page > last) this.page = last;
       if (m.error) this.warning = 'watchlist: ' + m.error;
     },
 
@@ -578,6 +613,37 @@ document.addEventListener('alpine:init', () => {
       this.selected = (this.selected === sym) ? '' : sym;
     },
 
+    // ── pages ───────────────────────────────────────────────────────────
+    perPage() { return Math.max(1, Number(this.caps.per_page) || 100); },
+    pageCount() { return wlPageCount(this.entries.length, this.perPage()); },
+    pageEntries() { return wlPageSlice(this.entries, this.page, this.perPage()); },
+
+    pageLabel(i) {
+      const per = this.perPage();
+      return `${i * per + 1}–${Math.min(this.entries.length, (i + 1) * per)}`;
+    },
+
+    /* A FLIP DRAWS AT ONCE, not on the next tick. The new page's tapes are
+     * already in WL_DATA; waiting up to a second for the timer would make a
+     * flip look like a reload. Each pane is re-centred on its current mid
+     * first: a centre only moves while its pane is drawn, so a page that has
+     * been hidden would otherwise glide in from where it was minutes ago. */
+    setPage(i) {
+      const next = Math.min(Math.max(0, i | 0), this.pageCount() - 1);
+      if (next === this.page) return;
+      this.page = next;
+      try { localStorage.setItem('equitiesWall.page', String(next)); }
+      catch (e) { /* private window */ }
+      this.$nextTick(() => {
+        this.makeObserver();
+        for (const e of this.pageEntries()) {
+          const p = WL_DATA.panes[e.symbol];
+          if (p) { p.dirty = true; p.centre = 0; }
+        }
+        this.drawAll();
+      });
+    },
+
     // ── the controls ────────────────────────────────────────────────────
     onWindow() {
       // The SERVER is told too: the frame it builds is cut to the window, and
@@ -678,7 +744,9 @@ document.addEventListener('alpine:init', () => {
       const age = this.lastTick ? (Date.now() - this.lastTick) / 1000 : null;
       const held = this.entries.length;
       const stale = (age != null && age > 4) ? ` · last frame ${age.toFixed(0)}s ago` : '';
-      return `${held} symbol${held === 1 ? '' : 's'} · ${this.drawn} drawn`
+      const pages = this.pageCount() > 1
+        ? ` · showing ${this.pageLabel(this.page)}, all ${held} streaming` : '';
+      return `${held} symbol${held === 1 ? '' : 's'}${pages} · ${this.drawn} drawn`
              + (this.offscreen ? ` · ${this.offscreen} off screen` : '')
              // Named, because a faded pane is still subscribed and still
              // accumulating — the count says how much of the wall the filter

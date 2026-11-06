@@ -98,6 +98,7 @@ class WallRunner:
         st = self.store.state()
         st["held"] = sorted(self.hub.wall)
         st["caps"] = {"symbols": config.WALL_MAX_SYMBOLS,
+                      "per_page": config.WALL_PER_PAGE,
                       "retain_s": config.WALL_RETAIN_S,
                       "share_min": config.WALL_SHARE_MIN,
                       "share_max": config.WALL_SHARE_MAX,

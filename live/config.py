@@ -235,9 +235,22 @@ SCAN_ROLLUP_SLICE_MS = float(os.environ.get("LIVE_SCAN_ROLLUP_SLICE_MS", "8"))
 #
 # What it holds is small and short. Trades and a SAMPLED quote for two
 # minutes, against the scan's six minutes of trades and the pane's fifteen of
-# everything. At the 100-symbol ceiling that is a few MB, so the ceiling is
-# set by what a person can read on a screen rather than by the box.
-WALL_MAX_SYMBOLS = int(os.environ.get("LIVE_WALL_MAX_SYMBOLS", "120"))
+# everything.
+#
+# 300, raised from 120 (2026-11-06), shown WALL_PER_PAGE at a time. Every
+# symbol stays subscribed and every page keeps receiving all of them, so a
+# page flip draws panes whose two minutes are already full. Measured offline
+# with scripts/measure_wall_capacity.py at the scan's measured upper-bound
+# rate (3,850 trades + ~8,100 quotes a second, as if the list were the 300
+# busiest names): ~30 ms of ingest and ~25 ms of frame-building per second
+# here, ~18 MB of buffers. The scan already held 430-600 symbols of both
+# channels on this socket in its capacity runs, so 300 is inside a load
+# this connection has carried.
+WALL_MAX_SYMBOLS = int(os.environ.get("LIVE_WALL_MAX_SYMBOLS", "300"))
+
+# Panes on screen at once. The page draws only these; the rest keep
+# streaming into the browser's buffers so a flip is instant.
+WALL_PER_PAGE = int(os.environ.get("LIVE_WALL_PER_PAGE", "100"))
 
 # The tape each pane draws, plus a margin so the window is full at its left
 # edge rather than filling in from empty after a change of window.

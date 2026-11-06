@@ -722,6 +722,16 @@ const tail = `
                            5, t0 + 20000).dim;
   // AND THE TAPE IS UNTOUCHED. The filter draws; it does not drop data.
   out.keptTrades = wide_now.trades.length;
+  // ── pages ────────────────────────────────────────────────────────────
+  const list = Array.from({length: 300}, (_, i) => ({symbol: 'S' + i}));
+  out.pages300 = wlPageCount(300, 100);
+  out.pages250 = wlPageCount(250, 100);
+  out.pages0 = wlPageCount(0, 100);
+  out.p1 = wlPageSlice(list, 1, 100).map(e => e.symbol);
+  out.p2of250 = wlPageSlice(list.slice(0, 250), 2, 100).length;
+  out.pastEnd = wlPageSlice(list.slice(0, 150), 7, 100).map(e => e.symbol);
+  out.allOnce = [0, 1, 2].flatMap(p => wlPageSlice(list, p, 100))
+                          .map(e => e.symbol).join() === list.map(e => e.symbol).join();
   globalThis.__out = out;
 `;
 eval(src + tail);
@@ -819,6 +829,42 @@ async def case_js_redraw_and_recentre():
           f"the spread reads {out['fmt']}")
 
 
+async def case_js_pages():
+    """300 symbols, 100 a page, in list order, every symbol on exactly one."""
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        FAILS.append("node is not installed — the shipped JS was NOT executed")
+        return
+    p = subprocess.run(["node", "-e", JS_DRIVER, str(JS)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if p.returncode:
+        FAILS.append(f"the page JS did not run: {p.stderr.strip()[:300]}")
+        return
+    out = json.loads(p.stdout)
+    check(out["pages300"] == 3 and out["pages250"] == 3 and out["pages0"] == 1,
+          f"page counts {out['pages300']}, {out['pages250']}, {out['pages0']} "
+          f"for 300, 250 and 0 symbols at 100 a page")
+    check(out["p1"] == [f"S{i}" for i in range(100, 200)],
+          f"page two is not entries 101-200 in list order: "
+          f"{out['p1'][:3]}...{out['p1'][-2:]}")
+    check(out["p2of250"] == 50, f"the last page of 250 holds {out['p2of250']}")
+    check(out["pastEnd"] == [f"S{i}" for i in range(100, 150)],
+          "a page past the end of a shortened list did not clamp to the last "
+          "page; the wall would show nothing after a removal")
+    check(out["allOnce"] is True,
+          "the three pages do not cover the list exactly once, in order")
+    js = JS.read_text(encoding="utf-8")
+    # NOTHING IS UNSUBSCRIBED OFF-PAGE: the page sends the server nothing
+    # when it flips, and onTick keeps every symbol it is sent.
+    flip = js[js.index("setPage(i) {"):js.index("// ── the controls")]
+    check("sock" not in flip and "fetch(" not in flip and "save(" not in flip,
+          "a page flip talks to the server; pages must be a view over symbols "
+          "that all keep streaming, or a flip refills two minutes from empty")
+    check("this.drawAll()" in flip,
+          "a page flip waits for the next 1 s tick to draw; it must draw at once")
+
+
 async def case_the_spread_filter_fades_and_does_not_flicker():
     """Below the floor fades the pane; it never removes or unsubscribes it.
 
@@ -907,12 +953,21 @@ async def case_the_filter_does_not_touch_subscriptions(tmp: Path):
           f"the floor did not clamp: {lo}, {hi}, and an unparseable value "
           f"became {bad} instead of leaving the setting alone")
 
-    # THE PANES STAY WHERE THEY ARE. The page draws every entry and marks the
-    # failing ones; it does not draw a filtered list.
+    # THE PANES STAY WHERE THEY ARE. The page draws every entry of the page
+    # it is on and marks the failing ones; it does not draw a filtered list.
+    # The page is a slice of the list by POSITION (case_js_pages), so the
+    # spread floor cannot move a pane from one page to another either.
     html = (ROOT / "templates" / "equities_wall.html").read_text(encoding="utf-8")
-    check('x-for="e in entries"' in html,
-          "the grid iterates something other than the whole list, so panes "
-          "would reflow as names cross the threshold")
+    check('x-for="e in pageEntries()"' in html,
+          "the grid iterates something other than the page's slice of the "
+          "whole list, so panes could reflow as names cross the threshold")
+    js = JS.read_text(encoding="utf-8")
+    import re as _re
+    body = _re.search(r"pageEntries\(\)\s*\{([^}]*)\}", js)
+    check(body is not None and "wlPageSlice(this.entries" in body.group(1)
+          and "dim" not in body.group(1) and "spread" not in body.group(1),
+          "pageEntries() is not a plain slice of the list -- a page that "
+          "filters by spread reflows as names cross the floor")
     # THE CLASS THE TEMPLATE ADDS IS THE CLASS THAT FADES. Tested as one
     # fact rather than two: a substring check for the rule passed happily
     # when the CSS was renamed to `.wl-pane.dimmed` and the binding still
@@ -1109,6 +1164,7 @@ CASES = [
     ("restore holds the list",   case_restore_holds_the_saved_list),
     ("never talks to a broker",  case_the_wall_never_talks_to_a_broker),
     ("the scale is comparable",  case_js_scale_makes_names_comparable),
+    ("pages slice the list",     case_js_pages),
     ("redraw and re-centre",     case_js_redraw_and_recentre),
     ("spread floor fades",       case_the_spread_filter_fades_and_does_not_flicker),
     ("floor spares the tier",    case_the_filter_does_not_touch_subscriptions),

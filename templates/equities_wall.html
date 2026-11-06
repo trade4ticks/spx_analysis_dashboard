@@ -93,6 +93,9 @@
     .wl-canvas { width:100%; display:block; }
     .wl-empty { padding:26px; text-align:center; color:var(--muted);
                 font-size:12px; }
+    /* The pager: one button per hundred, labelled by the RANGE it shows, so
+       "which page is LLY on" is answered by its position in the list. */
+    .wl-pager .wl-btn { font-variant-numeric:tabular-nums; padding:3px 8px; }
   </style>
 </head>
 {#- NO `x-init="init()"` HERE. Alpine 3 calls a data object's own init()
@@ -118,6 +121,20 @@
               :class="showManual ? 'on' : ''">Edit list</button>
       <span class="wl-note"
             x-text="entries.length + ' of ' + caps.symbols + ' held · saved on the server'"></span>
+
+      <!-- PAGES: every symbol streams; only the page showing is drawn. -->
+      <template x-if="pageCount() > 1">
+        <div class="wl-pager wl-grp sep">
+          <button class="wl-btn" @click="setPage(page - 1)" :disabled="page === 0"
+                  title="Previous page">&lsaquo;</button>
+          <template x-for="i in pageCount()" :key="'pg' + i">
+            <button class="wl-btn" :class="page === i - 1 ? 'on' : ''"
+                    @click="setPage(i - 1)" x-text="pageLabel(i - 1)"></button>
+          </template>
+          <button class="wl-btn" @click="setPage(page + 1)"
+                  :disabled="page >= pageCount() - 1" title="Next page">&rsaquo;</button>
+        </div>
+      </template>
 
       <span class="wl-spacer"></span>
       <span class="wl-note" x-text="connSummary()"></span>
@@ -198,7 +215,7 @@
         <div class="wl-empty" x-text="emptyMessage()"></div>
       </template>
       <div class="wl-grid" x-ref="grid" :style="gridStyle()">
-        <template x-for="e in entries" :key="e.symbol">
+        <template x-for="e in pageEntries()" :key="e.symbol">
           <div class="wl-pane"
                :class="(selected === e.symbol ? 'sel ' : '')
                        + (headOf(e.symbol).dim ? 'dim' : '')"
