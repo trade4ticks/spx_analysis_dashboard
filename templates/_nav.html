@@ -65,13 +65,22 @@
           {"key": "/research",             "label": "Research"},
           {"key": "/research2",            "label": "Research 2"}]},
     ] %}
+{#- HIDDEN ITEMS: the ONE switch, the scalp page's HIDDEN_SECTIONS pattern.
+    A key named here keeps its entry above and its page and route on the
+    other service; it is only not linked. Take the key out of this list to
+    bring the link back as it was. Equities Scan, 2026-11-06: its address
+    goes through a proxy that does not forward the live port, so the link
+    has never reached the page. -#}
+{%- set nav_hidden = ["/equities-scan"] %}
 {%- for cat in nav_cats %}
-{%- set here = cat["items"] | selectattr("key", "equalto", nav_active) | list | length > 0 %}
+{%- set items = cat["items"] | rejectattr("key", "in", nav_hidden) | list %}
+{%- if items %}
+{%- set here = items | selectattr("key", "equalto", nav_active) | list | length > 0 %}
       <div class="nav-cat{% if here %} on{% endif %}">
         <button type="button" class="nav-cat-btn" aria-expanded="false"
                 aria-controls="nav-menu-{{ loop.index }}"{% if here %} aria-current="true"{% endif %}>{{ cat["name"] }}</button>
         <div class="nav-menu" id="nav-menu-{{ loop.index }}">
-{%- for item in cat["items"] %}
+{%- for item in items %}
           {#- The Equities pages ride their OWN SERVICE on their own port, so
               their href is built from the request's host rather than
               hardcoded: the box is reached both by Tailscale IP and by name,
@@ -85,6 +94,7 @@
 {%- endfor %}
         </div>
       </div>
+{%- endif %}
 {%- endfor %}
     </nav>
     {#- Opens the menus, and closes them on Escape or a click elsewhere. A

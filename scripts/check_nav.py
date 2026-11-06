@@ -45,8 +45,7 @@ EXPECTED = [
     ("SPX", ["Dashboard", "Heatmap", "Today", "Strategy Signal"]),
     ("Factor", ["Factor Analysis", "Factor Signals", "Factor Trades"]),
     ("Equity", ["Equity IV", "Ticker Analysis"]),
-    ("Scalp", ["Equities Scalp", "Equities Live", "Equities Wall",
-               "Equities Scan"]),
+    ("Scalp", ["Equities Scalp", "Equities Live", "Equities Wall"]),
     ("Backtest", ["OO/Mesosim Backtest", "Backtest Portfolio", "Backtest IV"]),
     ("Research", ["AI Explorer", "Research", "Research 2"]),
 ]
@@ -55,6 +54,12 @@ EXPECTED = [
 # the page passes, "/" is where it actually is on port 8001.
 LIVE_PATHS = {"Equities Live": "/", "Equities Wall": "/wall",
               "Equities Scan": "/scan"}
+
+# Pages deliberately NOT linked (`nav_hidden` in the partial): the page and
+# its route stay, the nav does not point at them. Written here rather than
+# read from the partial, for the reason EXPECTED is. Such a page still renders
+# the nav, with nothing in it marked as current.
+HIDDEN_KEYS = {"/equities-scan"}
 
 FAILS: list[str] = []
 
@@ -209,6 +214,15 @@ def main() -> int:
         marked = [c["name"] for c in nav.cats if c["on"]]
         owner = [c["name"] for c in nav.cats
                  if any(i["on"] for i in c["items"])]
+        if key in HIDDEN_KEYS:
+            current = [i["label"] for c in nav.cats for i in c["items"]
+                       if i["on"] or i["current"] == "page"]
+            check(not marked and not current,
+                  f"{name}: its key {key!r} is hidden from the nav, yet the "
+                  f"nav marks {marked} / {current} -- a highlighted category "
+                  f"with no page in it")
+            keys_seen[key] = name
+            continue
         check(len(owner) == 1,
               f"{name}: its key {key!r} is in {len(owner)} categories "
               f"({owner}); every page belongs to exactly one")
@@ -258,6 +272,10 @@ def main() -> int:
         check(n_items == len(EXPECTED and [i for _, ls in EXPECTED for i in ls]),
               f"the nav holds {n_items} pages, expected "
               f"{len([i for _, ls in EXPECTED for i in ls])}")
+        for c in nav.cats:
+            for i in c["items"]:
+                check(not i["href"].endswith(":%s/scan" % LIVE_PORT),
+                      "the nav still links to Equities Scan, which is hidden")
         hrefs = {i["href"] for c in nav.cats for i in c["items"]}
         local = {h for h in hrefs if h.startswith("/") and not h.startswith("//")}
         unset = local - set(keys_seen)
