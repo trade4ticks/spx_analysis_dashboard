@@ -1,22 +1,24 @@
-"""The Equities Wall page at 300 symbols, 100 a page -- clicked, in headless Edge.
+"""The Equities Wall rotation list at 300 symbols -- clicked, in headless Edge.
 
 The real template and bundle, with the one WebSocket replaced by a fake that
-speaks the server's frame format (hello, then a tick a second carrying every
-symbol). Nothing reaches the live service or the market-data account.
+speaks the server's frame format (hello, then a tick every 250 ms carrying the
+spreads that changed), and `fetch` replaced by one that echoes the save.
+Nothing reaches the live service or the market-data account.
 
-What it holds, and what it MEASURES (printed, so the numbers in the commit are
-the page's own):
+What it holds, and what it MEASURES (printed):
 
-  * 100 panes in the document, list order; the pager CLICKED to page two puts
-    entries 101-200 there and draws every one of them AT ONCE, from tape that
-    was already in the browser -- no message to the server on a flip.
-  * every one of the 300 symbols keeps arriving while it is off-page.
-  * one draw pass over the visible hundred, and one tick's processing of all
-    300, each well inside the one-second budget.
-  * pane geometry at the window size(s) given: columns, rows, canvas size,
-    and whether a hundred fit without scrolling, per pane-width setting.
-  * no console error and no exception (an Alpine expression error leaves a
-    control inert without stopping the page).
+  * 300 rows, alphabetical (the hello's list is shuffled), flowing DOWN each
+    column and then on to the next -- read from the rows' geometry -- ~250 px
+    wide, 16 px tall, all on one screen without scrolling.
+  * colour and bar from the two thresholds, read from computed styles; both
+    sliders moved by input events re-colour and re-scale.
+  * a click marks a row green and a second click clears it; a marked row is
+    never dimmed or hidden.
+  * "hide below floor" removes the dim rows and nothing else; unticked, every
+    row is back in place.
+  * the sort button: widest first, then alphabetical again.
+  * the time one tick takes to apply, at 300 symbols.
+  * no console error and no exception.
 
 No browser (the VPS) -> SKIP.
 """
@@ -56,47 +58,39 @@ DRIVER = r"""
   window.addEventListener('error', (e) => errors.push('onerror: ' + e.message));
   const ce = console.error.bind(console);
   console.error = (...a) => { errors.push('console.error: ' + a.join(' ')); ce(...a); };
-  try { localStorage.clear(); } catch (e) {}
 
-  const N = 300, PER = 100;
+  const N = 300;
   const syms = Array.from({length: N}, (_, i) => 'S' + String(i).padStart(3, '0'));
-  const px = {}; syms.forEach((s, i) => { px[s] = 20 + i; });
-  const sends = [];
-  const received = {};           // symbol -> ticks that carried it
-  let sock = null;
+  // Spreads 5..200c, spread over the list so every column has every tier.
+  const sp = {}; syms.forEach((s, i) => { sp[s] = 5 + ((i * 37) % 196); });
+  sp.S000 = null;                                   // never quoted
+  const shuffled = syms.slice().sort((a, b) => ((a.charCodeAt(3) * 7 + a.charCodeAt(2)) % 11) - ((b.charCodeAt(3) * 7 + b.charCodeAt(2)) % 11));
+  const sends = [], posts = [];
+  let sock = null, paused = false;
 
-  // Roughly the wall's real shape: most names a few prints a second, a few
-  // busy ones, and the 200 ms sampled band (up to five quotes a second).
-  function cell(s, i, nowMs, full) {
-    const busy = i < 10 ? 40 : (i < 60 ? 6 : 2);
-    const t = [], q = [];
-    const n = full ? busy * 120 : busy;
-    const span = full ? 120000 : 1000;
-    for (let k = 0; k < n; k++) {
-      px[s] += (Math.random() - 0.5) * 0.02;
-      t.push([nowMs - span + (k + 0.5) * span / n, +px[s].toFixed(2), [1, 10, 100][k % 3]]);
-    }
-    const nq = full ? 600 : 5, half = 0.03 + (i % 7) * 0.02;
-    for (let k = 0; k < nq; k++) {
-      q.push([nowMs - span + (k + 0.5) * span / nq, +(px[s] - half).toFixed(2), +(px[s] + half).toFixed(2)]);
-    }
-    const c = {t, q, sp: half * 200, tp: half * 200, mid: px[s]};
-    if (full) { c.full = true; c.q0 = [nowMs - span - 50, q[0][1], q[0][2]]; }
-    return c;
-  }
-  function frame(full) {
-    const nowMs = Date.now(), out = {};
-    syms.forEach((s, i) => { out[s] = cell(s, i, nowMs, full); received[s] = (received[s] || 0) + 1; });
-    return {ev: 'tick', at: nowMs / 1000, window_s: 120, syms: out};
-  }
+  window.fetch = async (url, opt) => {
+    const body = JSON.parse(opt.body);
+    posts.push(body);
+    return { json: async () => ({ entries: body.entries, settings: body.settings, refused: [] }) };
+  };
+
   class FakeWS {
     constructor(url) { this.url = url; this.readyState = 0; sock = this;
       setTimeout(() => { this.readyState = 1; this.onopen && this.onopen();
-        this.emit({ev: 'hello', data: {}, entries: syms.map(s => ({symbol: s, scale: null})),
-                   settings: {window_s: 120, spread_share: 0.6, min_spread_cents: 0},
-                   caps: {symbols: N, per_page: PER, retain_s: 180, share_min: 0.05, share_max: 0.95, tick_s: 1}});
-        this.emit(frame(true));
-        this.timer = setInterval(() => this.emit(frame(false)), 1000);
+        this.emit({ev: 'hello', data: {}, entries: shuffled.map(s => ({symbol: s, scale: null})),
+                   settings: {min_spread_cents: 59, wide_cents: 120},
+                   caps: {symbols: N, tick_s: 0.25}});
+        this.emit({ev: 'tick', at: Date.now() / 1000, syms: Object.assign({}, sp)});
+        // Deltas: forty names a tick change by a cent and change back, so
+        // the picture the assertions read is the same between ticks.
+        let flip = 0;
+        this.timer = setInterval(() => {
+          if (paused) return;
+          flip ^= 1; const d = {};
+          for (let k = 0; k < 40; k++) { const s = syms[1 + ((k * 7 + flip) % 299)]; d[s] = sp[s] + flip; }
+          if (!flip) Object.keys(d).forEach(s => { d[s] = sp[s]; });
+          this.emit({ev: 'tick', at: Date.now() / 1000, syms: d});
+        }, 250);
       }, 30); }
     emit(m) { const t0 = performance.now(); this.onmessage && this.onmessage({data: JSON.stringify(m)});
               if (m.ev === 'tick') window.__tickMs = (window.__tickMs || []).concat(performance.now() - t0); }
@@ -112,92 +106,138 @@ DRIVER = r"""
     while (Date.now() - t0 < ms) { try { if (fn()) return; } catch (e) {} await sleep(50); }
     throw new Error('timed out waiting for ' + what);
   }
-  function canvasInk(cv) {
-    if (!cv.width || !cv.height) return 0;
-    const d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data;
-    let n = 0; for (let i = 3; i < d.length; i += 16) if (d[i]) n++;
-    return n;
+  const rows = () => [...document.querySelectorAll('.wl-row')];
+  const row = (s) => document.querySelector('.wl-row[data-sym="' + s + '"]');
+  const visibleSyms = () => rows().filter(r => getComputedStyle(r).display !== 'none').map(r => r.dataset.sym);
+  function look(s) {
+    const r = row(s), f = r.querySelector('.wl-fill'), t = r.querySelector('.wl-track');
+    const cs = getComputedStyle(r);
+    return { cls: r.className, opacity: +cs.opacity, bg: cs.backgroundColor,
+             fill: getComputedStyle(f).backgroundColor,
+             pct: Math.round(f.getBoundingClientRect().width / t.getBoundingClientRect().width * 100),
+             text: r.querySelector('.wl-cents').textContent.trim(),
+             tk: getComputedStyle(r.querySelector('.wl-tk')).color };
   }
-  function paneSyms() { return [...document.querySelectorAll('.wl-pane')].map(e => e.dataset.sym); }
+  function flow() {
+    // Down a column, then on to the next: consecutive visible rows either
+    // share a left edge and step down, or move right and start higher.
+    const rs = rows().filter(r => getComputedStyle(r).display !== 'none').map(r => r.getBoundingClientRect());
+    let bad = 0, cols = 1;
+    for (let i = 1; i < rs.length; i++) {
+      const a = rs[i - 1], b = rs[i];
+      if (Math.abs(a.left - b.left) < 1) { if (!(b.top > a.top)) bad++; }
+      else if (b.left > a.left && b.top < a.top) cols++;
+      else bad++;
+    }
+    return { bad, cols, w: Math.round(rs[0].width), h: Math.round(rs[0].height), n: rs.length };
+  }
+  function slide(model, v) {
+    const el = [...document.querySelectorAll('input[type=range]')].find(e => e.getAttribute('x-model.number') === 'settings.' + model);
+    el.value = String(v); el.dispatchEvent(new Event('input', {bubbles: true}));
+  }
 
   async function run() {
-    const out = {errors, layout: []};
+    const out = {errors};
     mark('alpine');
     await waitFor(() => window.Alpine && document.querySelector('[x-data]')._x_dataStack, 'Alpine');
     const C = () => Alpine.$data(document.querySelector('[x-data]'));
     mark('first frame');
-    await waitFor(() => document.querySelectorAll('.wl-pane').length > 0 && C().lastTick, 'panes');
-    await sleep(1500);
-    out.panesPage1 = paneSyms();
-    out.pagerButtons = [...document.querySelectorAll('.wl-pager .wl-btn')].map(b => b.textContent.trim());
-
-    // ── layout per pane width ──────────────────────────────────────────
-    mark('layout');
-    const scroll = document.querySelector('.wl-scroll');
-    for (const w of [120, 140, 160, 180, 200, 220, 240]) {
-      C().paneWidth = w; await Alpine.nextTick(); await frameDone();
-      const panes = [...document.querySelectorAll('.wl-pane')];
-      const topOf = (p) => Math.round(p.getBoundingClientRect().top + scroll.scrollTop);
-      const tops = new Set(panes.map(topOf));
-      const first = Math.min(...tops);
-      const cv = panes[0].querySelector('canvas').getBoundingClientRect();
-      out.layout.push({paneWidth: w, cols: panes.filter(p => topOf(p) === first).length,
-                       rows: tops.size, canvasW: Math.round(cv.width), canvasH: Math.round(cv.height),
-                       gridViewH: scroll.clientHeight, gridH: scroll.scrollHeight,
-                       fits: scroll.scrollHeight <= scroll.clientHeight + 1,
-                       viewport: [innerWidth, innerHeight]});
-    }
-    // Every pane on screen (160 fits a hundred at this size), so the pass
-    // below draws all of them; off-screen panes are skipped by design.
-    C().paneWidth = 160; await Alpine.nextTick(); await frameDone(); await sleep(300);
-    // ── the draw pass over the visible hundred, all dirty ──────────────
-    mark('draw cost');
-    const draws = [];
-    for (let k = 0; k < 6; k++) {
-      C().dirtyAll();
-      const t0 = performance.now(); C().drawAll(); draws.push(performance.now() - t0);
-      out.drawnAll = C().drawn;
-      await sleep(200);
-    }
-    out.drawMs = draws.sort((a, b) => a - b);
-
-
-    // ── flip to page two BY CLICKING, and time it ──────────────────────
-    mark('flip');
-    const sendsBefore = sends.length;
-    const btn = [...document.querySelectorAll('.wl-pager .wl-btn')].find(b => b.textContent.trim() === '101–200');
-    const comp = C();
-    const t0 = performance.now();
-    btn.click();
-    await waitFor(() => paneSyms()[0] === 'S100' && comp.drawn >= 90, 'page two drawn', 3000)
-      .catch(e => { out.flipTimeout = String(e); });
-    out.flipMs = performance.now() - t0;
-    await frameDone();
-    out.panesPage2 = paneSyms();
-    out.drawnAfterFlip = comp.drawn;
-    const cvs = [...document.querySelectorAll('.wl-pane canvas')];
-    out.inked = cvs.filter(c => canvasInk(c) > 20).length;
-    out.sendsOnFlip = sends.slice(sendsBefore);
-    out.page = comp.page;
-    out.summary = comp.connSummary();
-
-    // every symbol kept arriving, on- and off-page
-    const before = Object.assign({}, received);
-    await sleep(2200);
-    out.stillArriving = syms.filter(s => (received[s] || 0) > (before[s] || 0)).length;
-    out.tickMs = (window.__tickMs || []).slice(2).sort((a, b) => a - b);
-
-    // last page and back; a shortened list clamps the page
-    mark('page three');
-    [...document.querySelectorAll('.wl-pager .wl-btn')].find(b => b.textContent.trim() === '201–300').click();
-    await waitFor(() => paneSyms()[0] === 'S200', 'page three', 3000).catch(e => { out.p3Timeout = String(e); });
-    out.panesPage3 = paneSyms();
-    out.nextDisabled = [...document.querySelectorAll('.wl-pager .wl-btn')].pop().disabled;
-    sock.emit({ev: 'watchlist', entries: syms.slice(0, 150).map(s => ({symbol: s, scale: null}))});
+    await waitFor(() => rows().length === N && C().lastTick, 'rows');
+    await sleep(800);
+    paused = true; await sleep(300);
+    // The ticks change and change back; settle on the base picture.
+    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: Object.assign({}, sp)});
     await Alpine.nextTick(); await frameDone();
-    out.pageAfterShrink = comp.page;
-    out.panesAfterShrink = paneSyms();
-    out.storedPage = localStorage.getItem('equitiesWall.page');
+
+    out.order = rows().map(r => r.dataset.sym);
+    out.flow = flow();
+    const sc = document.querySelector('.wl-scroll');
+    out.fits = sc.scrollHeight <= sc.clientHeight + 1;
+    out.listH = Math.round(document.querySelector('.wl-list').getBoundingClientRect().height);
+    out.viewH = sc.clientHeight;
+    out.sortLabel = document.querySelector('.wl-sort').textContent.trim();
+    out.hideChecked = document.querySelector('input[type=checkbox]').checked;
+
+    // ── tiers at the default 59 / 120 ──────────────────────────────────
+    mark('tiers');
+    const pick = (lo, hi) => syms.find(s => sp[s] != null && sp[s] >= lo && sp[s] < hi);
+    out.symBelow = pick(10, 40); out.symMid = pick(70, 100); out.symWide = pick(130, 200);
+    out.symSixty = syms.find(s => sp[s] === 60) || pick(60, 61);
+    out.below = look(out.symBelow); out.mid = look(out.symMid); out.wide = look(out.symWide);
+    out.none = look('S000');
+    out.sixty = look(out.symSixty);
+    out.spOf = {below: sp[out.symBelow], mid: sp[out.symMid], wide: sp[out.symWide], sixty: sp[out.symSixty]};
+
+    // ── the sliders ────────────────────────────────────────────────────
+    mark('sliders');
+    slide('wide_cents', 240); await Alpine.nextTick(); await frameDone();
+    out.sixtyAt240 = look(out.symSixty);
+    out.wideAt240 = look(out.symWide);
+    slide('floor' === 'x' ? '' : 'min_spread_cents', 20); await Alpine.nextTick(); await frameDone();
+    out.belowAt20 = look(out.symBelow);
+    await sleep(700);                               // the debounced save
+    out.posts = posts.map(p => p.settings);
+    slide('min_spread_cents', 59); slide('wide_cents', 120);
+    await Alpine.nextTick(); await frameDone();
+
+    // ── marks ──────────────────────────────────────────────────────────
+    mark('marks');
+    row(out.symBelow).click(); row(out.symMid).click();
+    await Alpine.nextTick(); await frameDone();
+    out.markedBelow = look(out.symBelow); out.markedMid = look(out.symMid);
+    row(out.symMid).click(); await Alpine.nextTick(); await frameDone();
+    out.unmarkedMid = look(out.symMid);
+
+    // ── hide below floor (CLICKED) ─────────────────────────────────────
+    mark('hide');
+    document.querySelector('input[type=checkbox]').click();
+    await Alpine.nextTick(); await frameDone();
+    const vis = visibleSyms();
+    out.hideVisible = vis.length;
+    out.hideExpected = syms.filter(s => (sp[s] != null && sp[s] >= 59) || s === out.symBelow).length;
+    out.hideKeepsMarked = vis.includes(out.symBelow);
+    out.hideDropsBelow = !vis.includes(pick(20, 50) === out.symBelow ? syms.find(s => sp[s] != null && sp[s] < 59 && s !== out.symBelow) : pick(20, 50));
+    out.hideFlow = flow();
+    out.hideAlpha = vis.join() === vis.slice().sort().join();
+    document.querySelector('input[type=checkbox]').click();
+    await Alpine.nextTick(); await frameDone();
+    out.unhidden = visibleSyms().length;
+
+    // ── sort (CLICKED) ─────────────────────────────────────────────────
+    mark('sort');
+    document.querySelector('.wl-sort').click();
+    await Alpine.nextTick(); await frameDone();
+    out.wideOrder = rows().map(r => r.dataset.sym);
+    out.sortLabel2 = document.querySelector('.wl-sort').textContent.trim();
+    out.wideFlow = flow();
+    document.querySelector('.wl-sort').click();
+    await Alpine.nextTick(); await frameDone();
+    out.backToAlpha = rows().map(r => r.dataset.sym).join() === syms.join();
+
+    // ── live updates: one row's number changes in place ────────────────
+    mark('update');
+    paused = false;
+    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: {S005: 99}});
+    await Alpine.nextTick(); await frameDone();
+    out.updated = look('S005').text;
+    // WORST CASE: all 300 spreads change in one tick, timed through Alpine's
+    // flush of the row bindings (nextTick) -- the work the frame costs.
+    paused = true;
+    const full = [];
+    for (let k = 0; k < 8; k++) {
+      const d = {}; syms.forEach((s, i) => { d[s] = 5 + ((i * 37 + k + 1) % 196); });
+      const t0 = performance.now();
+      sock.emit({ev: 'tick', at: Date.now() / 1000, syms: d});
+      await Alpine.nextTick();
+      full.push(performance.now() - t0);
+      await sleep(250);
+    }
+    out.fullTickMs = full.sort((a, b) => a - b);
+    paused = false;
+    await sleep(1500);
+    out.tickMs = (window.__tickMs || []).slice(2).sort((a, b) => a - b);
+    out.sends = sends;
+    out.summary = C().connSummary();
     mark('done');
     return out;
   }
@@ -246,63 +286,99 @@ def drive(browser: str, window: str) -> dict:
     return json.loads(edge_cdp.run_page(browser, tmp, timeout_s=120, window=window))
 
 
+BLUE, PINK, GREY = "rgb(52, 152, 219)", "rgb(232, 67, 147)", "rgb(119, 119, 119)"
+GREEN_BG, GREEN = "rgba(46, 204, 113, 0.22)", "rgb(46, 204, 113)"
+
+
 def main() -> int:
     browser = N.find_browser()
     if browser is None:
         print("  SKIP  no Edge/Chromium on this host -- the page was NOT driven")
         return EXIT_SKIPPED
-    # 2560x1440 with the window full screen, and maximised under a tab strip,
-    # an address bar and the taskbar (~140 px less).
-    for window in ("2560,1440", "2560,1300"):
+    syms = [f"S{i:03d}" for i in range(300)]
+    # 2560x1440 full screen, maximised under browser chrome and the taskbar,
+    # and a laptop.
+    for window in ("2560,1440", "2560,1300", "1440,860"):
         o = drive(browser, window)
-        if o.get("fatal"):
-            FAILS.append(f"[{window}] the page did not run: {o['fatal']}; errors {o.get('errors')}")
-            continue
         tag = f"[{window}]"
+        if o.get("fatal"):
+            FAILS.append(f"{tag} the page did not run: {o['fatal']}; errors {o.get('errors')}")
+            continue
         check(not o["errors"], f"{tag} console errors: {o['errors'][:3]}")
-        check(o["panesPage1"] == [f"S{i:03d}" for i in range(100)],
-              f"{tag} page one is not the first hundred in list order "
-              f"({len(o['panesPage1'])} panes, starting {o['panesPage1'][:2]})")
-        check(o["pagerButtons"] == ["‹", "1–100", "101–200", "201–300", "›"],
-              f"{tag} pager reads {o['pagerButtons']}")
-        check(o["drawnAll"] == 100, f"{tag} one draw pass drew {o['drawnAll']} of 100 dirty panes")
-        check(not o.get("flipTimeout"), f"{tag} {o.get('flipTimeout')}")
-        check(o["panesPage2"] == [f"S{i:03d}" for i in range(100, 200)],
-              f"{tag} after clicking 101-200 the panes are {o['panesPage2'][:2]}...")
-        check(o["flipMs"] < 400,
-              f"{tag} a flip took {o['flipMs']:.0f} ms to draw page two; it must not "
-              f"wait for the next one-second tick")
-        check(o["inked"] >= 95,
-              f"{tag} only {o['inked']} of page two's canvases have anything drawn "
-              f"right after the flip -- their tape was not warm")
-        check(not o["sendsOnFlip"],
-              f"{tag} the flip sent {o['sendsOnFlip']} to the server; pages must be a "
-              f"view, with every symbol still streaming")
-        check(o["stillArriving"] == 300,
-              f"{tag} only {o['stillArriving']} of 300 symbols kept arriving while two "
-              f"pages were off screen")
-        check(o["panesPage3"][:1] == ["S200"] and o["nextDisabled"] is True,
-              f"{tag} page three / its next button: {o['panesPage3'][:1]}, {o['nextDisabled']}")
-        check(o["pageAfterShrink"] == 1 and o["panesAfterShrink"][:1] == ["S100"]
-              and len(o["panesAfterShrink"]) == 50,
-              f"{tag} a list shortened to 150 under page three left the page at "
-              f"{o['pageAfterShrink']} showing {len(o['panesAfterShrink'])} panes")
-        check(o["storedPage"] is not None, f"{tag} the page is not remembered on this screen")
-        draw_med = o["drawMs"][len(o["drawMs"]) // 2]
+        check(o["order"] == syms, f"{tag} rows are not alphabetical: {o['order'][:4]}")
+        f = o["flow"]
+        check(f["bad"] == 0 and f["cols"] >= 2,
+              f"{tag} rows do not flow down then across: {f}")
+        check(f["h"] == 16 and 250 <= f["w"] <= 320,
+              f"{tag} a row is {f['w']} x {f['h']} px, want ~250 x 16")
+        # 2560 wide, the screen the list is read on, holds all 300; a laptop
+        # cannot (5 columns of 60 rows at ~250 x 16), and is only reported.
+        if window.startswith("2560"):
+            check(o["fits"], f"{tag} 300 rows scroll: {o['listH']} px in {o['viewH']} px")
+        check(o["sortLabel"] == "A → Z" and o["hideChecked"] is False,
+              f"{tag} opens as {o['sortLabel']!r}, hide {o['hideChecked']}")
+
+        b, m, w, n = o["below"], o["mid"], o["wide"], o["none"]
+        check("below" in b["cls"] and b["opacity"] == 0.3 and b["fill"] == GREY,
+              f"{tag} a {o['spOf']['below']}c row under a 59c floor: {b}")
+        check("mid" in m["cls"] and m["opacity"] == 1 and m["fill"] == BLUE,
+              f"{tag} a {o['spOf']['mid']}c row between floor and wide: {m}")
+        check("wide" in w["cls"] and w["opacity"] == 1 and w["fill"] == PINK
+              and w["pct"] == 100,
+              f"{tag} a {o['spOf']['wide']}c row over 120c wide: {w}")
+        check("none" in n["cls"] and n["opacity"] == 0.3 and n["text"] == "—",
+              f"{tag} a symbol with no quote: {n}")
+        check(abs(o["sixty"]["pct"] - round(o["spOf"]["sixty"] / 120 * 100)) <= 1,
+              f"{tag} a {o['spOf']['sixty']}c bar is {o['sixty']['pct']}% at wide 120")
+        check(abs(o["sixtyAt240"]["pct"] - round(o["spOf"]["sixty"] / 240 * 100)) <= 1
+              and o["wideAt240"]["fill"] == BLUE,
+              f"{tag} moving wide to 240 did not rescale/recolour: "
+              f"{o['sixtyAt240']}, {o['wideAt240']}")
+        check(o["belowAt20"]["opacity"] == 1 and "mid" in o["belowAt20"]["cls"],
+              f"{tag} a floor of 20 left a {o['spOf']['below']}c row dim: {o['belowAt20']}")
+        check(o["posts"] and o["posts"][-1] == {"min_spread_cents": 20, "wide_cents": 240},
+              f"{tag} the thresholds were saved as {o['posts'][-1:]}")
+
+        mb, mm, um = o["markedBelow"], o["markedMid"], o["unmarkedMid"]
+        check("marked" in mb["cls"] and mb["opacity"] == 1 and mb["bg"] == GREEN_BG
+              and mb["tk"] == GREEN,
+              f"{tag} a marked row under the floor is not green and full strength: {mb}")
+        check("marked" in mm["cls"] and mm["bg"] == GREEN_BG,
+              f"{tag} a click did not mark the row: {mm}")
+        check("marked" not in um["cls"] and um["bg"] != GREEN_BG,
+              f"{tag} a second click did not clear the mark: {um}")
+
+        check(o["hideVisible"] == o["hideExpected"] and o["hideKeepsMarked"]
+              and o["hideDropsBelow"],
+              f"{tag} hide below floor shows {o['hideVisible']} (want "
+              f"{o['hideExpected']}), marked kept {o['hideKeepsMarked']}, "
+              f"below dropped {o['hideDropsBelow']}")
+        check(o["hideFlow"]["bad"] == 0 and o["hideAlpha"],
+              f"{tag} the hidden list does not flow down in order: {o['hideFlow']}")
+        check(o["unhidden"] == 300, f"{tag} unticking left {o['unhidden']} rows")
+
+        wide_vals = [None if s == "S000" else 5 + ((int(s[1:]) * 37) % 196)
+                     for s in o["wideOrder"]]
+        nums = [v for v in wide_vals if v is not None]
+        check(nums == sorted(nums, reverse=True) and wide_vals[-1] is None
+              and o["sortLabel2"] == "widest first" and o["wideFlow"]["bad"] == 0,
+              f"{tag} widest first is not descending down the columns: "
+              f"{o['wideOrder'][:5]} / {o['sortLabel2']}")
+        check(o["backToAlpha"], f"{tag} the second click did not restore A-Z")
+        check(o["updated"] == "99", f"{tag} a tick did not update the row: {o['updated']}")
+        check(not o["sends"], f"{tag} the page sent {o['sends']} on its socket")
         tick = o["tickMs"]
         tick_med = tick[len(tick) // 2] if tick else float("nan")
-        check(draw_med < 250, f"{tag} drawing 100 panes takes {draw_med:.0f} ms of every second")
-        check(tick and tick_med < 250, f"{tag} one tick of 300 symbols takes {tick_med:.0f} ms")
-
-        print(f"  {tag} viewport {o['layout'][0]['viewport']}: draw 100 panes median "
-              f"{draw_med:.1f} ms (worst {o['drawMs'][-1]:.1f}); tick of 300 symbols median "
-              f"{tick_med:.1f} ms; flip to page two drawn in {o['flipMs']:.0f} ms, "
-              f"{o['inked']}/100 canvases inked")
-        for L in o["layout"]:
-            print(f"      pane width {L['paneWidth']:>3}: {L['cols']:>2} x {L['rows']:>2}, canvas "
-                  f"{L['canvasW']} x {L['canvasH']} px, "
-                  + ("all 100 on screen" if L["fits"] else
-                     f"scrolls ({L['gridH']} px of panes in {L['gridViewH']} px)"))
+        check(tick and tick[-1] < 50,
+              f"{tag} applying a tick takes up to {tick[-1] if tick else '?'} ms")
+        full = o["fullTickMs"]
+        check(full and full[len(full) // 2] < 100,
+              f"{tag} a tick changing all 300 rows takes {full} ms to render")
+        print(f"  {tag} {f['cols']} columns of ~{(300 + f['cols'] - 1) // f['cols']} rows, "
+              f"row {f['w']} x {f['h']} px, list {o['listH']} px in {o['viewH']} px "
+              f"({'fits' if o['fits'] else 'scrolls'}); a 40-row tick median "
+              f"{tick_med:.2f} ms; all 300 changed, through the render flush: "
+              f"median {full[len(full) // 2]:.1f} ms, worst {full[-1]:.1f} ms")
 
     print(f"\nwall ui: {N_ASSERT[0]} assertions, failures: {len(FAILS)}")
     for f in FAILS:

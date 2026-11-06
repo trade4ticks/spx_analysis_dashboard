@@ -8,17 +8,21 @@ or on the VPS during the session:
     .venv/bin/python scripts/measure_wall_capacity.py              # 300 symbols
     .venv/bin/python scripts/measure_wall_capacity.py --symbols 220 --scale 2
 
+QUOTES ONLY (2026-11-06): the wall subscribes the Q channel and nothing
+else, so the feed simulated here is quotes. A trade for a wall symbol arrives
+only when a pane or the scan holds it too, and is that tier's cost.
+
 THE RATE IS AN UPPER BOUND FROM A MEASUREMENT, not a guess at a watchlist.
 At the open on 2026-09-08 the scan's 600 symbols ran 3,850 trades/s, and with
-quotes added the records were ~3.1x that (live/hub.py, _channels). The busiest
-~50 names carry most of it, so a 300-name list is assumed to carry ALL of the
-trade rate, with the quote rate at 2.1x -- i.e. as if the watchlist were the
-300 busiest names in the universe. A list of quiet names costs much less.
-Per-symbol rates are Zipf-shaped so a few names are very busy, as measured.
+quotes added the records were ~3.1x that. The busiest ~50 names carry most of
+it, so a 300-name list is assumed to carry ALL of it -- quotes at 2.1x that
+trade rate, ~8,100 a second -- as if the watchlist were the 300 busiest names
+in the universe. A list of quiet names costs much less. Per-symbol rates are
+Zipf-shaped so a few names are very busy, as measured.
 
 What it reports, per simulated second at steady state (the window full):
   ingest   parsing and storing every upstream message (the hub's reader)
-  frame    building one wall page's per-second delta, and its JSON size
+  frame    building one wall page's deltas (WALL_TICK_S apart), and their size
 and the share of one core both take at the stated rate. The VPS measured
 about half this machine's speed (CLAUDE.md), so the VPS line doubles it.
 """
@@ -80,8 +84,8 @@ def main() -> int:
     ap.add_argument("--symbols", type=int, default=300)
     ap.add_argument("--scale", type=float, default=1.0,
                     help="multiply the measured upstream rate")
-    ap.add_argument("--seconds", type=int, default=150,
-                    help="simulated seconds; the window is 120 s")
+    ap.add_argument("--seconds", type=int, default=30,
+                    help="simulated seconds")
     ap.add_argument("--budget", type=float, default=0.50,
                     help="share of one VPS core the wall may use (PASS/OVER)")
     a = ap.parse_args()
@@ -90,8 +94,9 @@ def main() -> int:
     syms = [f"S{i:03d}" for i in range(a.symbols)]
     weights = [1.0 / (i + 1) ** 1.1 for i in range(a.symbols)]
     px = {s: rng.uniform(15, 400) for s in syms}
-    n_t = int(TRADES_PER_S * a.scale)
-    n_q = int(n_t * QUOTES_PER_TRADE)
+    n_t = 0                                 # the wall takes no trades
+    n_q = int(TRADES_PER_S * QUOTES_PER_TRADE * a.scale)
+    ticks = max(1, round(1.0 / config.WALL_TICK_S))
 
     config.WALL_MAX_SYMBOLS = max(config.WALL_MAX_SYMBOLS, a.symbols)
     hub = Hub()
@@ -108,15 +113,19 @@ def main() -> int:
         for f in frames:
             hub._ingest(f)
         ingest_s.append(time.perf_counter() - c0)
-        now = (t0 + (sec + 1) * 1000.0) / 1000.0
+        # The second's feed is ingested whole and then framed `ticks` times;
+        # only the first carries changes, so this is the frame cost at the
+        # ingest rate plus the empty ticks -- the same total work.
         c0 = time.perf_counter()
-        fr = runner.frame(st, now)
-        body = json.dumps(fr)               # what send_json does
+        kb = 0.0
+        for k in range(ticks):
+            now = (t0 + sec * 1000.0 + (k + 1) * 1000.0 / ticks) / 1000.0
+            kb += len(json.dumps(runner.frame(st, now))) / 1024.0
         frame_s.append(time.perf_counter() - c0)
-        frame_kb.append(len(body) / 1024.0)
+        frame_kb.append(kb)
         n_msgs = n_t + n_q
 
-    steady = slice(130, None) if a.seconds > 140 else slice(-10, None)
+    steady = slice(-10, None)
     ing = sorted(ingest_s[steady])
     frm = sorted(frame_s[steady])
     kb = sorted(frame_kb[steady])
@@ -126,16 +135,15 @@ def main() -> int:
     core_vps = core_here * VPS_SLOWDOWN
     ws = hub.wall_status()
 
-    print(f"wall: {a.symbols} symbols, {n_t:,} trades/s + {n_q:,} quotes/s "
+    print(f"wall: {a.symbols} symbols, {n_q:,} quotes/s, no trades "
           f"({a.scale:g}x the measured upper bound), {a.seconds} s simulated")
     print(f"  ingest  median {med(ing) * 1000:7.1f} ms per second of feed  "
           f"(worst {worst(ing) * 1000:.1f}; {med(ing) / n_msgs * 1e6:.2f} us/msg)")
-    print(f"  frame   median {med(frm) * 1000:7.1f} ms per page per second    "
-          f"(worst {worst(frm) * 1000:.1f}), {med(kb):.0f} KB "
-          f"(worst {worst(kb):.0f} KB) per frame")
-    print(f"  buffers {ws['buffer_mb']:.1f} MB, {ws['trades_held']:,} trades "
-          f"+ {ws['quotes_held']:,} sampled quotes held, "
-          f"{ws['truncated_count']} truncated")
+    print(f"  frames  median {med(frm) * 1000:7.1f} ms per page per second    "
+          f"(worst {worst(frm) * 1000:.1f}; {ticks} a second), "
+          f"{med(kb):.1f} KB a second (worst {worst(kb):.1f} KB)")
+    print(f"  held    one quote a symbol; {ws['quotes_seen']:,} taken, "
+          f"{ws['crossed']} crossed")
     print(f"  share of one core: {core_here * 100:.0f}% here, "
           f"~{core_vps * 100:.0f}% on the VPS (x{VPS_SLOWDOWN:g}), one page open")
     verdict = "PASS" if core_vps <= a.budget else "OVER"

@@ -154,7 +154,7 @@ this repo.
 
 | Path | Written by | Read by | Clearing affects | Safe to clear? |
 |---|---|---|---|---|
-| `data/wall_watchlist.json` (`LIVE_WALL_STORE_PATH`) | POST `/wall/watchlist` via `live/wall_store.py`, whole-file through a temp file and a rename | `WallRunner.apply()` on start and on every change | **Equities Wall** comes back empty and the list — and each pane's scale override — is retyped by hand | **N** (user-entered) |
+| `data/wall_watchlist.json` (`LIVE_WALL_STORE_PATH`) | POST `/wall/watchlist` via `live/wall_store.py`, whole-file through a temp file and a rename | `WallRunner.apply()` on start and on every change | **Equities Wall** comes back empty and the list and both spread thresholds are retyped by hand | **N** (user-entered) |
 | `data/scan_history/scan_cells_<date>.npz` (`LIVE_SCAN_HISTORY_DIR`) | `live/scan_history.py`, once a minute, one file per session date, **not pruned** | `/scan/seed`, `/scan/sessions` | That session's grid is blank until it re-accumulates; past dates stop being loadable | Y (loses history) |
 
 ### 1d. Possibly-dead legacy tables (check pgAdmin)
@@ -570,14 +570,15 @@ and a second evicts the first, so all three pages share it as tiers:
 |---|---|---|
 | pane | every field of every trade and quote, 15 min | `MAX_SYMBOLS` 8 |
 | scan | trades as three float64 arrays, 6 min, + a spread accumulator | `SCAN_MAX_SYMBOLS` 600 |
-| wall | trades + a sampled quote, 2 min | `WALL_MAX_SYMBOLS` 120 |
+| wall | QUOTES ONLY (Q channel); the last quote a symbol | `WALL_MAX_SYMBOLS` 300 |
 
-`Hub.holders(sym, exclude=tier)` is the single place answering "does another
-tier still hold this", and every add and drop asks it — the failure it
+`Hub._wants(sym)` is the single place answering "which channels does this
+symbol still need" (pane/scan → T+Q, wall only → Q), and every add and drop
+sends only the before/after difference — the failure it
 prevents (an unsubscribe pulled out from under another tier) shows as a pane
 that has gone QUIET rather than blank, which is the one distinction these
 pages exist to make. Browsers are capped at `MAX_CLIENTS` 8, which is why the
-wall carries **all** its panes over the single `/wall/ws`.
+wall carries **all** its rows over the single `/wall/ws`.
 
 | Method | Path | Note |
 |---|---|---|
@@ -593,7 +594,7 @@ wall carries **all** its panes over the single `/wall/ws`.
 | WS | `/scan/ws` | |
 | GET | `/wall` | Equities Wall — watching only; `check_wall` refuses any broker reference from the wall's modules or endpoints |
 | GET/POST | `/wall/watchlist` | R/W `data/wall_watchlist.json` |
-| WS | `/wall/ws` | **One connection for the whole page**; 1 Hz delta frames, and a symbol with nothing new is not sent |
+| WS | `/wall/ws` | **One connection for the whole page**; a frame every 250 ms carrying only the symbols whose spread changed |
 | WS | `/ws` | The pane's tape |
 
 Brokers sit behind an interface: **`live/broker.py` is the façade** and owns

@@ -8,13 +8,7 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
 
   <style>
-    /* Equities Wall — page-scoped, prefixed .wl-.
-
-       CANVAS PER PANE, unlike the scan page's windowed DOM, because what is
-       drawn here is a picture rather than a row of cells: a couple of hundred
-       bubbles and a stepped band, redrawn as a whole. The scan's measurement
-       (DOM 29 ms windowed against canvas 2.4 ms) already said canvas wins on
-       cost and loses on hit-testing; there is nothing to hit-test here. */
+    /* Equities Wall — a rotation list, page-scoped, prefixed .wl-. */
     html { color-scheme: dark; }
     .wl-body { flex:1; display:flex; flex-direction:column; min-height:0;
                padding:10px 12px; }
@@ -28,7 +22,7 @@
     .wl-grp.sep { border-left:1px solid var(--border); padding-left:14px; }
     .wl-lab { color:var(--muted); white-space:nowrap; }
     .wl-num { font-variant-numeric:tabular-nums; color:var(--text);
-              font-weight:600; }
+              font-weight:600; min-width:34px; }
     .wl-spacer { flex:1; }
     .wl-inp {
       background:var(--raised); border:1px solid var(--border);
@@ -44,7 +38,7 @@
     .wl-btn:hover { color:var(--text); }
     .wl-btn.on { border-color:var(--accent); color:var(--accent); }
     .wl-btn:disabled { opacity:0.4; cursor:default; }
-    input[type=range] { accent-color:var(--accent); width:120px; }
+    input[type=range] { accent-color:var(--accent); width:140px; }
 
     .wl-warn {
       background:rgba(232,67,147,0.14); border:1px solid #e84393;
@@ -53,56 +47,53 @@
     }
     .wl-note { font-size:10px; color:var(--muted); }
 
-    /* ── the wall ──────────────────────────────────────────────────────
-       auto-fill rather than a fixed column count: the same list is read on a
-       laptop and on a 32-inch monitor, and the pane width is the control that
-       decides how many fit. */
+    /* ── the list ──────────────────────────────────────────────────────
+       MULTI-COLUMN, NOT GRID. Names run DOWN a column and then on to the
+       next, the way the DAS watchlist reads; a grid fills across rows.
+       column-width is a minimum, so a column is ~250px or a little more and
+       the count follows the screen. NO height on .wl-list: the browser
+       balances the columns, so 300 names spread over every column there is
+       instead of filling the first one to the bottom. */
     .wl-scroll {
       flex:1; min-height:0; overflow:auto;
       background:var(--surface); border:1px solid var(--border);
-      border-radius:6px; padding:8px;
+      border-radius:6px; padding:6px 8px;
     }
-    .wl-grid { display:grid; gap:8px; }
-
-    .wl-pane {
-      background:var(--raised); border:1px solid var(--border);
-      border-radius:5px; padding:4px 5px 5px; cursor:pointer;
-      display:flex; flex-direction:column; min-width:0;
+    .wl-list { column-width:250px; column-gap:18px;
+               column-rule:1px solid var(--border); }
+    .wl-row {
+      break-inside:avoid; display:grid;
+      grid-template-columns:62px 1fr 40px; column-gap:8px; align-items:center;
+      height:16px; line-height:16px; padding:0 4px; border-radius:2px;
+      font-family:ui-monospace, Consolas, "Courier New", monospace;
+      font-size:12px; font-variant-numeric:tabular-nums; cursor:pointer;
+      user-select:none;
     }
-    .wl-pane.sel { border-color:var(--accent); }
-    /* BELOW THE SPREAD FLOOR. Faded, in place, still drawing: the pane is
-       still subscribed and still accumulating, and removing it would both
-       reflow the grid and throw away the history the name needs when it
-       widens again. The transition is slower than the redraw so a fade reads
-       as a change of state rather than as a dropped frame. */
-    .wl-pane.dim { opacity:0.30; transition:opacity 600ms ease; }
-    .wl-pane { transition:opacity 250ms ease; }
-    .wl-head {
-      display:flex; align-items:baseline; gap:6px; margin-bottom:3px;
-      font-size:10px; line-height:1;
-    }
-    .wl-sym { color:var(--text); font-weight:700; letter-spacing:0.3px;
-              font-size:11px; }
-    .wl-px { color:var(--muted); font-variant-numeric:tabular-nums; }
-    /* THE SPREAD IS THE NUMBER ON THIS PAGE. Every pane is scaled so its
-       spread fills the same share of the height, which is the whole point --
-       and which means the picture alone cannot tell 7 cents from 50. */
-    .wl-sp { margin-left:auto; color:var(--accent); font-weight:700;
-             font-variant-numeric:tabular-nums; }
-    .wl-sp.est { color:var(--muted); font-weight:500; }
-    .wl-canvas { width:100%; display:block; }
+    .wl-row:hover { background:rgba(255,255,255,0.05); }
+    .wl-tk { color:var(--text); font-weight:700; overflow:hidden; }
+    .wl-track { height:8px; background:rgba(255,255,255,0.05);
+                border-radius:2px; overflow:hidden; }
+    .wl-fill { display:block; height:100%; border-radius:2px;
+               background:var(--dim); }
+    .wl-cents { text-align:right; color:var(--text); }
+    /* The bar colours are the TAPE's blue and pink (tape_theme.js, set as
+       --wl-mid / --wl-wide in init), not copies of them. */
+    .wl-row.mid  .wl-fill { background:var(--wl-mid); }
+    .wl-row.wide .wl-fill { background:var(--wl-wide); }
+    /* BELOW THE FLOOR: dimmed in place. A marked row is never dimmed. */
+    .wl-row.below:not(.marked), .wl-row.none:not(.marked) { opacity:0.3; }
+    .wl-row.marked { background:rgba(46,204,113,0.22); }
+    .wl-row.marked .wl-tk { color:var(--success); }
+    .wl-row.gone { display:none; }
     .wl-empty { padding:26px; text-align:center; color:var(--muted);
                 font-size:12px; }
-    /* The pager: one button per hundred, labelled by the RANGE it shows, so
-       "which page is LLY on" is answered by its position in the list. */
-    .wl-pager .wl-btn { font-variant-numeric:tabular-nums; padding:3px 8px; }
   </style>
 </head>
 {#- NO `x-init="init()"` HERE. Alpine 3 calls a data object's own init()
     automatically, so naming it again in x-init runs it TWICE — which on this
-    page meant two WebSockets and two draw loops per tab, on a service that
-    caps browser connections. Caught by rendering the page and counting the
-    sockets; no gate that reads source could see it. -#}
+    page meant two WebSockets per tab, on a service that caps browser
+    connections. Caught by rendering the page and counting the sockets; no
+    gate that reads source could see it. -#}
 <body class="page" x-data="equitiesWall">
   {% set nav_active = "/wall" %}{% include "_nav.html" %}
 
@@ -112,7 +103,6 @@
       <div class="wl-warn" x-text="warning"></div>
     </template>
 
-    <!-- ── the watchlist ────────────────────────────────────────────── -->
     <div class="wl-bar">
       <span class="wl-lab">add</span>
       <input class="wl-inp sym" placeholder="FDX"
@@ -122,19 +112,29 @@
       <span class="wl-note"
             x-text="entries.length + ' of ' + caps.symbols + ' held · saved on the server'"></span>
 
-      <!-- PAGES: every symbol streams; only the page showing is drawn. -->
-      <template x-if="pageCount() > 1">
-        <div class="wl-pager wl-grp sep">
-          <button class="wl-btn" @click="setPage(page - 1)" :disabled="page === 0"
-                  title="Previous page">&lsaquo;</button>
-          <template x-for="i in pageCount()" :key="'pg' + i">
-            <button class="wl-btn" :class="page === i - 1 ? 'on' : ''"
-                    @click="setPage(i - 1)" x-text="pageLabel(i - 1)"></button>
-          </template>
-          <button class="wl-btn" @click="setPage(page + 1)"
-                  :disabled="page >= pageCount() - 1" title="Next page">&rsaquo;</button>
-        </div>
-      </template>
+      <!-- THE TWO THRESHOLDS. The ranges equal the server's clamps
+           (WALL_FLOOR_* / WALL_WIDE_* in live/config.py); check_wall holds
+           them equal, or a value outside the clamp snaps back on save. -->
+      <div class="wl-grp sep">
+        <span class="wl-lab">floor</span>
+        <input type="range" min="10" max="120" step="1"
+               x-model.number="settings.min_spread_cents" @input="saveSoon()">
+        <span class="wl-num" x-text="cents(settings.min_spread_cents)"></span>
+      </div>
+      <div class="wl-grp sep">
+        <span class="wl-lab">wide</span>
+        <input type="range" min="40" max="300" step="5"
+               x-model.number="settings.wide_cents" @input="saveSoon()">
+        <span class="wl-num" x-text="cents(settings.wide_cents)"></span>
+      </div>
+      <label class="wl-grp sep wl-lab">
+        <input type="checkbox" x-model="hideBelow"> hide below floor
+      </label>
+      <div class="wl-grp sep">
+        <button class="wl-btn wl-sort" :class="widest ? 'on' : ''" @click="toggleSort()"
+                x-text="widest ? 'widest first' : 'A → Z'"
+                title="Alphabetical, or widest spread first (re-sorted every 2 s)"></button>
+      </div>
 
       <span class="wl-spacer"></span>
       <span class="wl-note" x-text="connSummary()"></span>
@@ -144,94 +144,24 @@
       <div class="wl-bar">
         <textarea class="wl-inp" rows="3" style="flex:1;min-width:320px"
                   x-model="manualText"
-                  placeholder="FDX LLY NVDA — space, comma or newline separated. Replaces the list; per-symbol scales are kept."></textarea>
+                  placeholder="FDX LLY NVDA — space, comma or newline separated. Replaces the list."></textarea>
         <button class="wl-btn" @click="applyManual()" :disabled="busy">Apply</button>
         <button class="wl-btn" @click="fillManualFromHeld()">Load current</button>
       </div>
     </template>
 
-    <!-- ── how the panes are drawn ──────────────────────────────────── -->
-    <div class="wl-bar">
-      <!-- THE SPREAD SHARE FIRST, because it is what makes two names
-           comparable: a half-spread move looks the same on FDX and on LLY
-           only because both spreads fill the same share of their pane. -->
-      <div class="wl-grp">
-        <span class="wl-lab">spread fills</span>
-        <input type="range" min="0.15" max="0.90" step="0.05"
-               x-model.number="settings.spread_share" @input="onShare()">
-        <span class="wl-num" x-text="sharePct()"></span>
-        <span class="wl-lab">of the pane</span>
-      </div>
-
-      <!-- THE SPREAD FLOOR FADES, IT DOES NOT REMOVE. Every name keeps
-           streaming and keeps its place in the grid; panes reflowing as names
-           cross the line would be harder to read than the fade. It reads the
-           median of the last minute and holds for ten seconds before dimming,
-           so a name on the boundary does not strobe. -->
-      <div class="wl-grp sep">
-        <span class="wl-lab">spread &ge;</span>
-        <!-- 0-300c at 0.5c steps; twice the usual width so a pixel is
-             still ~1c of floor. The max is the server's clamp
-             (WALL_MAX_SPREAD_FILTER) -- check_wall holds them equal. -->
-        <input type="range" min="0" max="300" step="0.5" style="width:240px"
-               x-model.number="settings.min_spread_cents"
-               @input="onSpreadFilter()">
-        <span class="wl-num" x-text="spreadFloorLabel()"></span>
-      </div>
-
-      <div class="wl-grp sep">
-        <span class="wl-lab">window</span>
-        <input type="range" min="20" max="180" step="10"
-               x-model.number="settings.window_s" @input="onWindow()">
-        <span class="wl-num" x-text="settings.window_s + 's'"></span>
-      </div>
-
-      <div class="wl-grp sep">
-        <span class="wl-lab">pane width</span>
-        <input type="range" min="120" max="420" step="20"
-               x-model.number="paneWidth" @input="onPaneWidth()">
-        <span class="wl-num" x-text="paneWidth + 'px'"></span>
-      </div>
-
-      <!-- THE PER-PANE OVERRIDE lives here rather than on every pane: a
-           hundred panes each carrying a slider is a hundred controls on a
-           page whose whole job is to be looked at. Click a pane, set it,
-           and it is saved next to that ticker. -->
-      <template x-if="selected">
-        <div class="wl-grp sep">
-          <span class="wl-lab">scale for</span>
-          <span class="wl-num" x-text="selected"></span>
-          <input type="range" min="0.15" max="0.90" step="0.05"
-                 :value="overrideOf(selected)"
-                 @input="setOverride($event.target.value)">
-          <span class="wl-num"
-                x-text="Math.round(overrideOf(selected) * 100) + '%'"></span>
-          <button class="wl-btn" @click="clearOverride()"
-                  :disabled="!hasOverride(selected)">Use default</button>
-          <button class="wl-btn" @click="remove(selected)">Remove</button>
-        </div>
-      </template>
-    </div>
-
     <div class="wl-scroll">
       <template x-if="!entries.length">
         <div class="wl-empty" x-text="emptyMessage()"></div>
       </template>
-      <div class="wl-grid" x-ref="grid" :style="gridStyle()">
-        <template x-for="e in pageEntries()" :key="e.symbol">
-          <div class="wl-pane"
-               :class="(selected === e.symbol ? 'sel ' : '')
-                       + (headOf(e.symbol).dim ? 'dim' : '')"
-               :data-sym="e.symbol" :title="paneTitle(e.symbol)"
-               @click="select(e.symbol)">
-            <div class="wl-head">
-              <span class="wl-sym" x-text="e.symbol"></span>
-              <span class="wl-px" x-text="headOf(e.symbol).px"></span>
-              <span class="wl-sp" :class="headOf(e.symbol).from === 'spread' ? '' : 'est'"
-                    x-text="headOf(e.symbol).sp"></span>
-            </div>
-            <canvas class="wl-canvas"
-                    :style="'height:' + Math.round(paneWidth * 0.62) + 'px'"></canvas>
+      <!-- Click a row to mark it green; click it again to clear. -->
+      <div class="wl-list" x-ref="list">
+        <template x-for="sym in order" :key="sym">
+          <div class="wl-row" :class="rowClass(sym)" :data-sym="sym"
+               @click="toggleMark(sym)">
+            <span class="wl-tk" x-text="sym"></span>
+            <span class="wl-track"><span class="wl-fill" :style="barStyle(sym)"></span></span>
+            <span class="wl-cents" x-text="spText(sym)"></span>
           </div>
         </template>
       </div>
@@ -242,7 +172,7 @@
       the head, so a deferred bundle here would register its component after
       `alpine:init` has already fired and every expression on the page would
       throw. Gated in check_rendered_assets.py. -#}
-  {#- The same tape colours Equities Live draws with. Before the bundle and
+  {#- The tape's blue and pink, which the bars use. Before the bundle and
       not deferred, for the same reason. -#}
   <script src={{ asset('js/tape_theme.js') }}></script>
   <script src={{ asset('js/equities_wall.js') }}></script>

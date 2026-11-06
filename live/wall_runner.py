@@ -1,23 +1,15 @@
-"""The wall's clock and fan-out: one frame a second, per socket.
+"""The wall's clock and fan-out: four frames a second, one socket a page.
 
-ONE FRAME A SECOND, AND ONE SOCKET A PAGE. Both are requirements rather than
-tuning. The service caps browser connections at MAX_CLIENTS, and a wall of a
-hundred panes each holding its own would exceed that twelve times over, so the
-page opens one connection and this pushes every pane's data down it. A hundred
-panes redrawn at 30fps is a page that melts a laptop to show tape a person
-reads in glances; a second is the cadence the eye needs to answer "is this one
-moving", and pushing faster would only queue frames the browser discards.
+ONE SOCKET A PAGE. The service caps browser connections at MAX_CLIENTS, so
+the page opens one connection and this pushes every row down it.
 
-WHAT GOES DOWN THE WIRE IS A DELTA, per socket, per symbol. A cursor is a
-COUNT of records the socket has been sent, not a timestamp: a busy name prints
-several trades inside one millisecond, and "everything after t" would drop all
-but the first of them -- silently, and only on the names that print fastest,
-which are the ones being watched.
+WHAT GOES DOWN THE WIRE IS A DELTA, per socket: the symbols whose spread, in
+cents, differs from what THAT socket was last sent. A quote that moves the
+bid and the ask together changes nothing on the page and is not sent. A new
+socket is sent every symbol once, a null for one that has not quoted yet.
 
-A SYMBOL WITH NOTHING NEW IS NOT SENT. That is most of the wall most of the
-time, and it is also what lets the page skip redrawing that pane: no data, no
-work. The frame still goes out every tick, empty if it has to, because a page
-that cannot tell "quiet" from "the feed stopped" is the failure this whole
+THE FRAME STILL GOES OUT EVERY TICK, empty if it has to, because a page that
+cannot tell "nothing changed" from "the feed stopped" is the failure this
 project keeps designing out.
 """
 from __future__ import annotations
@@ -32,17 +24,7 @@ from live.wall_store import WallStore
 log = logging.getLogger("live.wall_runner")
 
 
-def _num(v, places):
-    """Round for the wire, and turn NaN into null rather than 'NaN'."""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if f != f:
-        return None
-    return round(f, places)
+_UNSENT = object()
 
 
 class WallRunner:
@@ -55,8 +37,7 @@ class WallRunner:
         self.frames = 0
         self.last_at: float | None = None
         self._stop = False
-        # socket -> {"cursors": {sym: [trades_sent, quotes_sent, last_q_ms]},
-        #            "window_s": float}
+        # socket -> {"sent": {sym: the spread last sent to it}}
         self._subs: dict = {}
 
     # ── the watchlist ───────────────────────────────────────────────────
@@ -89,7 +70,7 @@ class WallRunner:
         self.store.save()
         for st in self._subs.values():
             for sym in dropped:
-                st["cursors"].pop(sym, None)
+                st["sent"].pop(sym, None)
         await self.broadcast({"ev": "watchlist", **self.state()})
         return {"added": added, "dropped": dropped, "refused": refused,
                 **self.state()}
@@ -98,11 +79,12 @@ class WallRunner:
         st = self.store.state()
         st["held"] = sorted(self.hub.wall)
         st["caps"] = {"symbols": config.WALL_MAX_SYMBOLS,
-                      "per_page": config.WALL_PER_PAGE,
-                      "retain_s": config.WALL_RETAIN_S,
-                      "share_min": config.WALL_SHARE_MIN,
-                      "share_max": config.WALL_SHARE_MAX,
-                      "tick_s": config.WALL_TICK_S}
+                      "tick_s": config.WALL_TICK_S,
+                      "floor_min": config.WALL_FLOOR_MIN,
+                      "floor_max": config.WALL_FLOOR_MAX,
+                      "wide_min": config.WALL_WIDE_MIN,
+                      "wide_max": config.WALL_WIDE_MAX,
+                      "wide_step": config.WALL_WIDE_STEP}
         return st
 
     # ── the loop ────────────────────────────────────────────────────────
@@ -136,75 +118,33 @@ class WallRunner:
             self._subs.pop(d, None)
 
     def frame(self, st: dict, now: float | None = None) -> dict:
-        """One socket's delta, and the cursor advance that goes with it.
+        """One socket's delta: {sym: spread in cents, or null}.
 
-        The cursor is advanced HERE, as the frame is built, from the counts
-        the records were read at -- not from what the socket acknowledges.
-        There is no acknowledgement to wait for, and a cursor advanced on a
-        later read would re-send whatever arrived in between.
+        `sent` is advanced HERE, as the frame is built. There is no
+        acknowledgement to wait for, and advancing it later would drop
+        whatever changed in between.
         """
         now = time.time() if now is None else now
-        now_ms = now * 1000.0
-        window_s = float(st.get("window_s") or config.WALL_WINDOW_S)
-        cutoff = now_ms - window_s * 1000.0
-        spread_ms = config.WALL_SPREAD_WINDOW_S * 1000.0
-        cursors = st["cursors"]
+        sent = st["sent"]
         out = {}
         for sym, w in list(self.hub.wall.items()):
-            cur = cursors.get(sym)
-            fresh = cur is None
-            if fresh:
-                # Everything in the window, plus the band's state at its left
-                # edge -- see WallSym.quote_at for why that one is needed.
-                cur = [0, 0, 0.0]
-            trades = w.new_trades(cur[0], cutoff)
-            quotes = w.new_quotes(cur[1], cutoff)
-            last_q = w.last_quote[0] if w.last_quote else 0.0
-            cursors[sym] = [w.trades_seen, w.quotes_seen, last_q]
-            if not fresh and not trades and not quotes and last_q == cur[2]:
-                # NOTHING NEW. Not sent, which is what lets the page leave
-                # that pane alone for a second.
+            sp = w.spread_cents()
+            if sent.get(sym, _UNSENT) == sp:
                 continue
-            sp, tp, mid = w.spreads(now_ms, spread_ms)
-            cell = {"t": [[round(r[0]), _num(r[1], 4), _num(r[2], 0)]
-                          for r in trades],
-                    "q": [[round(r[0]), _num(r[1], 4), _num(r[2], 4)]
-                          for r in quotes],
-                    "sp": _num(sp, 2), "tp": _num(tp, 2), "mid": _num(mid, 4)}
-            if fresh:
-                cell["full"] = True
-                q0 = w.quote_at(cutoff)
-                if q0:
-                    cell["q0"] = [round(q0[0]), _num(q0[1], 4),
-                                  _num(q0[2], 4)]
-            out[sym] = cell
-        for sym in [s for s in cursors if s not in self.hub.wall]:
-            cursors.pop(sym, None)
-        return {"ev": "tick", "at": now, "window_s": window_s, "syms": out}
+            sent[sym] = sp
+            out[sym] = sp
+        for sym in [s for s in sent if s not in self.hub.wall]:
+            sent.pop(sym, None)
+        return {"ev": "tick", "at": now, "syms": out}
 
     # ── fan-out ─────────────────────────────────────────────────────────
-    def subscribe(self, ws, window_s: float | None = None) -> dict:
-        st = {"cursors": {},
-              "window_s": float(window_s or config.WALL_WINDOW_S)}
+    def subscribe(self, ws) -> dict:
+        st = {"sent": {}}
         self._subs[ws] = st
         return st
 
     def unsubscribe(self, ws) -> None:
         self._subs.pop(ws, None)
-
-    def set_window(self, ws, window_s: float) -> None:
-        """A change of window re-sends everything, deliberately.
-
-        Clearing the cursors is what fills the new axis: widening it from one
-        minute to three otherwise leaves the two extra minutes blank until
-        they happen, which looks exactly like a symbol that stopped trading.
-        """
-        st = self._subs.get(ws)
-        if st is None:
-            return
-        from live.wall_store import clean_window
-        st["window_s"] = clean_window(window_s, st["window_s"])
-        st["cursors"].clear()
 
     async def broadcast(self, payload: dict) -> None:
         dead = []

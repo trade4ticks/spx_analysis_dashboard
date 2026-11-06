@@ -1,6 +1,6 @@
 """The wall's watchlist, kept across a restart.
 
-WHY IT IS SERVER-SIDE. The list is the page -- a hundred names chosen over
+WHY IT IS SERVER-SIDE. The list is the page -- a few hundred names chosen over
 weeks -- and local storage loses it to a cleared browser, a second machine, or
 the other monitor. spx-live also restarts on every deploy, several times a
 day; a watchlist that came back empty would have to be rebuilt by hand each
@@ -11,10 +11,9 @@ edits a list and read once at startup, by one process, with no query beyond
 "give me the list". A table, a pool and a migration for that is machinery
 bought for nothing. The scan's history made the same call for 6.6 MB a day.
 
-WHAT AN ENTRY CARRIES. The ticker and its SCALE OVERRIDE, together, because
-the override is a fact about that symbol on this wall -- "LLY needs more room
-than the default" -- and storing it anywhere else is a second list to keep in
-step with the first. An entry with no override uses the page's share.
+WHAT AN ENTRY CARRIES. The ticker, plus the per-pane scale override from
+when the wall drew tapes -- carried, unused, so it is not lost (see
+clean_scale). The settings are the two spread thresholds, floor and wide.
 
 WRITTEN WHOLE, VIA A TEMPORARY FILE AND A RENAME. A partial write is a
 watchlist that loads as a syntax error, and the replacement for that is not a
@@ -39,54 +38,53 @@ def clean_symbol(s) -> str:
     return (s or "").strip().upper()
 
 
-def clean_share(v, default=None):
-    """A share of pane height, or None to follow the page's setting.
+def clean_scale(v):
+    """An entry's old per-pane scale override, carried and never used.
 
-    Clamped rather than refused: the bound is a drawing limit (a spread that
-    fills 99% of the pane leaves nowhere for the trades to be), and a stored
-    list that refuses to load because one number is out of range would cost
-    the whole watchlist.
+    The panes are gone (2026-11-06) and nothing reads it; it is kept on the
+    entry rather than dropped so the first save after the change does not
+    throw away settings someone chose by hand. Not range-checked: nothing
+    draws with it.
     """
-    if v is None or v == "":
-        return default
     try:
         f = float(v)
     except (TypeError, ValueError):
-        return default
-    if f != f:                                            # NaN
-        return default
-    return min(config.WALL_SHARE_MAX, max(config.WALL_SHARE_MIN, f))
+        return None
+    return None if f != f else f
 
 
-def clean_spread_floor(v, default=None):
-    """A minimum spread in cents, or 0 for no filter.
+def _cents(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
 
-    Clamped rather than refused, like the share: it is a DRAWING threshold,
-    and a watchlist that refuses to load because one number is out of range
-    costs the whole list.
+
+def clean_floor(v, default=None):
+    """The floor in cents, clamped to WALL_FLOOR_MIN..MAX.
+
+    0 OR LESS READS AS THE DEFAULT, not as the minimum. Before the list, 0
+    meant "no floor" and was the saved default; the floor can no longer be
+    off, and the value that answers that file is the new default (59c), not
+    the slider's bottom (10c). Clamped rather than refused: a stored list
+    that will not load because of one number costs the whole watchlist.
     """
-    default = config.WALL_MIN_SPREAD_CENTS if default is None else default
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
+    default = config.WALL_FLOOR_CENTS if default is None else default
+    f = _cents(v)
+    if f is None or f <= 0:
         return default
-    if f != f:
-        return default
-    return min(config.WALL_MAX_SPREAD_FILTER, max(0.0, f))
+    return min(config.WALL_FLOOR_MAX, max(config.WALL_FLOOR_MIN, f))
 
 
-def clean_window(v, default=None):
-    default = config.WALL_WINDOW_S if default is None else default
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
+def clean_wide(v, default=None):
+    """The wide threshold in cents: WALL_WIDE_MIN..MAX on WALL_WIDE_STEP."""
+    default = config.WALL_WIDE_CENTS if default is None else default
+    f = _cents(v)
+    if f is None or f <= 0:
         return default
-    if f != f or f <= 0:
-        return default
-    # The store keeps WALL_RETAIN_S of tape; a window longer than that would
-    # draw an axis the buffer cannot fill, which is the "buffering 55s of
-    # 180s" complaint the pin set was invented to answer.
-    return min(config.WALL_RETAIN_S, max(10.0, f))
+    f = round(f / config.WALL_WIDE_STEP) * config.WALL_WIDE_STEP
+    return min(config.WALL_WIDE_MAX, max(config.WALL_WIDE_MIN, f))
 
 
 class WallStore:
@@ -95,15 +93,11 @@ class WallStore:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path or config.WALL_STORE_PATH)
         self.entries: list[dict] = []
+        # PRESENTATION ONLY, both: nothing downstream of either reaches the
+        # hub. Saved with the list so they survive a refresh and a restart.
         self.settings: dict = {
-            "window_s": config.WALL_WINDOW_S,
-            "spread_share": config.WALL_SPREAD_SHARE,
-            # PRESENTATION ONLY. It is kept beside the other two because it is
-            # the same kind of thing -- how the wall is drawn, saved with the
-            # list so it survives a refresh and a restart -- but unlike them
-            # nothing downstream of it reaches the hub: see the note on
-            # WALL_MIN_SPREAD_CENTS.
-            "min_spread_cents": config.WALL_MIN_SPREAD_CENTS,
+            "min_spread_cents": config.WALL_FLOOR_CENTS,
+            "wide_cents": config.WALL_WIDE_CENTS,
         }
         self.updated: float | None = None
         self.loaded_from: str | None = None
@@ -143,11 +137,8 @@ class WallStore:
             self.entries = self._clean_entries(entries)[0]
             st = raw.get("settings") or {}
             self.settings = {
-                "window_s": clean_window(st.get("window_s")),
-                "spread_share": clean_share(st.get("spread_share"),
-                                            config.WALL_SPREAD_SHARE),
-                "min_spread_cents": clean_spread_floor(
-                    st.get("min_spread_cents")),
+                "min_spread_cents": clean_floor(st.get("min_spread_cents")),
+                "wide_cents": clean_wide(st.get("wide_cents")),
             }
             self.updated = raw.get("updated")
             self.loaded_from = str(self.path)
@@ -178,7 +169,7 @@ class WallStore:
                                f"{config.WALL_MAX_SYMBOLS}-symbol wall cap.")
                 continue
             seen.add(sym)
-            out.append({"symbol": sym, "scale": clean_share(e.get("scale"))})
+            out.append({"symbol": sym, "scale": clean_scale(e.get("scale"))})
         return out, refused
 
     def set(self, entries, settings=None) -> list[str]:
@@ -190,16 +181,13 @@ class WallStore:
         """
         self.entries, refused = self._clean_entries(entries)
         if settings:
-            if "window_s" in settings:
-                self.settings["window_s"] = clean_window(
-                    settings.get("window_s"), self.settings["window_s"])
-            if "spread_share" in settings:
-                self.settings["spread_share"] = clean_share(
-                    settings.get("spread_share"), self.settings["spread_share"])
             if "min_spread_cents" in settings:
-                self.settings["min_spread_cents"] = clean_spread_floor(
+                self.settings["min_spread_cents"] = clean_floor(
                     settings.get("min_spread_cents"),
                     self.settings["min_spread_cents"])
+            if "wide_cents" in settings:
+                self.settings["wide_cents"] = clean_wide(
+                    settings.get("wide_cents"), self.settings["wide_cents"])
         self.updated = time.time()
         return refused
 

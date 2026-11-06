@@ -1074,9 +1074,11 @@ async def case_scan_release_spares_other_tiers():
         r.unsubscribe(page)
         await asyncio.sleep(0.15)
         unsub = ",".join(ws.params("unsubscribe"))
-        check("FDX" not in unsub and "LLY" not in unsub,
-              f"releasing the scan unsubscribed a symbol a pane or the wall "
-              f"still draws: {unsub!r}")
+        # The wall holds LLY on QUOTES ONLY, so the scan letting it go drops
+        # LLY's trade channel and must leave its quote channel alone.
+        check("FDX" not in unsub and "Q.LLY" not in unsub and "T.LLY" in unsub,
+              f"releasing the scan took a channel a pane or the wall still "
+              f"reads, or kept one nobody does: {unsub!r}")
         check("T.AAPL" in unsub,
               f"the scan's own symbol was not released: {unsub!r}")
         await r.stop()
@@ -1101,9 +1103,9 @@ async def case_tier_counters():
     t = h.status()["tier_in"]
     check(t["scan"] == {"trades": 1, "quotes": 1},
           f"scan counted {t['scan']}")
-    check(t["wall"] == {"trades": 2, "quotes": 3},
-          f"wall counted {t['wall']} -- quotes must be counted on ARRIVAL, "
-          f"before the 200 ms sampling throws two of LLY's away")
+    check(t["wall"] == {"trades": 0, "quotes": 3},
+          f"wall counted {t['wall']} -- quotes only, every one counted; a "
+          f"trade for a wall symbol arrives for another tier, not the wall")
     check(t["pane"] == {"trades": 1, "quotes": 0},
           f"pane counted {t['pane']}")
 

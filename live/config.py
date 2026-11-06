@@ -233,75 +233,39 @@ SCAN_ROLLUP_SLICE_MS = float(os.environ.get("LIVE_SCAN_ROLLUP_SLICE_MS", "8"))
 # A THIRD TIER ON THE SAME UPSTREAM SOCKET, for the same reason the scan is
 # one: the account permits exactly one, and a second evicts the first.
 #
-# What it holds is small and short. Trades and a SAMPLED quote for two
-# minutes, against the scan's six minutes of trades and the pane's fifteen of
-# everything.
+# A ROTATION LIST (2026-11-06): one row per symbol, ticker | spread bar |
+# spread in cents, every symbol on one page. It used to be a grid of small
+# tapes, 100 to a page; the prints went unread, so the tier now subscribes
+# QUOTES ONLY (Hub._wants) and keeps one record a symbol, the last quote.
 #
-# 300, raised from 120 (2026-11-06), shown WALL_PER_PAGE at a time. Every
-# symbol stays subscribed and every page keeps receiving all of them, so a
-# page flip draws panes whose two minutes are already full. Measured offline
-# with scripts/measure_wall_capacity.py at the scan's measured upper-bound
-# rate (3,850 trades + ~8,100 quotes a second, as if the list were the 300
-# busiest names): ~30 ms of ingest and ~25 ms of frame-building per second
-# here, ~18 MB of buffers. The scan already held 430-600 symbols of both
-# channels on this socket in its capacity runs, so 300 is inside a load
-# this connection has carried.
+# 300 symbols. The previous measurement (scripts/measure_wall_capacity.py)
+# held 300 symbols of trades AND quotes inside budget; without trades and
+# without the rings it is strictly less work.
 WALL_MAX_SYMBOLS = int(os.environ.get("LIVE_WALL_MAX_SYMBOLS", "300"))
 
-# Panes on screen at once. The page draws only these; the rest keep
-# streaming into the browser's buffers so a flip is instant.
-WALL_PER_PAGE = int(os.environ.get("LIVE_WALL_PER_PAGE", "100"))
+# FOUR FRAMES A SECOND, each carrying only the symbols whose spread (in
+# cents) changed since that socket's last frame. Every quote is ingested --
+# nothing is sampled -- so a row is at most 250 ms behind the market. Faster
+# buys nothing a person can read: a busy name requotes 50 times a second and
+# a number changing every 20 ms is flicker, not information. Building a frame
+# is one comparison per symbol (~0.1 ms at 300); the page updates only the
+# rows it is sent.
+WALL_TICK_S = float(os.environ.get("LIVE_WALL_TICK_S", "0.25"))
 
-# The tape each pane draws, plus a margin so the window is full at its left
-# edge rather than filling in from empty after a change of window.
-WALL_RETAIN_S = float(os.environ.get("LIVE_WALL_RETAIN_S", "180"))
-WALL_WINDOW_S = float(os.environ.get("LIVE_WALL_WINDOW_S", "120"))
-
-# Ring sizing, the same grow-on-demand arrangement the scan uses. 256 records
-# is two minutes at 2 trades/sec, which covers most of a watchlist outright;
-# 24,000 is two minutes at 200/sec, which is more than the busiest name prints
-# at the open.
-WALL_RING_START = int(os.environ.get("LIVE_WALL_RING_START", "256"))
-WALL_RING_MAX = int(os.environ.get("LIVE_WALL_RING_MAX", "24000"))
-
-# THE QUOTE IS SAMPLED -- see live/wall.py. 200 ms is a fifth of one redraw,
-# and it turns a busy name's 6,000 quotes a window into 600. The ring is
-# capped just above the window's worth so a stalled sampler cannot grow it.
-WALL_QUOTE_SAMPLE_MS = float(os.environ.get("LIVE_WALL_QUOTE_SAMPLE_MS", "200"))
-WALL_QUOTE_RING_MAX = int(os.environ.get("LIVE_WALL_QUOTE_RING_MAX", "1200"))
-
-# The lookback for the TYPICAL spread, which is what the vertical scale is
-# built from. A minute, so the scale moves when the spread moves and not when
-# one quote is wide -- the whole point of scaling to the spread is that the
-# pane does not jump while you are looking at it.
-WALL_SPREAD_WINDOW_S = float(os.environ.get("LIVE_WALL_SPREAD_WINDOW_S", "60"))
-
-# ONE FRAME A SECOND, not a flush every 100 ms. A hundred panes redrawn at
-# 30fps is a page that melts a laptop to show tape a person reads in glances;
-# the eye is looking for "is this one moving", which one frame a second
-# answers. It is also the cadence the page redraws at, so a faster push would
-# only queue work the browser throws away.
-WALL_TICK_S = float(os.environ.get("LIVE_WALL_TICK_S", "1.0"))
-
-# The share of a pane's height the spread fills, and what a pane may override
-# it to. The default is the page's, saved with the watchlist; see the wall
-# store for why the override lives next to the ticker.
-WALL_SPREAD_SHARE = float(os.environ.get("LIVE_WALL_SPREAD_SHARE", "0.60"))
-WALL_SHARE_MIN = 0.05
-WALL_SHARE_MAX = 0.95
-
-# The minimum spread a pane has to have to be shown at full strength. OFF by
-# default (0), and PRESENTATION ONLY: a symbol below it keeps streaming, keeps
-# accumulating its two minutes, and keeps its place in the grid -- it is drawn
-# faded. Nothing here touches a subscription, so a name dipping under the
-# threshold does not lose its history and have to rebuild when it comes back.
-WALL_MIN_SPREAD_CENTS = float(
-    os.environ.get("LIVE_WALL_MIN_SPREAD_CENTS", "0"))
-# The slider's top, in cents. $3 (2026-11-06, was the page's 50c over a
-# 100c clamp): names on $1-3 spreads are traded here, and a floor that stops
-# at 50c cannot separate them from the 50c names. The template's max must
-# equal this (check_wall), or a value above the clamp snaps back on save.
-WALL_MAX_SPREAD_FILTER = 300.0
+# THE TWO THRESHOLDS, in cents, saved with the list. PRESENTATION ONLY:
+# nothing downstream of either reaches the hub, so a name below the floor
+# keeps streaming and keeps its place.
+#   floor -- the minimum spread worth trading; below it a row is dimmed.
+#   wide  -- a second, higher tier, drawn in the ask colour; the bars are
+#            scaled to it, so moving it re-scales every bar.
+# The template's slider ranges must equal these (check_wall).
+WALL_FLOOR_CENTS = 59.0
+WALL_FLOOR_MIN = 10.0
+WALL_FLOOR_MAX = 120.0
+WALL_WIDE_CENTS = 120.0
+WALL_WIDE_MIN = 40.0
+WALL_WIDE_MAX = 300.0
+WALL_WIDE_STEP = 5.0
 
 # Where the watchlist is kept so a restart does not empty the wall. One small
 # JSON file, written whole -- see live/wall_store.py.

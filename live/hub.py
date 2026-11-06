@@ -34,31 +34,28 @@ from app.scalp_spread import SpreadAccum
 log = logging.getLogger("live.hub")
 
 
-def _channels(sym: str) -> str:
-    """The subscription params for one symbol. Both channels, for everything.
+# WHICH CHANNELS EACH TIER READS -- decided in one place, Hub._wants.
+#
+# A PANE and the SCAN take both. The scan used to take trades only, and the
+# saving was real (at 200 symbols quotes were 68% of all records, 2.4x the
+# message volume), but quoted spread is the metric the universe is screened
+# on and there is no source for a CURRENT bid-ask width other than the quote
+# channel. Measured price: ~3.1x the records, ingest busy ~6% -> ~19%, CPU
+# ~35% -> ~48% of one core at 430 symbols. Nothing saturates.
+#
+# THE WALL TAKES QUOTES ONLY (2026-11-06): it shows a spread and nothing
+# else. A wall-only symbol is subscribed `Q.`; a pane or the scan taking it
+# adds `T.` alone, and the last of them letting it go drops `T.` alone.
+#
+# One function builds the params for every path -- add, drop and reconnect --
+# because a literal in each is how a symbol comes back from a reconnect
+# missing a channel.
+CHANNELS = ("T", "Q")
 
-    THIS USED TO DEPEND ON WHO HELD THE SYMBOL, and the saving was real:
-    measured at 200 symbols, quotes were 68% of all records and 2.4x the
-    message volume, and a trades-only scan tier avoided all of it.
 
-    The scan now needs quotes, so that saving is gone -- deliberately, not by
-    accident. Quoted spread is the metric the universe is screened on and
-    there is no source for a CURRENT bid-ask width other than the quote
-    channel; a name on a 1-2 cent spread has nothing to capture however quiet
-    it is, and no amount of tuning the ratio removes it. The measured price is
-    ~3.1x the records, ingest busy from ~6% to ~19%, and CPU from ~35% to
-    ~48% of one core at 430 symbols. Nothing saturates.
-
-    What the tier still buys is the SHAPE: three float64 arrays per symbol
-    instead of a deque of dicts, six minutes of retention instead of fifteen,
-    and an accumulator for spread rather than a stored quote tape -- ~100 KB
-    across 430 symbols against ~42 MB.
-
-    Kept as a function, though it now takes no decision, because the same
-    answer is needed in two places and a literal in each is how a symbol comes
-    back from a reconnect missing a channel.
-    """
-    return f"T.{sym},Q.{sym}"
+def _params(sym: str, chans) -> str:
+    """Subscription params for one symbol's channels, always T before Q."""
+    return ",".join(f"{c}.{sym}" for c in CHANNELS if c in chans)
 
 
 class Hub:
@@ -98,13 +95,12 @@ class Hub:
         # aggregate, so what is kept is the duration-weighted sums per minute
         # -- ~240 bytes a symbol against ~42 MB for a quote tape at 430.
         self.spread: dict[str, SpreadAccum] = {}
-        # THE WALL TIER. symbol -> its short tape and sampled quote band.
+        # THE WALL TIER. symbol -> its current quote, and nothing else.
         #
         # A THIRD STORE for the same reason the scan is a second one: it wants
-        # a different shape of the same feed. Two minutes of trades AND a
-        # sampled quote, for a hundred symbols the wall draws as small
-        # pictures -- which the scan does not keep (no quote tape at all) and
-        # the pane cannot hold a hundred of. See live/wall.py.
+        # a different shape of the same feed -- here the smallest one, the
+        # live spread of up to 300 symbols, on the QUOTE channel only. See
+        # live/wall.py.
         self.wall: dict[str, WallSym] = {}
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
@@ -126,9 +122,8 @@ class Hub:
         # PER TIER, counted at arrival: {tier: [trades, quotes]}. A message for
         # a symbol two tiers hold counts under both, so these do not sum to
         # msgs_in -- they answer "what would this tier cost on its own", which
-        # is the question when deciding whether to keep it. The wall's quotes
-        # are counted BEFORE sampling: the arrival rate is the upstream cost,
-        # the sampled rate is only what it keeps.
+        # is the question when deciding whether to keep it. The wall's
+        # trades stay 0: it subscribes quotes only.
         self.tier_in: dict[str, list[int]] = {"pane": [0, 0], "scan": [0, 0],
                                               "wall": [0, 0]}
 
@@ -158,6 +153,46 @@ class Hub:
             out.append("wall")
         return out
 
+    def _wants(self, sym: str) -> frozenset:
+        """The channels this symbol needs, over every tier that holds it.
+
+        PER CHANNEL, because the tiers no longer want the same ones: a pane
+        and the scan take trades and quotes, the wall quotes only. Every add
+        and drop compares this before and after the change and sends the
+        difference, so a symbol is never left on a channel nobody reads and
+        never taken off one somebody does.
+        """
+        if sym in self.refs or sym in self.scan:
+            return frozenset(CHANNELS)
+        if sym in self.wall:
+            return frozenset(("Q",))
+        return frozenset()
+
+    def _diff(self, before: dict) -> tuple[list[str], list[str]]:
+        """What to subscribe and unsubscribe after a change.
+
+        `before` is {symbol: _wants(symbol)} taken BEFORE the change; call
+        this under the same lock, AFTER it, so the two readings bracket
+        exactly one change.
+        """
+        sub, unsub = [], []
+        for sym in sorted(before):
+            was, now = before[sym], self._wants(sym)
+            if now - was:
+                sub.append(_params(sym, now - was))
+            if was - now:
+                unsub.append(_params(sym, was - now))
+        return sub, unsub
+
+    async def _send_diff(self, diff: tuple[list[str], list[str]]) -> None:
+        """One message each way, not one per symbol."""
+        sub, unsub = diff
+        if sub:
+            await self._send({"action": "subscribe", "params": ",".join(sub)})
+        if unsub:
+            await self._send({"action": "unsubscribe",
+                              "params": ",".join(unsub)})
+
     async def acquire(self, symbol: str) -> str | None:
         """Reference a symbol. Returns an error string, or None on success."""
         sym = (symbol or "").strip().upper()
@@ -169,19 +204,16 @@ class Hub:
                 # nothing is indistinguishable from a quiet tape.
                 return (f"at the {config.MAX_SYMBOLS}-symbol cap "
                         f"({', '.join(sorted(self.refs))}); close a pane first.")
-            first = sym not in self.refs
-            held_elsewhere = bool(self.holders(sym, exclude="pane"))
+            before = {sym: self._wants(sym)}
             self.refs[sym] = self.refs.get(sym, 0) + 1
             self.trades.setdefault(sym, deque())
             self.quotes.setdefault(sym, deque())
-        # NOTHING TO SEND IF ANOTHER TIER ALREADY HOLDS IT. Every tier takes
-        # both channels, so a pane opening on a scan or wall symbol needs no
-        # upgrade -- the subscription it wants is already live. Re-sending
-        # would be harmless upstream but would make the release path below
-        # look wrong, and the two have to stay mirror images of each other.
-        if first and not held_elsewhere:
-            await self._send({"action": "subscribe",
-                              "params": _channels(sym)})
+            diff = self._diff(before)
+        # ONLY WHAT IS MISSING. A pane opening on a scan symbol sends nothing
+        # (both channels are live); on a wall-only symbol it sends `T.` alone,
+        # because the wall holds quotes only. The release path below is the
+        # mirror image, by construction: both are the same _diff.
+        await self._send_diff(diff)
         return None
 
     async def release(self, symbol: str) -> None:
@@ -191,19 +223,18 @@ class Hub:
             if n > 0:
                 self.refs[sym] = n
                 return
+            before = {sym: self._wants(sym)}
             self.refs.pop(sym, None)
             self.trades.pop(sym, None)
             self.quotes.pop(sym, None)
-            held_elsewhere = bool(self.holders(sym, exclude="pane"))
-        # THE SCAN KEEPS IT, WHOLE. Dropping any part of the subscription
-        # because the last PANE closed would blank a row in the grid -- and
-        # blank it silently, since a symbol that stops printing looks exactly
-        # like a symbol that has gone quiet, which is the one thing the page
-        # exists to tell apart. Now that the scan takes quotes too, that means
-        # sending nothing at all rather than dropping the quote channel.
-        if not held_elsewhere:
-            await self._send({"action": "unsubscribe",
-                              "params": _channels(sym)})
+            diff = self._diff(before)
+        # THE SCAN KEEPS IT, WHOLE, and the wall keeps its quotes. Dropping a
+        # channel another tier reads would blank a row -- silently, since a
+        # symbol that stops arriving looks exactly like one that has gone
+        # quiet, which is the one thing these pages exist to tell apart. The
+        # diff drops only what no remaining holder wants: nothing if the scan
+        # holds it, `T.` alone if only the wall does.
+        await self._send_diff(diff)
 
     # ── the scan tier ───────────────────────────────────────────────────
     async def scan_set(self, symbols) -> tuple[list[str], list[str], list[str]]:
@@ -241,6 +272,7 @@ class Hub:
             have = set(self.scan)
             add = [s for s in want if s not in have]
             drop = [s for s in have if s not in seen]
+            before = {s: self._wants(s) for s in add + drop}
             for s in add:
                 self.scan[s] = SymbolBuf(config.SCAN_RETAIN_S,
                                          config.SCAN_RING_START,
@@ -254,22 +286,15 @@ class Hub:
             for s in drop:
                 self.scan.pop(s, None)
                 self.spread.pop(s, None)
-            # A pane or the wall still holding a dropped symbol keeps it
-            # subscribed, so it must not be unsubscribed here.
-            drop_sub = [s for s in drop if not self.holders(s, exclude="scan")]
-            add_sub = [s for s in add if not self.holders(s, exclude="scan")]
+            # A pane still holding a dropped symbol keeps both channels, the
+            # wall keeps its quotes: the diff unsubscribes only what no
+            # remaining holder reads.
+            diff = self._diff(before)
 
         # One message each way, not one per symbol: 600 subscribe frames is a
         # burst the socket does not need to see, and the upstream answers each
         # with a status line.
-        if add_sub:
-            await self._send({"action": "subscribe",
-                              "params": ",".join(_channels(s)
-                                                 for s in add_sub)})
-        if drop_sub:
-            await self._send({"action": "unsubscribe",
-                              "params": ",".join(_channels(s)
-                                                 for s in drop_sub)})
+        await self._send_diff(diff)
         if add or drop:
             log.info("scan set: %d held (+%d, -%d), %d refused",
                      len(self.scan), len(add), len(drop), len(refused))
@@ -350,55 +375,33 @@ class Hub:
             have = set(self.wall)
             add = [s for s in want if s not in have]
             drop = [s for s in have if s not in seen]
+            before = {s: self._wants(s) for s in add + drop}
             for s in add:
-                self.wall[s] = WallSym(config.WALL_RETAIN_S,
-                                       config.WALL_RING_START,
-                                       config.WALL_RING_MAX,
-                                       config.WALL_QUOTE_RING_MAX,
-                                       config.WALL_QUOTE_SAMPLE_MS)
+                self.wall[s] = WallSym()
             for s in drop:
                 self.wall.pop(s, None)
-            drop_sub = [s for s in drop if not self.holders(s, exclude="wall")]
-            add_sub = [s for s in add if not self.holders(s, exclude="wall")]
+            # QUOTES ONLY: a wall-only symbol subscribes `Q.`; one a pane or
+            # the scan already holds sends nothing either way.
+            diff = self._diff(before)
 
-        # One message each way, not one per symbol.
-        if add_sub:
-            await self._send({"action": "subscribe",
-                              "params": ",".join(_channels(s)
-                                                 for s in add_sub)})
-        if drop_sub:
-            await self._send({"action": "unsubscribe",
-                              "params": ",".join(_channels(s)
-                                                 for s in drop_sub)})
+        await self._send_diff(diff)
         if add or drop:
             log.info("wall set: %d held (+%d, -%d), %d refused",
                      len(self.wall), len(add), len(drop), len(refused))
         return add, drop, refused
 
     def wall_status(self) -> dict:
-        """What the wall tier is holding, and what it is losing.
-
-        `truncated` is here for the same reason the scan reports it: a ring at
-        its ceiling still evicting inside the retention window is drawing a
-        SHORT tape, and a short tape on this page reads as a quiet symbol --
-        which is the one judgement the wall exists to support.
-        """
-        truncated = sorted(s for s, w in self.wall.items()
-                           if w.trades.evicted_live or w.quotes.evicted_live)
+        """What the wall tier is holding. Quotes only, one record a symbol."""
         return {
             "held": len(self.wall),
             "cap": config.WALL_MAX_SYMBOLS,
-            "retain_s": config.WALL_RETAIN_S,
-            "window_s": config.WALL_WINDOW_S,
-            "trades_held": sum(w.trades.n for w in self.wall.values()),
-            "quotes_held": sum(w.quotes.n for w in self.wall.values()),
-            "buffer_mb": sum(w.bytes_held()
-                             for w in self.wall.values()) / 1048576.0,
+            "channels": "Q",
+            "quotes_seen": sum(w.quotes_seen for w in self.wall.values()),
             "quoteless": sorted(s for s, w in self.wall.items()
                                 if w.last_quote is None)[:20],
+            "quoteless_count": sum(1 for w in self.wall.values()
+                                   if w.last_quote is None),
             "crossed": sum(w.crossed for w in self.wall.values()),
-            "truncated": truncated[:20],
-            "truncated_count": len(truncated),
         }
 
     # ── pins ────────────────────────────────────────────────────────────
@@ -498,8 +501,10 @@ class Hub:
                 # quiet, and the wall's hundred panes flat -- both of which
                 # read as a calm market rather than as a dead socket.
                 syms = sorted(set(self.refs) | set(self.scan) | set(self.wall))
+                # Each symbol on exactly the channels its holders read: the
+                # wall's own symbols come back on quotes only.
+                params = ",".join(_params(s, self._wants(s)) for s in syms)
             if syms:
-                params = ",".join(_channels(s) for s in syms)
                 await ws.send(json.dumps({"action": "subscribe",
                                           "params": params}))
             async for raw in ws:
@@ -529,20 +534,14 @@ class Hub:
                 # release races an in-flight frame) by neither, and the two
                 # stores must not be able to make each other's records
                 # disappear.
+                # The wall takes no trades (quotes only): a print for a wall
+                # symbol arrives only because a pane or the scan holds it.
                 buf = self.scan.get(sym)
-                wsym = self.wall.get(sym)
                 if buf is not None:
                     self.tier_in["scan"][0] += 1
-                if wsym is not None:
-                    self.tier_in["wall"][0] += 1
-                if buf is not None or wsym is not None:
                     ts, price, size = m.get("t"), m.get("p"), m.get("s")
                     if ts is not None and price is not None and size is not None:
-                        if buf is not None:
-                            buf.push(float(ts), float(price), float(size))
-                        if wsym is not None:
-                            wsym.push_trade(float(ts), float(price),
-                                            float(size))
+                        buf.push(float(ts), float(price), float(size))
                 if sym in self.trades:
                     rec = {"t": m.get("t"), "p": m.get("p"), "s": m.get("s"),
                            "x": m.get("x"), "z": m.get("z"),

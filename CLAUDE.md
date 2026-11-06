@@ -1405,147 +1405,73 @@ when the endpoint's 600-row `limit` cut the table short it asks again with
   `scalp_columns.DERIVED`. The monthly scope has no profile chart, so it has
   no $ vol/min.
 
-## Equities Wall (`/wall`, in progress — 2026-09-22)
+## Equities Wall (`/wall`) — a rotation list (2026-11-06)
 
-A page of dozens to ~100 small live tapes, so a whole watchlist can be
-scanned at a glance for which names are quiet and which have a usable
-spread. **It is for watching.** No ladder, no arming, no order entry,
-nothing that reaches a broker — gated (`check_wall.py` parses the wall's
-modules and its endpoints and refuses any reference to the broker).
+The whole watchlist (up to `WALL_MAX_SYMBOLS` 300) on ONE page, one row per
+symbol: **ticker | spread bar | spread in cents**, nothing else — no price,
+prints, volume, sparkline or stale-quote marker. It replaced the grid of
+small tapes (100 a page): the user sweeps the list alphabetically and works
+whatever clears a minimum spread, and nobody was reading the prints. **It is
+for watching** — no broker reference anywhere (gated).
 
-**No metric, no score, no colour-coding, no ranking.** The scan page's metric
-surfaced untradeable names; this page shows the picture and lets the eye
-decide.
+- **Columns flow DOWN, then across** — CSS multi-column (`column-width:250px`,
+  rows `break-inside:avoid`, 16 px, monospace, tabular numerals), read beside
+  the DAS watchlist. Never a CSS grid (fills across). No height on the list:
+  the browser balances the columns. At 2560 wide: 9 columns × 34 rows, 544 px
+  — fits full screen and maximised; a 1440 laptop scrolls (5 × 60).
+- **Two thresholds, presentation only**, saved with the list:
+  `min_spread_cents` = floor (10–120, default 59; a saved 0 — the old "off" —
+  reads as 59) and `wide_cents` (40–300 step 5, default 120). Below floor →
+  dimmed 0.3 IN PLACE (`--dim` bar); floor..wide → tape blue; ≥ wide → tape
+  pink (`TAPE_BLUE`/`TAPE_PINK` from `tape_theme.js`, set as CSS vars). Below
+  the floor wins when floor > wide. Bar length = spread / wide, full at wide.
+  The slider ranges must equal `WALL_FLOOR_*` / `WALL_WIDE_*` (check_wall).
+- **Colour is from the CURRENT spread**, no median and no dim hold (the tape
+  wall's 10-second hold went with it). Ask before adding smoothing back.
+- **Marks**: a click toggles green (`--success`); "made money today". Memory
+  only — no table, endpoint or browser storage (gated); a marked row is never
+  dimmed or hidden.
+- **Hide below floor**: off on load; drops dim rows (not marked ones), the
+  rest reflow. **Sort**: A→Z on load; widest first re-sorts every
+  `WL_RESORT_MS` (2 s), ties alphabetical, unquoted last — re-ordering on
+  every frame never holds still long enough to read.
+- **Removed**: pages and `WALL_PER_PAGE`, pane width, window, spread share,
+  the per-pane scale override and its controls, the tape rings and sampling.
+  An entry's old `scale` is CARRIED unused in the file (`clean_scale`) so the
+  first save does not discard it; `window_s`/`spread_share` are dropped.
 
-**Phases:** P1 server side (hub tier, watchlist store, endpoints, frames) —
-done; P2 the page and its canvas panes — done; P3 controls — done; P4
-capacity (the user's own measurement on the box) and docs.
+**QUOTES ONLY, per channel, on the shared socket.** `Hub._wants(sym)` is the
+one answer: pane or scan → T+Q, wall only → Q. Every add/drop (acquire,
+release, scan_set, wall_set) takes `_wants` before and after the change under
+the lock (`_diff`) and sends only the difference; reconnect subscribes each
+symbol on its own channels (`_params`). So a pane opening on a wall symbol
+sends `T.` alone and closing drops `T.` alone (Q stays for the wall); the scan
+likewise. Before this every tier took both channels and a pane on a wall
+symbol sent nothing. `tier_in["wall"]` trades stay 0.
 
-**The vertical scale is the point.** Each pane scales so the spread fills a
-fixed share of its height (default 60%, centred on the mid, adjustable, with
-a per-pane override saved next to the ticker). "Bouncy" is defined relative
-to the spread's own width, so a half-spread move looks the same on FDX (7c)
-and LLY (50c), and absolute spread width stops dominating the wall. The
-spread number in cents is what tells them apart.
+**Server**: `WallSym` holds the last two-sided quote only (crossed/one-sided
+dropped and counted); every quote taken, nothing sampled. `WallRunner` ticks
+every `WALL_TICK_S` 0.25 s; a frame is `{ev:"tick", at, syms:{sym: cents|null}}`
+with only the symbols whose spread (cents, 2 dp) differs from what THAT socket
+was last sent; a new socket gets all; the frame goes out even when empty. 250 ms
+because a busy name requotes ~50/s and faster is flicker; it is not a CPU
+limit. Measured (`measure_wall_capacity.py`, 300 symbols, ~8,100 quotes/s —
+the 300 busiest names): ingest ~18 ms/s, frames ~0.6 ms/s, ~2% of a core here,
+~4% on the VPS. Browser (`check_wall_ui`): a tick changing all 300 rows ~31 ms
+through Alpine's flush, a 40-row tick under 1 ms.
 
-**Decisions already made and gated:**
-- **A third tier on the one upstream socket.** The account permits exactly
-  one Polygon connection; a second evicts the first. `Hub.holders(sym,
-  exclude=tier)` is the single place that answers "does anyone else still
-  hold this", and every tier's add and drop goes through it — the failure it
-  prevents (an unsubscribe pulled out from under another tier) shows as a row
-  or pane that has gone QUIET, not blank, which is the one distinction these
-  pages exist to make.
-- **One browser connection for the whole page.** The service caps browsers at
-  `MAX_CLIENTS` (8); a hundred panes with a socket each is twelve times over.
-  `/wall/ws` carries every pane.
-- **One frame a second, and a symbol with nothing new is not sent** (which is
-  what lets the page skip that pane's redraw). The frame still goes out when
-  empty, or the page cannot tell a quiet market from a stopped feed.
-- **The cursor is a COUNT, not a timestamp.** Several trades share a
-  millisecond; a timestamp cursor drops all but the first, silently, on
-  exactly the names being watched.
-- **The quote is sampled at 200 ms for the band, but `last_quote` takes every
-  message** — the spread number is a fact about now. A crossed or one-sided
-  quote is dropped and counted (a zero bid would throw the pane's whole
-  scale). The typical spread is a **median over the last minute**, so one
-  wide quote cannot rescale a pane; with no samples in the window it falls
-  back to the last quote, because a quiet name's spread is old, not absent.
-- **The watchlist lives server-side** (`data/wall_watchlist.json`, written
-  whole through a temp file and a rename) and carries each entry's scale
-  override, because the override is a fact about that symbol on this wall.
-  `WallRunner.apply()` is the one path that sets the hub tier, the file and
-  every open page — two of the three would be wrong in a way nobody sees
-  until the next deploy.
+The watchlist is server-side (`data/wall_watchlist.json`, written whole via a
+temp file and rename); `WallRunner.apply()` is the one path that sets the hub
+tier, the file and every open page. One browser socket a page (`MAX_CLIENTS`
+8); `x-init="init()"` is NOT on the body (it would run init twice).
 
-**The page (P2/P3).** Canvas per pane, unlike the scan page's windowed DOM:
-what is drawn is a picture (a couple of hundred bubbles and a stepped band)
-rather than a row of cells, and there is nothing to hit-test. One
-`setInterval` at 1 Hz draws every pane; a pane is skipped when it is off
-screen (IntersectionObserver) or has nothing new, with a forced refresh every
-`WL_FORCE_REDRAW_MS` (5 s) so a quiet pane's bubbles cannot sit still while
-the window slides out from under them. Prices are drawn against the SERVER's
-clock (`at` minus local elapsed), not the browser's; a laptop a few seconds
-out would put every print off the pane.
-
-**A wall pane is a small Equities Live pane, and the colours are shared.**
-`static/js/tape_theme.js` holds them — blue bid, pink ask, neutral
-translucent prints with a rim on discs over 2px — and BOTH bundles read it
-(`equities_live.js` keeps its `LV_*` names but assigns them from `TAPE_*`).
-A colour written out twice is two pages that agree until one is edited, and
-the drift is invisible until they are open side by side, which is how this
-page is used. The shared file loads in its own non-deferred `<script>` BEFORE
-each bundle: the constants are top-level, so the wrong order is a
-ReferenceError and a blank trading page, and the gate checks the order,
-executes both bundles beside the file, and asserts the tape bundle FAILS
-without it. `check_live_axis` and `check_live_reconcile` prepend the same
-file in their node drivers. **No fill between the bid and the ask** — two
-lines and nothing between, as on the tape page; a shaded band made the wall
-read as something else at a glance across a hundred panes.
-
-**`x-init="init()"` IS A DOUBLE INITIALISATION.** Alpine 3 calls a data
-object's own `init()` automatically, so naming it in `x-init` as well runs it
-twice — on this page that was two WebSockets and two draw loops per tab,
-found by rendering the page in headless Edge and counting the sockets (2,
-then 1 after removing it), invisible to every source-reading gate. **Every
-other page in this app still does it** (14 templates, `ai_explorer`,
-`equities_live`, `equities_scan`, `oo_backtest`, … all pair `x-init="init()"`
-with a component that defines `init()`): each one double-fetches on load, and
-the tape page holds two of `MAX_CLIENTS`' eight slots per tab. Not changed
-here — it is a separate, wider fix.
-
-**The spread floor FADES, it does not filter** (`min_spread_cents`, saved
-with the list, 0 = off). A pane under the threshold is drawn at 0.30 opacity
-IN PLACE: every name keeps streaming and keeps accumulating, so a symbol that
-dips under and comes back has its two minutes intact instead of rebuilding,
-and nothing downstream of the control reaches the hub (gated: setting it adds
-and drops nothing and sends nothing upstream). Panes never reflow — the grid
-iterates the whole list and marks the failures, because on a wall you
-recognise positions, not names. Two rules stop it flickering: it compares the
-**typical** spread (the server's median of the last minute, already sent as
-`tp`), never the instantaneous `sp`; and it **dims late, undims at once** —
-ten seconds below before fading, full strength the moment it qualifies. A
-threshold CHANGE back-dates the timer so the slider applies immediately (a
-control that does nothing for ten seconds looks broken). A symbol that has
-never quoted cannot be shown to qualify, so it fades with the rest and its
-header reads "—". The status line names the count ("9 under 10c") because a
-faded pane is set aside, not dropped.
-
-Controls: add box and an Edit-list textarea (an edit KEEPS each symbol's
-override), window, spread-share and spread-floor sliders, pane width. The per-pane override
-is not a control on every pane — a hundred panes carrying sliders is a
-hundred controls on a page whose job is to be looked at — but a click selects
-a pane and the bar grows a scale slider, "use default" and "remove" for it.
-Window and share are saved server-side with the list (debounced 500 ms); pane
-WIDTH is local storage, because it is about this screen and the same list is
-read on a laptop and a 32-inch monitor.
-
-**300 symbols, 100 a page (2026-11-06).** `WALL_MAX_SYMBOLS` 120 → 300,
-`WALL_PER_PAGE` 100 (sent in `caps.per_page`). Pages fill in LIST ORDER
-(`wlPageSlice`); only the current page has panes in the DOM, but **every
-symbol stays subscribed and every frame still carries all 300**, so the
-browser keeps each tape warm and a flip draws a full page at once (`setPage`
-re-centres each pane, rebuilds the IntersectionObserver, calls `drawAll`
-immediately; it sends the server nothing). Unsubscribing off-page names was
-rejected: the two-minute window would refill from empty. The page number is
-local storage, like pane width. Measured: server side
-(`scripts/measure_wall_capacity.py`, offline, the scan's measured upper-bound
-rate as if the list were the 300 busiest names) ~30 ms ingest + ~25 ms frame a
-second here, ~18 MB of buffers — but that bench skips the socket, so the live
-ingest figure is the scan's 430-symbol measurement (~19% of the loop busy);
-browser (`check_wall_ui`, 2536 px wide) one draw of 100 panes ~25–33 ms, a
-300-symbol tick ~3 ms, a flip drawn in ~150–180 ms. At 2560×1440 a hundred fit
-without scrolling at pane width ≤160 (14–15 × 7–8, canvas ~159×99) maximised,
-≤180 full screen; the default 200 scrolls.
-
-Files: `live/wall.py` (the per-symbol store), `live/wall_store.py`,
-`live/wall_runner.py`, the wall tier in `live/hub.py`, `/wall/*` in
-`live/main.py`, `templates/equities_wall.html`, `static/js/equities_wall.js`.
-Gates: `scripts/check_wall.py`, 30 cases, no market needed — the JS cases
-execute the shipped JS in node (the scale property: a half-spread move is the
-same fraction of the pane on a 7c name and a 50c one; pages slice the list);
-`scripts/check_wall_ui.py` clicks the pager in Edge against a fake socket
-(`can_skip`).
+Files: `live/wall.py`, `live/wall_store.py`, `live/wall_runner.py`, the wall
+tier and `_wants` in `live/hub.py`, `/wall/*` in `live/main.py`,
+`templates/equities_wall.html`, `static/js/equities_wall.js`. Gates:
+`check_wall.py` (21 cases: per-channel subscriptions for every tier pair and
+reconnect, frames, store, sliders = clamps, executed row functions, markup),
+`check_wall_ui.py` (Edge, 77 assertions at 2560×1440, 2560×1300, 1440×860;
+`can_skip`).
 
 ## Equities Scan: hidden, and held only while open (2026-11-06)
 

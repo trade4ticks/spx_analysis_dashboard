@@ -257,11 +257,11 @@ GATES = [
     # allowed to watch. Its worst failure is silent: an unsubscribe taken out
     # from under another tier looks like a symbol that went quiet.
     _s("check_wall.py",
-       note="tiers share one socket; the cursor is a count; no broker"),
-    # 300 symbols, 100 a page, clicked in Edge: a flip draws a warm page at
-    # once and sends the server nothing; pane geometry at 2560 wide.
+       note="wall is quotes only; tiers keep each other's channels; no broker"),
+    # The rotation list at 300 symbols, clicked in Edge: columns flow down,
+    # thresholds colour and scale, marks, hide, sort; fits at 2560 wide.
     _s("check_wall_ui.py", can_skip=True,
-       note="wall pages clicked: flip draws at once, every symbol streams"),
+       note="wall list clicked: flow, thresholds, marks, hide, sort"),
     # The band must hold still under a flat tape, and a rate must be a rate.
     _s("check_live_axis.py",
        note="price band steps only at the edge; trades/min is a fixed minute"),
@@ -376,8 +376,8 @@ COVERS = {
     "check_strategy_signal_ui":  [(r"(\d+) assertions, failures", 100)],            # 137
     "check_strategy_signal_sql": [("ok", 16)],                                      # 21
     "check_live_hub":            [(r"hub cases: (\d+)", 20)],                       # 32
-    "check_wall":                [(r"wall cases: (\d+)", 20)],                      # 30
-    "check_wall_ui":             [(r"wall ui: (\d+) assertions", 24)],              # 30
+    "check_wall":                [(r"wall cases: (\d+)", 16)],                      # 21
+    "check_wall_ui":             [(r"wall ui: (\d+) assertions", 58)],              # 77
     "check_live_axis":           [(r"band positions checked: (\d+) flat", 300)],    # 400
     "check_broker":              [(r"broker cases: (\d+)", 13)],                    # 18
     "check_das":                 [(r"DAS cases: (\d+)", 22)],                       # 29

@@ -491,9 +491,8 @@ async def scan_ws(sock: WebSocket):
 # A THIRD PAGE ON THE SAME SERVICE, and a third tier on the same upstream
 # socket, for the reason the scan already explains: the account permits one
 # connection upstream. Downstream it is ONE BROWSER SOCKET FOR THE WHOLE PAGE
-# however many panes are on it -- the service caps browser connections at
-# MAX_CLIENTS (8), and a wall of a hundred panes holding one each would blow
-# through that twelve times over.
+# however many rows are on it -- the service caps browser connections at
+# MAX_CLIENTS (8).
 #
 # It is for WATCHING. Nothing here places, moves or cancels an order, and
 # nothing here reads a broker.
@@ -512,7 +511,7 @@ async def wall_watchlist():
 
 @app.post("/wall/watchlist")
 async def wall_watchlist_set(req: Request):
-    """{"entries": [{"symbol", "scale"}...], "settings": {...}} — wholesale.
+    """{"entries": [{"symbol"}...], "settings": {...}} — wholesale.
 
     Wholesale because the page edits a list and posts the list; see
     WallRunner.apply for why the hub, the file and every open page are set
@@ -529,22 +528,19 @@ async def wall_watchlist_set(req: Request):
 
 @app.websocket("/wall/ws")
 async def wall_ws(sock: WebSocket):
-    """One wall page. Every pane's data comes down this one connection."""
+    """One wall page. Every row's spread comes down this one connection."""
     await sock.accept()
     st = WALL.subscribe(sock)
     try:
         await sock.send_json({"ev": "hello", "data": _status(),
                               **WALL.state()})
-        # The first frame is sent immediately rather than up to a second
-        # later, so opening the page draws panes instead of empty boxes.
+        # The first frame -- every symbol's spread -- is sent immediately, so
+        # the list opens filled rather than a tick later.
         await sock.send_json(WALL.frame(st))
         while True:
             msg = await sock.receive_json()
             act = msg.get("action")
-            if act == "window":
-                WALL.set_window(sock, msg.get("window_s"))
-                await sock.send_json(WALL.frame(st))
-            elif act == "watchlist":
+            if act == "watchlist":
                 await WALL.apply(msg.get("entries") or [],
                                  msg.get("settings"))
             elif act == "status":
