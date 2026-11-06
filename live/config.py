@@ -297,7 +297,11 @@ WALL_SHARE_MAX = 0.95
 # threshold does not lose its history and have to rebuild when it comes back.
 WALL_MIN_SPREAD_CENTS = float(
     os.environ.get("LIVE_WALL_MIN_SPREAD_CENTS", "0"))
-WALL_MAX_SPREAD_FILTER = 100.0
+# The slider's top, in cents. $3 (2026-11-06, was the page's 50c over a
+# 100c clamp): names on $1-3 spreads are traded here, and a floor that stops
+# at 50c cannot separate them from the 50c names. The template's max must
+# equal this (check_wall), or a value above the clamp snaps back on save.
+WALL_MAX_SPREAD_FILTER = 300.0
 
 # Where the watchlist is kept so a restart does not empty the wall. One small
 # JSON file, written whole -- see live/wall_store.py.

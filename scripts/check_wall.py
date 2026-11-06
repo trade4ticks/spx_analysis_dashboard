@@ -953,6 +953,24 @@ async def case_the_filter_does_not_touch_subscriptions(tmp: Path):
           f"the floor did not clamp: {lo}, {hi}, and an unparseable value "
           f"became {bad} instead of leaving the setting alone")
 
+    # THE SLIDER REACHES WHAT THE SERVER KEEPS, and no further. A slider max
+    # above the clamp is a setting that snaps back on save; below it, the
+    # wide names ($1-3 spreads, traded here) cannot be floored at all.
+    import re as _re2
+    tpl = (ROOT / "templates" / "equities_wall.html").read_text(encoding="utf-8")
+    m = _re2.search(r'<input type="range" min="0" max="([\d.]+)" step="([\d.]+)"[^>]*'
+                    r'x-model\.number="settings\.min_spread_cents"', tpl)
+    check(m is not None and float(m.group(1)) == config.WALL_MAX_SPREAD_FILTER
+          and float(m.group(1)) >= 300 and float(m.group(2)) == 0.5,
+          f"the spread-floor slider is max={m.group(1) if m else None} "
+          f"step={m.group(2) if m else None} against a server clamp of "
+          f"{config.WALL_MAX_SPREAD_FILTER}c; they must match, reach 300c, "
+          f"and keep 0.5c steps")
+    s3 = WallStore(tmp / "floor3.json")
+    s3.set([{"symbol": "FDX"}], {"min_spread_cents": 250})
+    check(s3.settings["min_spread_cents"] == 250,
+          f"a $2.50 floor was stored as {s3.settings['min_spread_cents']}c")
+
     # THE PANES STAY WHERE THEY ARE. The page draws every entry of the page
     # it is on and marks the failing ones; it does not draw a filtered list.
     # The page is a slice of the list by POSITION (case_js_pages), so the
