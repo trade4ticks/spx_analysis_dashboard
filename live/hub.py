@@ -123,6 +123,14 @@ class Hub:
         self.trades_in = 0
         self.quotes_in = 0
         self.dropped_cap = 0
+        # PER TIER, counted at arrival: {tier: [trades, quotes]}. A message for
+        # a symbol two tiers hold counts under both, so these do not sum to
+        # msgs_in -- they answer "what would this tier cost on its own", which
+        # is the question when deciding whether to keep it. The wall's quotes
+        # are counted BEFORE sampling: the arrival rate is the upstream cost,
+        # the sampled rate is only what it keeps.
+        self.tier_in: dict[str, list[int]] = {"pane": [0, 0], "scan": [0, 0],
+                                              "wall": [0, 0]}
 
         self._ws = None
         self._pending: dict[str, dict] = {}
@@ -523,6 +531,10 @@ class Hub:
                 # disappear.
                 buf = self.scan.get(sym)
                 wsym = self.wall.get(sym)
+                if buf is not None:
+                    self.tier_in["scan"][0] += 1
+                if wsym is not None:
+                    self.tier_in["wall"][0] += 1
                 if buf is not None or wsym is not None:
                     ts, price, size = m.get("t"), m.get("p"), m.get("s")
                     if ts is not None and price is not None and size is not None:
@@ -536,6 +548,7 @@ class Hub:
                            "x": m.get("x"), "z": m.get("z"),
                            "c": m.get("c") or []}
                     self.trades_in += 1
+                    self.tier_in["pane"][0] += 1
                     # Only forwarded if it SURVIVED the caps. Reading the
                     # buffer's tail back assumed the record just appended was
                     # still there; a record older than the window is evicted
@@ -553,6 +566,10 @@ class Hub:
                 # by both, by either, or briefly by neither.
                 acc = self.spread.get(sym)
                 wsym = self.wall.get(sym)
+                if acc is not None:
+                    self.tier_in["scan"][1] += 1
+                if wsym is not None:
+                    self.tier_in["wall"][1] += 1
                 if acc is not None or wsym is not None:
                     ts, bp, ap = m.get("t"), m.get("bp"), m.get("ap")
                     if ts is not None and bp is not None and ap is not None:
@@ -565,6 +582,7 @@ class Hub:
                            "ap": m.get("ap"), "bs": m.get("bs"),
                            "as": m.get("as")}
                     self.quotes_in += 1
+                    self.tier_in["pane"][1] += 1
                     if self._push(self.quotes[sym], rec,
                                   config.MAX_QUOTES_PER_SYMBOL, now_ms):
                         self._pending.setdefault(
@@ -667,6 +685,10 @@ class Hub:
             "trades_in": self.trades_in,
             "quotes_in": self.quotes_in,
             "dropped_cap": self.dropped_cap,
+            # Lifetime counts; scripts/live_rates.py turns two readings into
+            # a rate per tier.
+            "tier_in": {k: {"trades": v[0], "quotes": v[1]}
+                        for k, v in self.tier_in.items()},
             "caps": {"scan_symbols": config.SCAN_MAX_SYMBOLS,
                      "wall_symbols": config.WALL_MAX_SYMBOLS,
                      "symbols": config.MAX_SYMBOLS,

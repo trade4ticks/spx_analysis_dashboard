@@ -19,6 +19,17 @@ rollup is computed at the boundary.
 
 The extra cost is one pass a minute against twelve, which is under 10% more
 work for the property that makes the axis mean anything.
+
+HELD ONLY WHILE A PAGE IS OPEN (2026-11-06). The tier used to keep whatever
+list it was last given until the next restart, page open or not -- up to 600
+symbols of both channels on the one upstream socket, feeding nobody. Now the
+list is REMEMBERED here (`wanted`) and HELD in the hub only while a scan page
+is connected; SCAN_IDLE_GRACE_S after the last one closes it is released, and
+the next page to connect re-holds it. The grace is what keeps a refresh from
+unsubscribing and resubscribing a few hundred symbols. The price is stated:
+minutes nobody was watching are not computed, so the grid has a gap for
+them, and the first five minutes after a re-hold read off a partly filled
+buffer -- exactly as they do after a restart.
 """
 from __future__ import annotations
 
@@ -48,6 +59,13 @@ class ScanRunner:
         self.last_minute: int | None = None
         self._stop = False
         self._subscribers: set = set()
+        # The list the page last set, kept while the tier is released so the
+        # next page to open gets it back. Not persisted: after a restart the
+        # page starts empty, as it always has, and Seed refills it.
+        self.wanted: list[str] = []
+        self.released_at: float | None = None
+        self.releases = 0
+        self._idle_task: asyncio.Task | None = None
 
     # ── the loop ────────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -120,12 +138,77 @@ class ScanRunner:
             self.history.load()
         await self.history.flush()
 
-    # ── fan-out ─────────────────────────────────────────────────────────
-    def subscribe(self, ws) -> None:
+    # ── holding the list only while it is watched ───────────────────────
+    async def set_symbols(self, symbols) -> tuple[list[str], list[str], list[str]]:
+        """The page's list: remembered, and held in the hub.
+
+        Held at once even with no page connected (a script, or a page whose
+        socket is between reconnects), with the idle timer armed so it does
+        not stay held for nobody.
+        """
+        added, dropped, refused = await self.hub.scan_set(symbols)
+        self.wanted = sorted(self.hub.scan)
+        self.released_at = None
+        if self.hub.scan:
+            self._resume_clock()
+        if not self._subscribers:
+            self._arm_idle()
+        return added, dropped, refused
+
+    async def subscribe(self, ws) -> None:
+        """A page connected: cancel any pending release, re-hold the list."""
         self._subscribers.add(ws)
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            self._idle_task = None
+        if self.wanted and not self.hub.scan:
+            await self.hub.scan_set(self.wanted)
+            self._resume_clock()
+            log.info("scan: re-held %d symbols for a connected page",
+                     len(self.hub.scan))
+        self.released_at = None
 
     def unsubscribe(self, ws) -> None:
         self._subscribers.discard(ws)
+        if not self._subscribers:
+            self._arm_idle()
+
+    def _resume_clock(self) -> None:
+        """Start minute-closing from NOW. While released the loop does not
+        tick, so last_minute is stale; left alone, the first tick would close
+        that old minute with an empty buffer and write it as a real cell."""
+        self.last_minute = minute_index()
+
+    def _arm_idle(self) -> None:
+        if self._idle_task is not None or not self.hub.scan:
+            return
+        self._idle_task = asyncio.get_running_loop().create_task(
+            self._release_when_idle())
+
+    async def _release_when_idle(self) -> None:
+        try:
+            await asyncio.sleep(config.SCAN_IDLE_GRACE_S)
+            if self._subscribers or not self.hub.scan:
+                return
+            self.wanted = sorted(self.hub.scan)
+            # Write the minutes already closed to disk before the buffers go.
+            # The minute in progress is not a whole minute and is not kept.
+            try:
+                await self.history.flush()
+            except Exception as exc:                      # noqa: BLE001
+                log.warning("scan flush before release failed: %s", exc)
+            await self.hub.scan_set([])
+            self.live = {}
+            self.released_at = time.time()
+            self.releases += 1
+            log.info("scan: no page for %.0fs, released %d symbols "
+                     "(kept as the list for the next page)",
+                     config.SCAN_IDLE_GRACE_S, len(self.wanted))
+        finally:
+            if self._idle_task is asyncio.current_task():
+                self._idle_task = None
+
+    # ── fan-out ─────────────────────────────────────────────────────────
 
     async def _push(self, state: dict) -> None:
         """The live column to every open scan page.
@@ -170,11 +253,19 @@ class ScanRunner:
             "minutes_written": self.minutes_written,
             "current_minute": self.last_minute,
             "subscribers": len(self._subscribers),
+            "held": len(self.hub.scan),
+            "wanted": len(self.wanted),
+            "idle_grace_s": config.SCAN_IDLE_GRACE_S,
+            "release_pending": self._idle_task is not None,
+            "released_at": self.released_at,
+            "releases": self.releases,
             "history": self.history.status(),
         }
 
     async def stop(self) -> None:
         self._stop = True
+        if self._idle_task is not None:
+            self._idle_task.cancel()
         # A LAST FLUSH ON THE WAY DOWN. A deploy is the common shutdown, and
         # losing the final minute to it is losing exactly the minutes someone
         # was looking at when they pushed.

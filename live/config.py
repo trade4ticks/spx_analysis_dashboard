@@ -157,6 +157,12 @@ SCAN_HISTORY_DIR = os.environ.get(
 # only how much of it goes over the wire on connect.
 SCAN_GRID_MINUTES = int(os.environ.get("LIVE_SCAN_GRID_MINUTES", "120"))
 
+# HOW LONG THE SCAN KEEPS ITS SYMBOLS WITH NO PAGE OPEN. The tier is held only
+# while a scan page is connected (see scan_runner); this grace is what stops a
+# page refresh from dropping and re-subscribing several hundred symbols. A
+# minute covers a refresh, a laptop waking, and a brief network drop.
+SCAN_IDLE_GRACE_S = float(os.environ.get("LIVE_SCAN_IDLE_GRACE_S", "60"))
+
 # ── the page's own defaults ─────────────────────────────────────────────────
 #
 # SERVED, NOT BAKED INTO THE JAVASCRIPT, so the number a person reasons about

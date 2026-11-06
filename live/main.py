@@ -430,7 +430,7 @@ async def scan_symbols(req: Request):
     syms = body.get("symbols") or []
     if not isinstance(syms, list):
         return {"error": "symbols must be a list"}
-    added, dropped, refused = await HUB.scan_set(syms)
+    added, dropped, refused = await SCAN.set_symbols(syms)
     return {"held": sorted(HUB.scan), "added": added, "dropped": dropped,
             "refused": refused}
 
@@ -451,7 +451,9 @@ async def scan_ws(sock: WebSocket):
     Only the rightmost column moves, so only the rightmost column is pushed.
     """
     await sock.accept()
-    SCAN.subscribe(sock)
+    # Re-holds the list if the tier was released for want of a page, before
+    # the hello and the grid, so both describe what is now held.
+    await SCAN.subscribe(sock)
     try:
         await sock.send_json({"ev": "hello", "data": _status()})
         while True:

@@ -979,6 +979,135 @@ async def case_scan_state_reports_spread():
           f"NaN -- it would screen as the tightest name on the page")
 
 
+# ── the scan tier is held only while a page is open (2026-11-06) ────────────
+#
+# The tier used to keep its list until the next restart, open page or not.
+# The page was unreachable, so whatever it was last given was upstream load
+# feeding nobody. These hold the new rule: released SCAN_IDLE_GRACE_S after
+# the last page closes, re-held when one connects, and a refresh inside the
+# grace sends nothing upstream at all.
+
+class _Page:
+    async def send_json(self, payload):
+        pass
+
+
+def _runner(h):
+    import tempfile
+    from live.scan_runner import ScanRunner
+    from live.scan_history import ScanHistory
+    return ScanRunner(h, ScanHistory(tempfile.mkdtemp(prefix="scanlazy-")))
+
+
+async def case_scan_released_when_no_page():
+    old = config.SCAN_IDLE_GRACE_S
+    config.SCAN_IDLE_GRACE_S = 0.05
+    try:
+        h, ws = _spy_hub()
+        r = _runner(h)
+        page = _Page()
+        await r.subscribe(page)
+        await r.set_symbols(["AAPL", "MSFT"])
+        r.unsubscribe(page)
+        check(sorted(h.scan) == ["AAPL", "MSFT"],
+              "the scan dropped its list the instant the page closed; a "
+              "refresh would unsubscribe and resubscribe every symbol")
+        await asyncio.sleep(0.15)
+        check(not h.scan,
+              f"no page for longer than the grace and the scan still holds "
+              f"{sorted(h.scan)} -- the upstream load this change removes")
+        unsub = ",".join(ws.params("unsubscribe"))
+        check("T.AAPL" in unsub and "Q.MSFT" in unsub,
+              f"the release sent no unsubscribe for both channels: {unsub!r}")
+        check(r.wanted == ["AAPL", "MSFT"],
+              f"the release forgot the list ({r.wanted}); the next page "
+              f"would open empty and have to be re-seeded")
+        n_sub = len(ws.params("subscribe"))
+        await r.subscribe(page)
+        check(sorted(h.scan) == ["AAPL", "MSFT"],
+              f"a page connected and the list was not re-held: {sorted(h.scan)}")
+        check(len(ws.params("subscribe")) == n_sub + 1,
+              "re-holding the list did not go out as one subscribe frame")
+        r.unsubscribe(page)
+        await r.stop()
+    finally:
+        config.SCAN_IDLE_GRACE_S = old
+
+
+async def case_scan_refresh_does_not_churn():
+    old = config.SCAN_IDLE_GRACE_S
+    config.SCAN_IDLE_GRACE_S = 0.2
+    try:
+        h, ws = _spy_hub()
+        r = _runner(h)
+        a = _Page()
+        await r.subscribe(a)
+        await r.set_symbols(["AAPL"])
+        r.unsubscribe(a)
+        await asyncio.sleep(0.05)
+        b = _Page()
+        await r.subscribe(b)                      # the refreshed page
+        await asyncio.sleep(0.3)                  # past the first grace
+        check(h.scan and not ws.params("unsubscribe"),
+              f"a refresh inside the grace unsubscribed the scan "
+              f"({ws.params('unsubscribe')}); the timer was not cancelled")
+        check(len(ws.params("subscribe")) == 1,
+              f"{len(ws.params('subscribe'))} subscribe frames for one list "
+              f"across a refresh; the reconnect must not re-send it")
+        r.unsubscribe(b)
+        await r.stop()
+    finally:
+        config.SCAN_IDLE_GRACE_S = old
+
+
+async def case_scan_release_spares_other_tiers():
+    old = config.SCAN_IDLE_GRACE_S
+    config.SCAN_IDLE_GRACE_S = 0.05
+    try:
+        h, ws = _spy_hub()
+        r = _runner(h)
+        await h.acquire("FDX")                    # a pane
+        await h.wall_set(["LLY"])                 # the wall
+        page = _Page()
+        await r.subscribe(page)
+        await r.set_symbols(["FDX", "LLY", "AAPL"])
+        r.unsubscribe(page)
+        await asyncio.sleep(0.15)
+        unsub = ",".join(ws.params("unsubscribe"))
+        check("FDX" not in unsub and "LLY" not in unsub,
+              f"releasing the scan unsubscribed a symbol a pane or the wall "
+              f"still draws: {unsub!r}")
+        check("T.AAPL" in unsub,
+              f"the scan's own symbol was not released: {unsub!r}")
+        await r.stop()
+    finally:
+        config.SCAN_IDLE_GRACE_S = old
+
+
+async def case_tier_counters():
+    """Arrivals are counted per tier, a shared symbol under each holder."""
+    h = Hub()
+    await h.scan_set(["AAPL"])
+    await h.wall_set(["AAPL", "LLY"])
+    await h.acquire("FDX")
+    now = time.time() * 1000
+    h._ingest(json.dumps([trade("AAPL", now, 1.0, 1),
+                          quote("AAPL", now, 1.0, 1.01),
+                          trade("LLY", now, 1.0, 1),
+                          quote("LLY", now + 1, 1.0, 1.01),
+                          quote("LLY", now + 2, 1.0, 1.01),
+                          trade("FDX", now, 1.0, 1),
+                          quote("NOBODY", now, 1.0, 1.01)]))
+    t = h.status()["tier_in"]
+    check(t["scan"] == {"trades": 1, "quotes": 1},
+          f"scan counted {t['scan']}")
+    check(t["wall"] == {"trades": 2, "quotes": 3},
+          f"wall counted {t['wall']} -- quotes must be counted on ARRIVAL, "
+          f"before the 200 ms sampling throws two of LLY's away")
+    check(t["pane"] == {"trades": 1, "quotes": 0},
+          f"pane counted {t['pane']}")
+
+
 CASES = [
     ("no aggregation",          case_no_aggregation),
     ("odd lots survive",        case_odd_lots_survive),
@@ -1008,6 +1137,10 @@ CASES = [
     ("a gap is not quiet",      case_history_gap_is_absent_not_quiet),
     ("minutes are absolute",    case_history_minutes_are_absolute),
     ("corrupt file is survived", case_history_survives_a_corrupt_file),
+    ("scan released, no page",  case_scan_released_when_no_page),
+    ("scan refresh no churn",   case_scan_refresh_does_not_churn),
+    ("scan release spares",     case_scan_release_spares_other_tiers),
+    ("arrivals counted by tier", case_tier_counters),
 ]
 
 
