@@ -122,6 +122,18 @@
     /* Centred header over each half of a split pane. Bases mirror the
        canvas flex bases exactly; if one changes the other must too. */
     .ft-subhead { display:flex; gap:6px; margin-bottom:2px; }
+    .ft-exit { display:flex; gap:6px; height:216px; }
+    .ft-exit-col { flex:1 1 0; min-width:0; display:flex; flex-direction:column; }
+    .ft-exit-labcol { flex:0 1 auto; max-width:30%; }
+    .ft-exit-h { flex:0 0 auto; text-align:center; font-size:10px; font-weight:700;
+                 letter-spacing:.4px; text-transform:uppercase; color:var(--muted);
+                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .ft-exit-body { flex:1; min-height:0; position:relative; }
+    #ft-exit-labels { box-sizing:border-box; }
+    /* Block, not flex: text-overflow needs a block box, and a flex row
+       clips a long name at its START. Centred by line-height = the row. */
+    .ft-exit-label { text-align:right; font-size:10px; color:var(--muted); white-space:nowrap;
+                     overflow:hidden; text-overflow:ellipsis; padding-right:4px; }
     .ft-subhead > div { min-width:0; text-align:center; font-size:10px;
                         font-weight:700; letter-spacing:.4px; color:var(--muted);
                         text-transform:uppercase; }
@@ -940,26 +952,35 @@
         </div>
         <div class="chart-box">
           <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window</span>
-            <button class="ft-fs" @click="openFs(['ft-reasons', 'ft-hold'])" title="Full screen">⛶</button>
+            <button class="ft-fs" @click="openFs(['ft-exit-labels', 'ft-reasons', 'ft-hold', 'ft-exitret'])" title="Full screen">⛶</button>
           </div>
-          {#- Two sub-charts rather than one dual-axis chart. Sharing a pane
-              with a top axis made the grey hold bars dominate the coloured
-              share bars and left no way to tell which scale a bar belonged
-              to. Split, each has one axis and one meaning. Labels repeat on
-              both so a row is readable without counting across the gutter.
+          {#- Three sub-charts and ONE label column. Separate charts, not one
+              multi-axis chart: share, sessions and a signed return cannot
+              share a scale, and a shared pane left no way to tell which
+              scale a bar belonged to. Each keeps its own x axis.
 
-              Each half carries its own centred header: the pane tagline
-              names the pane, not either side, and reading the x-axis to
-              work out which half you are looking at is the same problem
-              the split was meant to remove. Header widths must track the
-              canvas flex basis below or they drift off centre. -#}
-          <div class="ft-subhead">
-            <div style="flex:1 1 58%">Share of exits</div>
-            <div style="flex:1 1 42%">Avg hold</div>
-          </div>
-          <div class="chart-canvas" style="height:198px;display:flex;gap:6px">
-            <div style="flex:1 1 58%;min-width:0;position:relative"><canvas id="ft-reasons"></canvas></div>
-            <div style="flex:1 1 42%;min-width:0;position:relative"><canvas id="ft-hold"></canvas></div>
+              The rule names are drawn once, on the left, laid out by the
+              share chart after every render (_renderExitReasons), so they
+              sit on the bars' rows; the charts hide their y axes. Each
+              column carries its own header, so header and chart cannot
+              drift apart. -#}
+          <div class="ft-exit">
+            <div class="ft-exit-col ft-exit-labcol">
+              <div class="ft-exit-h">&nbsp;</div>
+              <div class="ft-exit-body"><div id="ft-exit-labels"></div></div>
+            </div>
+            <div class="ft-exit-col">
+              <div class="ft-exit-h">Share of exits</div>
+              <div class="ft-exit-body"><canvas id="ft-reasons"></canvas></div>
+            </div>
+            <div class="ft-exit-col">
+              <div class="ft-exit-h">Avg hold</div>
+              <div class="ft-exit-body"><canvas id="ft-hold"></canvas></div>
+            </div>
+            <div class="ft-exit-col">
+              <div class="ft-exit-h">Avg return</div>
+              <div class="ft-exit-body"><canvas id="ft-exitret"></canvas></div>
+            </div>
           </div>
         </div>
         <div class="chart-box">

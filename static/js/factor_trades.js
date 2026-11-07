@@ -471,7 +471,8 @@ document.addEventListener('alpine:init', () => {
     // would mean re-deriving the dollar series for a resize.
     // Headers for canvases that full-screen as part of a split pane. Must
     // stay in step with the .ft-subhead text in the template.
-    _FS_LABEL: { 'ft-reasons': 'Share of exits', 'ft-hold': 'Avg hold' },
+    _FS_LABEL: { 'ft-exit-labels': '\u00a0', 'ft-reasons': 'Share of exits',
+                 'ft-hold': 'Avg hold', 'ft-exitret': 'Avg return' },
     // Takes one id or a list. A pane split into sub-charts has to open as a
     // unit -- expanding only the left half of exit reasons drops the very
     // comparison the split was made for.
@@ -506,7 +507,10 @@ document.addEventListener('alpine:init', () => {
           // only a small gap the two charts read as one wide chart with a
           // seam in it, which is the confusion the split was made to fix.
           const last = k === els.length - 1;
-          cell.style.cssText = 'flex:1 1 0;min-width:0;display:flex;flex-direction:column'
+          // The exit pane's label column keeps its natural width (capped).
+          const narrow = ids[k] === 'ft-exit-labels';
+          cell.style.cssText = (narrow ? 'flex:0 1 auto;max-width:30%' : 'flex:1 1 0')
+            + ';min-width:0;display:flex;flex-direction:column'
             + (k ? ';border-left:1px solid var(--border);padding-left:22px' : '')
             + (last ? '' : ';padding-right:22px');
           // The header travels with the chart. Full screen is where the
@@ -2648,26 +2652,33 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // an exit policy, so there is no second consumer to keep in step, and a
     // shared module should not carry a chart only one page can use.
     //
-    // Horizontal bars, one per rule that actually closed a trade, ordered by
-    // share. The backstop is drawn in a distinct colour because it means the
-    // opposite of the others: a bar for fixed_stop__2 is that stop working,
-    // while a bar for the auto-appended max_days__20 is every selected rule
-    // FAILING to fire and the horizon catching the trade by default. Same
-    // chart, opposite readings — see horizon_auto_added on the run card.
-    // Two sub-charts, not one dual-axis pane. The shared-axis version put
-    // grey avg-hold bars on the same rows as the coloured share bars with
-    // scales at opposite edges, and there was no way to tell by looking
-    // which scale a given bar was drawn against.
+    // Horizontal bars, one row per rule that actually closed a trade, ordered
+    // by share. The backstop is drawn outlined because it means the opposite
+    // of the others: a bar for fixed_stop__2 is that stop working, while a bar
+    // for the auto-appended max_days__20 is every selected rule FAILING to
+    // fire and the horizon catching the trade by default.
+    //
+    // THREE sub-charts (share of exits, avg hold, avg return) and ONE label
+    // column. Separate charts, not a multi-axis pane: the scales are a share,
+    // sessions and a signed return, and a shared pane left no way to tell
+    // which scale a bar was drawn against. The rule names are drawn once, in
+    // #ft-exit-labels to the left, positioned from the share chart's own
+    // layout after every update (EXIT_LABELS plugin) -- so they follow a
+    // resize and full screen. The three charts hide their y axes and share
+    // the canvas height, padding and x-tick font, so their rows land on the
+    // same pixels. No value labels: every value and the trade count are in
+    // the hover, the same lines on every chart.
     _renderExitReasons() {
-      const el   = document.getElementById('ft-reasons');
-      const elH  = document.getElementById('ft-hold');
+      const ids = ['ft-reasons', 'ft-hold', 'ft-exitret'];
+      const lab  = document.getElementById('ft-exit-labels');
       const rows = this.zoneView()?.exit_reasons || [];
-      for (const k of ['ft-reasons', 'ft-hold']) {
+      for (const k of ids) {
         if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
       }
-      if (!el || !rows.length) return;
+      if (lab) { lab.replaceChildren(); lab.style.paddingTop = ''; }
+      const els = ids.map(i => document.getElementById(i));
+      if (!els[0] || !rows.length) return;
       const labels = rows.map(r => r.label);
-      const data   = rows.map(r => +(r.frac * 100).toFixed(2));
       // Colour by side: targets blue, stops pink, time grey, trend teal.
       const SIDE_COLOR = {
         target: 'rgba(52,152,219,0.78)',
@@ -2675,99 +2686,91 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         time:   'rgba(150,150,150,0.60)',
         trend:  'rgba(26,188,156,0.70)',
       };
-      // The backstop still overrides its side -- it means the opposite of a
-      // rule working, since nothing fired and the horizon caught the trade
-      // -- but it does that OUTLINED rather than in a colour of its own.
-      //
-      // Both values are the time-exit grey, because the backstop IS a time
-      // exit: same hue, faint fill, and the theme's --muted for the border,
-      // read from the stylesheet rather than hand-picked so a theme change
-      // carries here. A light neutral next to saturated blue reads warm by
-      // simultaneous contrast, so "looks grey in isolation" is not the test
-      // -- being literally the same channel values as the bar beside it is.
+      // The backstop is a time exit: the time grey, faint, outlined in the
+      // theme's --muted (read from the stylesheet so a theme change carries).
       const muted = (getComputedStyle(document.documentElement)
                        .getPropertyValue('--muted') || '').trim() || '#c8c8c8';
       const BACKSTOP = { fill: 'rgba(150,150,150,0.16)', line: muted, w: 2 };
+      // One paint per ROW, identical on all three charts: the colour means
+      // "this rule", never "this chart".
       const fills = rows.map(r => r.is_backstop ? BACKSTOP.fill
         : (SIDE_COLOR[r.side] || 'rgba(150,150,150,0.60)'));
       const lines = rows.map((r, i) => r.is_backstop ? BACKSTOP.line : fills[i]);
       const widths = rows.map(r => r.is_backstop ? BACKSTOP.w : 1);
-      this._charts['ft-reasons'] = new Chart(el.getContext('2d'), {
+      const pct = (v, d) => (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d);
+      const tip = (i) => {
+        const r = rows[i];
+        const ar = r.avg_ret;
+        return [`share of exits ${pct(r.frac, 1)}%`,
+                `avg hold ${(r.avg_hold ?? 0).toFixed(2)} sessions`,
+                `avg return ${ar == null ? '—' : (ar > 0 ? '+' : '') + pct(ar, 2) + '%'}`,
+                `n = ${(r.n ?? 0).toLocaleString()} trades`,
+                r.is_backstop ? 'backstop — no selected rule fired' : `${r.side} · ${r.rule_key}`];
+      };
+      // The label column, laid out from the share chart: padding down to
+      // the plot area's top, then one row per category at its pitch, so
+      // each name is centred on its bars.
+      const EXIT_LABELS = {
+        id: 'ftExitLabels',
+        afterRender: (chart) => {
+          const box = document.getElementById('ft-exit-labels');
+          const a = chart.chartArea;
+          if (!box || !a || !rows.length) return;
+          if (box.children.length !== rows.length) {
+            box.replaceChildren(...rows.map(r => {
+              const d = document.createElement('div');
+              d.className = 'ft-exit-label';
+              d.textContent = r.label;
+              d.title = r.label;
+              return d;
+            }));
+          }
+          const pitch = (a.bottom - a.top) / rows.length;
+          for (const d of box.children) { d.style.height = pitch + 'px'; d.style.lineHeight = pitch + 'px'; }
+          box.style.paddingTop = '0px';
+          const off = chart.canvas.getBoundingClientRect().top - box.getBoundingClientRect().top;
+          box.style.paddingTop = Math.max(0, off + a.top) + 'px';
+        },
+      };
+      // Never rotated, on any of the three: a rotated tick row is taller,
+      // which shrinks that chart's plot area and moves its rows off the
+      // labels'.
+      const xTicks = { color: '#888', font: { size: 9 }, maxRotation: 0, minRotation: 0,
+                       autoSkip: true, maxTicksLimit: 4 };
+      const mk = (el, data, x, plugins) => new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels, datasets: [
           { data, backgroundColor: fills, borderColor: lines, borderWidth: widths },
         ] },
+        plugins: plugins || [],
         options: {
           indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
+          // Identical vertical layout on all three, so the rows align.
+          layout: { padding: { top: 2, bottom: 0, left: 0, right: 8 } },
           plugins: {
             legend: { display: false },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: {
-                label: (c) => {
-                  const r = rows[c.dataIndex];
-                  return [`${r.frac != null ? (r.frac * 100).toFixed(1) : '—'}% of trades`,
-                          `avg hold ${(r.avg_hold ?? 0).toFixed(2)} sess`,
-                          `n = ${(r.n ?? 0).toLocaleString()}`,
-                          r.is_backstop
-                            ? 'backstop — no selected rule fired'
-                            : `${r.side} · ${r.rule_key}`];
-                },
-              },
+              callbacks: { label: (c) => tip(c.dataIndex) },
             },
           },
-          scales: {
-            x: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
-                 grid: { color: '#222' }, beginAtZero: true },
-            y: { ticks: { color: '#aaa', font: { size: 10 } },
-                 grid: { display: false } },
-          },
+          scales: { x, y: { display: false } },
         },
       });
-
-      // Avg hold, same rows in the same order. Labels are repeated rather
-      // than shared down a gutter so this chart is readable on its own --
-      // a stop firing at 1.2 sessions against a backstop at 20 is the
-      // shape worth seeing, and it should not need a row-count across the
-      // pane to attribute it.
-      if (!elH) return;
-      this._charts['ft-hold'] = new Chart(elH.getContext('2d'), {
-        type: 'bar',
-        data: { labels, datasets: [{
-          data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
-          // IDENTICAL paint to the share half. The wash that used to be
-          // applied here made the same rule two different greys across the
-          // two sub-charts -- max_days 20d read lighter on the left than on
-          // the right -- and a colour that means "this rule" cannot also
-          // mean "this is the quieter pane". The headers already say which
-          // half is which; that was never colour's job.
-          backgroundColor: fills, borderColor: lines, borderWidth: widths,
-        }] },
-        options: {
-          indexAxis: 'y',
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: {
-                label: (c) => {
-                  const r = rows[c.dataIndex];
-                  return [`avg hold ${(r.avg_hold ?? 0).toFixed(2)} sessions`,
-                          `n = ${(r.n ?? 0).toLocaleString()}`];
-                },
-              },
-            },
-          },
-          scales: {
-            x: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + 'd' },
-                 grid: { color: '#222' }, beginAtZero: true },
-            y: { ticks: { color: '#aaa', font: { size: 10 } },
-                 grid: { display: false } },
-          },
-        },
-      });
+      this._charts['ft-reasons'] = mk(els[0], rows.map(r => +(r.frac * 100).toFixed(2)),
+        { ticks: { ...xTicks, callback: v => v + '%' }, grid: { color: '#222' }, beginAtZero: true },
+        [EXIT_LABELS]);
+      if (els[1]) this._charts['ft-hold'] = mk(els[1], rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
+        { ticks: { ...xTicks, callback: v => v + 'd' }, grid: { color: '#222' }, beginAtZero: true });
+      // Signed: bars run either side of a zero line drawn brighter than the
+      // grid; beginAtZero keeps zero inside the range when every rule made
+      // (or lost) money.
+      const isZero = c => !!c.tick && c.tick.value === 0;
+      if (els[2]) this._charts['ft-exitret'] = mk(els[2], rows.map(r => +((r.avg_ret ?? 0) * 100).toFixed(4)),
+        { ticks: { ...xTicks, callback: v => (v > 0 ? '+' : '') + v + '%' },
+          grid: { color: c => isZero(c) ? muted : '#222', lineWidth: c => isZero(c) ? 1.5 : 1 },
+          beginAtZero: true });
     },
 
 

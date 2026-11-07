@@ -294,9 +294,12 @@ def _ticker_breakdown(by_ticker: dict) -> list:
 
 
 def _exit_breakdown(reasons: dict, hold_by_rule: dict, meta_by_key: dict,
-                    horizon_auto_added: bool, tot_active: int) -> list:
+                    horizon_auto_added: bool, tot_active: int,
+                    ret_by_rule: dict | None = None) -> list:
     """The exit-reasons pane's rows, as /zone returns them. Pulled out of
-    /zone for the same reason as _ticker_breakdown."""
+    /zone for the same reason as _ticker_breakdown. `avg_ret` (the mean
+    exit_return of the trades each rule closed, a fraction like `ret`) only
+    when ret_by_rule is given."""
     breakdown = []
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
@@ -311,6 +314,9 @@ def _exit_breakdown(reasons: dict, hold_by_rule: dict, meta_by_key: dict,
                       else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
             "is_backstop": is_backstop, "n": n, "frac": n / tot_active,
         })
+        if ret_by_rule is not None:
+            _rb = ret_by_rule.get(rk) or []
+            breakdown[-1]["avg_ret"] = (sum(_rb) / len(_rb)) if _rb else 0.0
     return breakdown
 
 
@@ -1813,6 +1819,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
     # ── Fold into the Recall chart contracts ──────────────────────────────
     trades, dates, reasons = [], [], {}
     hold_by_rule: dict = {}
+    ret_by_rule: dict = {}
     series_trades: list = []
     from collections import Counter as _Ctr
     zacc = {"train": ([], [], _Ctr(), []), "test": ([], [], _Ctr(), [])}
@@ -1841,6 +1848,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         if win == active:
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
             hold_by_rule.setdefault(r["exit_rule"], []).append(hold)
+            ret_by_rule.setdefault(r["exit_rule"], []).append(ret)
         if win == active:
             za = zacc[win]
             za[0].append(ret); za[1].append(hold)
@@ -1891,7 +1899,8 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     tot_active = tot[active][0] or 1
     breakdown = _exit_breakdown(reasons, hold_by_rule, meta_by_key,
-                                combine_meta["horizon_auto_added"], tot_active)
+                                combine_meta["horizon_auto_added"], tot_active,
+                                ret_by_rule)
 
     return {
         "cells": req.cells,

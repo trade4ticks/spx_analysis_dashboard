@@ -167,6 +167,61 @@ DRIVER = r"""
        !!mapNote && mapNote.includes('not in daily_features: BAC') && mapNote.includes('no bucket (shown as Unassigned): ZZZZ'), true);
     const totalAll = lastY('ft-equity', 'Equity ($)');
 
+    // ── the exit-reasons pane: one label column, three aligned charts ────
+    step('exit pane');
+    const EX = ['ft-reasons', 'ft-hold', 'ft-exitret'];
+    const exRows = () => C().zoneView().exit_reasons;
+    const exAligned = () => {
+      // Each label's centre against each chart's bar centre, in page pixels.
+      const ls = [...$('#ft-exit-labels').children].map(d => { const r = d.getBoundingClientRect(); return r.top + r.height / 2; });
+      let worst = 0;
+      for (const id of EX) {
+        const ch = chart(id), top = ch.canvas.getBoundingClientRect().top;
+        ch.getDatasetMeta(0).data.forEach((b, i) => { worst = Math.max(worst, Math.abs(top + b.y - ls[i])); });
+      }
+      return worst;
+    };
+    eq('exit pane: three charts drawn', EX.map(id => !!chart(id)), [true, true, true]);
+    eq('the rule names are drawn ONCE, in the label column, in row order',
+       $$('#ft-exit-labels > .ft-exit-label').map(txt), exRows().map(r => r.label));
+    eq('no chart draws its own y labels', EX.map(id => chart(id).options.scales.y.display), [false, false, false]);
+    eq('each chart keeps its own x axis', EX.map(id => chart(id).options.scales.x.display !== false && !!chart(id).scales.x), [true, true, true]);
+    const labR = $('#ft-exit-labels').getBoundingClientRect().right;
+    eq('the label column sits left of every chart', EX.every(id => chart(id).canvas.getBoundingClientRect().left >= labR - 0.5), true);
+    near('every label is centred on its row in all three charts (px)', exAligned(), 0, 1.5);
+    near('avg return is the rows\' avg_ret, in %', sum(chart('ft-exitret').data.datasets[0].data),
+         sum(exRows().map(r => r.avg_ret * 100)), 1e-3);
+    const zx = chart('ft-exitret').scales.x;
+    eq('avg return: zero is inside its axis', zx.min <= 0 && zx.max >= 0, true);
+    // (bases sit within half a border width of their anchor: Chart.js offsets them by it)
+    eq('the fixture has rules on both sides of zero, so both directions are drawn',
+       [exRows().some(r => r.avg_ret > 0), exRows().some(r => r.avg_ret < 0)], [true, true]);
+    const z0 = zx.getPixelForValue(0);
+    eq('avg return: every bar starts at the zero line and runs its own sign\'s way',
+       chart('ft-exitret').getDatasetMeta(0).data.every((b, i) => Math.abs(b.base - z0) <= 1.01
+         && Math.sign(Math.round((b.x - z0) * 100)) === Math.sign(Math.round(exRows()[i].avg_ret * 1e6)) ), true);
+    eq('the zero line is drawn brighter than the grid',
+       chart('ft-exitret').config.options.scales.x.grid.color({ tick: { value: 0 } }) !== chart('ft-exitret').config.options.scales.x.grid.color({ tick: { value: 1 } }), true);
+    eq('share and hold stay left-anchored',
+       ['ft-reasons', 'ft-hold'].map(id => { const ch = chart(id); return ch.getDatasetMeta(0).data.every(b => Math.abs(b.base - ch.chartArea.left) <= 1.01); }),
+       [true, true]);
+    const tipOf = id => [].concat(chart(id).options.plugins.tooltip.callbacks.label({ dataIndex: 0 })).join(' | ');
+    const r0 = exRows()[0];
+    eq('every chart\'s hover gives all three values and the trade count',
+       EX.map(id => { const t = tipOf(id); return /share of exits/.test(t) && /avg hold/.test(t) && /avg return/.test(t) && t.includes('n = ' + r0.n.toLocaleString() + ' trades'); }),
+       [true, true, true]);
+    eq('no value labels on the bars (no datalabels plugin)',
+       EX.map(id => !!(chart(id).options.plugins.datalabels) || (chart(id).config.plugins || []).some(p => p.id === 'datalabels')), [false, false, false]);
+    // Full screen carries the label column, still aligned, and returns it.
+    $$('.chart-title').find(t => /^Exit reasons/.test(txt(t))).querySelector('.ft-fs').click();
+    await until('the exit pane full screen', () => $('#ft-ov-body #ft-exit-labels') && $('#ft-ov-body #ft-exitret'));
+    await wait(300);
+    near('full screen: the labels stay on their rows (px)', exAligned(), 0, 1.5);
+    btn('✕ Close').click();
+    await until('the pane back home', () => $('.ft-exit #ft-exit-labels') && $('.ft-exit #ft-exitret'));
+    await wait(300);
+    near('back from full screen: still aligned (px)', exAligned(), 0, 1.5);
+
     // ── how the chips render ───────────────────────────────────────────
     step('chip rendering');
     const cs = el => getComputedStyle(el);

@@ -1373,6 +1373,18 @@ that. The filter persists across the train/test toggle and metric switches.
   included. Higher than the Trade Activity pane's peak, which counts only
   what is held over a close; the ⓘ says so. It is the number Part B's cap
   will be set from.
+- **Exit reasons is three charts and ONE label column** (2026-11-07, the
+  user's ask): share of exits, avg hold, avg return (new: `avg_ret`, the mean
+  `ret` of the trades each rule closed — server `_exit_breakdown` and
+  `ftExitBreakdown` alike, gated equal). The rule names are drawn once,
+  `#ft-exit-labels`, laid out from the share chart's plot area after every
+  render, so they follow resize and full screen; the charts hide their y
+  axes, keep their own x axes, never rotate ticks (a taller tick row moves a
+  chart's rows off the labels). Avg return is signed, bars both ways from a
+  `--muted` zero line; the other two stay left-anchored. No value labels: the
+  hover gives all three values and n on every chart. Row colour = the rule,
+  identical on all three. The UI gate measures label-to-bar alignment in all
+  three, in and out of full screen (a planted 2 px offset fails it).
 - **`dollarStatsAll`** keeps every sector's dollar figures: the suite's
   policy-row check compares against it, since the suite never filters.
 - Pre-existing, noticed and left: the equity pane's "DD" checkbox (`showDD`)

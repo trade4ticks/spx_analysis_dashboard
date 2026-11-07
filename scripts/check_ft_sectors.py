@@ -538,9 +538,19 @@ def main() -> int:
     new = zones(h, ft, rows)
     old_mod = h.load_old("HEAD")
     old = zones(h, old_mod, rows)
+    # The one deliberate addition since (2026-11-07): exit-reason rows carry
+    # avg_ret. Stripped only where HEAD's rows lack it, so after the commit
+    # that adds it this is byte-identity again.
+    def _cmp(z, ref):
+        z = json.loads(json.dumps(z))
+        old_has = any("avg_ret" in r for r in ref.get("exit_reasons", []))
+        if not old_has:
+            for r in z.get("exit_reasons", []):
+                r.pop("avg_ret", None)
+        return json.dumps(z, sort_keys=True)
     for win in ("train", "test"):
-        check(json.dumps(new[win], sort_keys=True) == json.dumps(old[win], sort_keys=True),
-              f"/zone ({win}) is byte-identical to HEAD's after pulling out the two breakdowns")
+        check(_cmp(new[win], old[win]) == json.dumps(old[win], sort_keys=True),
+              f"/zone ({win}) is byte-identical to HEAD's (bar exit reasons' avg_ret, if HEAD predates it)")
     for win in ("train", "test"):
         z = new[win]
         check(len(z["window_trades"]) > 100 and len({t["ticker"] for t in z["window_trades"]}) == len(TICKERS),
@@ -573,8 +583,10 @@ def main() -> int:
         check(ok, f"{win}: ticker breakdown equals the server's (to its rounding)", why)
         ok, why = rows_match(o["all"]["exit_reasons"], z["exit_reasons"],
                              {"rule_key": None, "label": None, "side": None, "is_backstop": None,
-                              "n": None, "frac": 1e-12, "avg_hold": 1e-9})
-        check(ok, f"{win}: exit reasons equal the server's", why)
+                              "n": None, "frac": 1e-12, "avg_hold": 1e-9, "avg_ret": 1e-12})
+        check(ok, f"{win}: exit reasons equal the server's (avg return included)", why)
+        check(all(isinstance(r.get("avg_ret"), float) for r in z["exit_reasons"]),
+              f"{win}: /zone's exit reasons carry avg_ret on every row")
 
         # ── parity, a subset, against the server's own Python ─────────────
         sub = [t for t in z["window_trades"] if sec(t["ticker"]) in keep]
@@ -597,14 +609,16 @@ def main() -> int:
         ok, why = rows_match(o["sub"]["tickers"], ft._ticker_breakdown(by),
                              {"ticker": None, "n": None, "avg_ret": 5e-7, "win_rate": 5e-5, "contrib_pct": 5e-3})
         check(ok, f"{win}: subset ticker breakdown equals _ticker_breakdown on the subset", why)
-        reasons, holds = {}, {}
+        reasons, holds, rets = {}, {}, {}
         for t in sub:
             reasons[t["exit_rule"]] = reasons.get(t["exit_rule"], 0) + 1
             holds.setdefault(t["exit_rule"], []).append(t["exit_bar"])
+            rets.setdefault(t["exit_rule"], []).append(t["ret"])
         meta = {r["rule_key"]: r for r in h.RULES}
         ok, why = rows_match(o["sub"]["exit_reasons"],
-                             ft._exit_breakdown(reasons, holds, meta, z["horizon_auto_added"], len(sub) or 1),
-                             {"rule_key": None, "label": None, "n": None, "frac": 1e-12, "avg_hold": 1e-9})
+                             ft._exit_breakdown(reasons, holds, meta, z["horizon_auto_added"], len(sub) or 1, rets),
+                             {"rule_key": None, "label": None, "n": None, "frac": 1e-12, "avg_hold": 1e-9,
+                              "avg_ret": 1e-12})
         check(ok, f"{win}: subset exit reasons equal _exit_breakdown on the subset", why)
 
         # ── sizing ────────────────────────────────────────────────────────

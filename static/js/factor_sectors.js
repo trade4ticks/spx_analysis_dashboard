@@ -238,15 +238,17 @@ function ftTickerBreakdown(trades) {
 // label, side and backstop flag from the server's row for it.
 function ftExitBreakdown(trades, serverRows) {
   const meta = new Map((serverRows || []).map(r => [r.rule_key, r]));
-  const n = new Map(), hold = new Map();
+  const n = new Map(), hold = new Map(), ret = new Map();
   for (const t of trades) {
     n.set(t.exit_rule, (n.get(t.exit_rule) || 0) + 1);
     hold.set(t.exit_rule, (hold.get(t.exit_rule) || 0) + (+t.exit_bar || 0));
+    ret.set(t.exit_rule, (ret.get(t.exit_rule) || 0) + (+t.ret || 0));
   }
   const tot = trades.length || 1;
   return [...n.entries()].sort((a, b) => b[1] - a[1]).map(([rk, k]) => {
     const m = meta.get(rk) || { rule_key: rk, family: rk, side: '', label: rk, is_backstop: false };
-    return { ...m, n: k, frac: k / tot, avg_hold: hold.get(rk) / k / FT_BARS_PER_SESSION };
+    return { ...m, n: k, frac: k / tot, avg_hold: hold.get(rk) / k / FT_BARS_PER_SESSION,
+             avg_ret: ret.get(rk) / k };
   });
 }
 
