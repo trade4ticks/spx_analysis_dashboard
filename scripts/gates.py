@@ -379,7 +379,7 @@ COVERS = {
     "check_oo_market_sql":       [("ok", 150)],                                     # 197
     "check_ft_population":       [("ok", 90)],                                      # 119
     "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 16)],             # 21
-    "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 32)],             # 42
+    "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 78)],             # 104 (+ cap, policy row; 2026-11-07)
     "check_ft_sectors_ui":       [(r"(\d+) assertions, failures", 26)],             # 35
     "check_strategy_signal":     [("ok", 85)],                                      # 112
     "check_strategy_signal_ui":  [(r"(\d+) assertions, failures", 100)],            # 137

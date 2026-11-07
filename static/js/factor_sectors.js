@@ -56,8 +56,8 @@ function ftMapCheck(idx, liveTickers) {
 // Copies of `trades` carrying usd_size from ONE _computeDollarSeries pass
 // over the whole list. A trade that pass skipped (no usable price) gets no
 // stamp, and is skipped again wherever it goes.
-function ftStampSizes(FC, cmp, trades, perTrade, dailyCap) {
-  const ds = FC._computeDollarSeries(cmp, trades || [], perTrade, dailyCap);
+function ftStampSizes(FC, cmp, trades, perTrade, dailyCap, cap) {
+  const ds = FC._computeDollarSeries(cmp, trades || [], perTrade, dailyCap, cap);
   const size = new Map();
   // (ticker, trade_date) is unique within a zone's list (one position per
   // ticker per day -- see _computeDollarSeries). Were it ever not, both rows
@@ -67,6 +67,51 @@ function ftStampSizes(FC, cmp, trades, perTrade, dailyCap) {
     const s = size.get(t.ticker + '|' + t.trade_date);
     return s == null ? { ...t } : { ...t, usd_size: s };
   });
+}
+
+
+// ── The per-sector capital cap: its inputs ───────────────────────────────
+// The cap itself is in _computeDollarSeries (factor_charts.js), so the stat
+// bar, the grid and the suite cannot size differently. These build what it
+// reads.
+
+// Sessions held AFTER the entry session: ceil(exit_bar / 390) - 1, floored
+// at 0. The Peak sector exposure definition, and the server's _nights
+// (factor_trades.py), which encodes the grid's and suite's holds.
+function ftNights(exitBar) {
+  const eb = +exitBar;
+  if (exitBar == null || !isFinite(eb)) return null;
+  return Math.max(0, Math.ceil(eb / FT_BARS_PER_SESSION) - 1);
+}
+
+// The server's hold code (_hold_pack): `hw` characters per trade, "." = none.
+const FT_HOLD_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_';
+function ftHoldDecode(h, hw) {
+  const w = hw || 1, n = (h || '').length / w, out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const c0 = h[i * w];
+    if (c0 === '.') { out[i] = null; continue; }
+    let v = 0;
+    for (let j = 0; j < w; j++) v = v * 64 + FT_HOLD_ALPHABET.indexOf(h[i * w + j]);
+    out[i] = v;
+  }
+  return out;
+}
+
+// The cap's options for _computeDollarSeries, or null when it is off.
+// `calendar`: every session (a zone's trading_days, the grid's and suite's
+// calendar). A trade's hold is its `nights` when the payload carries one
+// (grid, suite), else from its exit_bar (zone).
+function ftCapOpts(usd, idx, calendar) {
+  if (!(usd > 0) || !idx || !Array.isArray(calendar) || !calendar.length) return null;
+  const at = new Map(calendar.map((d, i) => [d, i]));
+  return {
+    usd: +usd,
+    D: calendar.length,
+    sectorOf: tk => ftSectorOf(idx, tk),
+    sessionOf: d => at.get(d),
+    nightsOf: t => (t.nights !== undefined ? t.nights : ftNights(t.exit_bar)),
+  };
 }
 
 
@@ -257,8 +302,9 @@ function ftPeakSectorExposure(sized, tradingDays, idx, only) {
     if (t.usd_size == null) continue;
     const i = at.get(t.trade_date);
     if (i === undefined) { unplaced++; continue; }
-    const eb = +t.exit_bar;
-    const nights = isFinite(eb) ? Math.max(0, Math.ceil(eb / FT_BARS_PER_SESSION) - 1) : 0;
+    // The cap's own hold (ftNights), so the peak and the cap cannot disagree
+    // about how long a position is open.
+    const nights = t.nights !== undefined ? (t.nights ?? 0) : (ftNights(t.exit_bar) ?? 0);
     const sec = ftSectorOf(idx, t.ticker);
     if (!diff.has(sec)) diff.set(sec, new Float64Array(D + 1));
     const a = diff.get(sec), end = Math.min(i + nights + 1, D);

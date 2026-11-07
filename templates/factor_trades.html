@@ -453,6 +453,12 @@
         <label>Daily cap</label>
         <input type="number" x-model.number.lazy="dailyCap" step="1000"
                @change="renderCharts()">
+        {#- Concurrent per-sector capital cap. Blank = off. A risk policy, so
+            it applies at this setting to the stat bar, every pane, the grid
+            and the suite alike, and is never swept. Soft: see capText(). -#}
+        <label title="Most dollars open in any one sector at once. Blank = no cap.">Sector cap ($)</label>
+        <input type="number" x-model.number.lazy="sectorCap" step="1000" min="0"
+               placeholder="off" @change="renderCharts()">
         <!-- Max strike: a trade on a ticker priced above this is not taken
              at all. Default $1,000. -->
         {#- Also .lazy, though max strike is a SERVER-side population filter
@@ -878,6 +884,8 @@
             <b style="color:var(--text)" x-text="peakSectorText()"></b><template x-if="lockedZone"><span> · locked:
             <span x-text="peakSectorText(lockedZone)"></span></span></template>
             <span title="Open on a session = entered on or before it and not yet exited: the exposure a cap checked at entry would see. Trade activity counts only what is held over a close, so it peaks lower. The share is of everything open that session, every sector.">ⓘ</span></div>
+          <div x-show="capText()"><span x-text="capText()"></span>
+            <span title="Greedy, in date order: a day's entries in one sector are sized together against the room left under the cap (what is still open from earlier days), and scaled down together if they do not fit. No trade is ever skipped -- each keeps at least one share -- so a sector can pass the cap by up to one share's price per entry -- and on a name priced above its allocation those add up for as long as the positions are held. Exposure counts each position from its entry session through its exit session, as Peak sector exposure does.">ⓘ</span></div>
           <div x-show="sectorFiltered()" style="color:#e0b066">Filtered to <span x-text="(sectorKeep || []).length"></span>
             of <span x-text="sectorNames().length"></span> sectors: the stats below are that subset's OWN, not its
             share of the whole, and each trade keeps the size it had with every sector in.</div>

@@ -1389,8 +1389,28 @@ adding up to the total, and the fixture proving re-sizing would differ;
 a day-by-day count) and `check_ft_sectors_ui.py` (Edge, real time, clicked:
 chips, stat bar, every pane, legend, locked row, TRAIN→TEST, "all").
 
-**Part B, the concurrent sector cap, is scoped, not built** (the user's
-call, 2026-11-07: use Part A first, pick a level). Decided: GREEDY (each
+**Part B, the concurrent sector cap, is BUILT, off by default** (2026-11-07;
+the LEVEL is the user's to pick from the per-sector peaks — never default
+one). Rail input *Sector cap ($)*, blank = off; one dollar figure for every
+sector. It lives INSIDE `_computeDollarSeries` (an optional 5th arg, built
+by `ftCapOpts`; absent = the old path exactly, which every other page
+uses), so the stat bar, panes (`equityDollarParams.ft.cap`), grid and suite
+size with one function. Holds: zone trades from `exit_bar` (`ftNights`);
+grid combos and suite windows ship `h`/`hw` (one code per trade,
+`_hold_pack`, base-64) plus `calendar` (the tt_bins sessions, = /zone's
+`trading_days`). Memo keys go through `_sizingKey()` (includes the cap and
+whether the sector map has loaded). Saved cards snapshot `sectorCap`; a card
+from before it restores as OFF. The status line under the peak
+(`capText`) reports scaled entries, sector-days bound and the worst
+overshoot. **Soft, and the overshoot compounds**: each entry passes the cap
+by at most one share, but on a name priced above its allocation those
+1-share minimums stack for as long as they are held. Gate:
+`check_ft_sectors` "cap" (sizes equal an independent Python reference;
+planted earlier-days-only and desired-not-rounded variants must differ;
+never skipped; peak = cap + reported overshoot) and "policy" (the REAL
+/suite's policy row equals the stat bar, through the page's own methods,
+cap off and on, to the cent; calmar to 1e-5 because the suite ships prices
+at 4 dp; holds stripped must break it). The design that was agreed: GREEDY (each
 position sized against the actual sizes already open in its sector), with
 same-day entries in one sector scaled together against the room left
 (they share the entry anchor, so they are simultaneous), exposure measured

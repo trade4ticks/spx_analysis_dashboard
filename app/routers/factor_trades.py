@@ -2294,6 +2294,58 @@ SUITE_GROUPS = [
 ]
 
 
+# ── Holds, for the per-sector capital cap ─────────────────────────────────
+#
+# The cap needs each trade's hold, and the grid and the suite compute exit
+# bars and used to discard them. A position is open on its entry session and
+# on `nights` sessions after it, nights = ceil(exit_bar / 390) - 1, floored at
+# 0 -- the definition Peak sector exposure uses, mirrored by ftNights in
+# static/js/factor_sectors.js (the policy-row gate holds the two together).
+#
+# ONE CHARACTER PER TRADE, aligned with the trades it describes: ~221
+# combinations x ~10k trades as JSON int arrays would add about as much as
+# 47 combinations; a string, about 7. Width 2 only if a hold ever passes 63
+# sessions (max_days is 20 today). "." = no hold (a trade with no return,
+# which sizing skips anyway).
+HOLD_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
+
+
+def _nights(exit_bar) -> int | None:
+    try:
+        eb = float(exit_bar)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(eb):
+        return None
+    return max(0, math.ceil(eb / BARS_PER_SESSION) - 1)
+
+
+def _hold_pack(exit_bars) -> dict:
+    """{"h": one fixed-width code per trade, "hw": the width}."""
+    ns = [_nights(x) for x in exit_bars]
+    top = max((n for n in ns if n is not None), default=0)
+    a = len(HOLD_ALPHABET)
+    w = 1 if top < a else 2
+    if top >= a ** w:
+        raise ValueError(f"a hold of {top} sessions does not fit the hold code")
+    pad = "." * w
+
+    def enc(n):
+        if n is None:
+            return pad
+        return HOLD_ALPHABET[n] if w == 1 else HOLD_ALPHABET[n // a] + HOLD_ALPHABET[n % a]
+    return {"h": "".join(enc(n) for n in ns), "hw": w}
+
+
+async def _session_calendar(conn) -> list[str]:
+    """Every session, the same list /zone sends as trading_days -- the grid's
+    and suite's `dates` hold ENTRY dates only, and a hold runs over sessions
+    nobody entered on."""
+    rows = await conn.fetch(
+        "SELECT DISTINCT trade_date FROM tt_bins ORDER BY trade_date")
+    return [r["trade_date"].isoformat() for r in rows]
+
+
 def _split_pack(rows, pack):
     """Pack one variant's rows per window.
 
@@ -2356,6 +2408,9 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
             cutoff_d = _date.fromisoformat(cutoff_iso)
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
+
+        # Every session, for the sector cap's holds.
+        calendar = await _session_calendar(conn)
 
         # Same resolver /zone uses, so a suite or a grid cannot come to
         # disagree with the zone it is sweeping around. The mask is discarded:
@@ -2428,7 +2483,7 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         return i
 
     def _pack(rows):
-        t, d, r, px = [], [], [], []
+        t, d, r, px, eb = [], [], [], [], []
         for row in rows:
             ret = row["exit_return"]
             if ret is None:
@@ -2442,7 +2497,9 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
             # hand these rows to the existing function untouched.
             _p = row["entry_price"]
             px.append(round(float(_p), 4) if _p is not None else None)
-        return {"t": t, "d": d, "r": r, "p": px}
+            eb.append(row["exit_bar"])
+        # The holds the sector cap needs, one code per trade above.
+        return {"t": t, "d": d, "r": r, "p": px, **_hold_pack(eb)}
 
     by_group: dict = {}
     errors = []
@@ -2501,6 +2558,8 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         "rows": out_rows,
         "tickers": tickers,
         "dates": dates,
+        # Every session, for the sector cap's holds (`dates` is entries only).
+        "calendar": calendar,
         "hold": ctx.hold,
         "n_variants": len(variants),
         "n_trades": total_rows,
@@ -2620,6 +2679,9 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
             cutoff_d = _date.fromisoformat(cutoff_iso)
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
+
+        # Every session, for the sector cap's holds.
+        calendar = await _session_calendar(conn)
 
         # Same resolver /zone uses, so a suite or a grid cannot come to
         # disagree with the zone it is sweeping around. The mask is discarded:
@@ -3020,9 +3082,13 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
             tot = int(rc.sum()) or 1
             reasons[wn] = {str(a): int(b) / tot for a, b in zip(ru, rc)}
 
+        # The holds, for the sector cap: this combination's own exit bars,
+        # one code per skeleton trade ("." where it has no return).
+        hp = _hold_pack([None if np.isnan(r_) else b_ for b_, r_ in zip(eb, er)])
         combos_out.append({
             **m,
             "r": [None if np.isnan(x) else round(float(x), 8) for x in er],
+            "h": hp["h"], "hw": hp["hw"],
             "train": stats["train"], "test": stats["test"],
             "reasons": reasons,
         })
@@ -3054,6 +3120,8 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in GRID_METRICS],
         "tickers": tickers,
         "dates": dates,
+        # Every session, for the sector cap's holds (`dates` is entries only).
+        "calendar": calendar,
         "skeleton": {"t": skel_t, "d": skel_d, "p": skel_p, "w": skel_w},
         "combos": combos_out,
         "null_index": null_ix,

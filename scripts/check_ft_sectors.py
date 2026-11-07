@@ -198,6 +198,271 @@ def close(a, b, tol=1e-9) -> bool:
     return a == b
 
 
+# ── The per-sector capital cap ────────────────────────────────────────────
+#
+# CAP: the page's capped sizing (_computeDollarSeries + ftCapOpts) against an
+# independent Python reference of the agreed rule -- greedy in date order, a
+# day's same-sector entries scaled TOGETHER against the room left, exposure
+# booked at the ROUNDED size, never a trade skipped (1-share minimum). The
+# reference has two planted variants (earlier days only; desired instead of
+# rounded); each must disagree with the page on this fixture, or the check
+# could not see that mistake.
+#
+# POLICY: the suite's policy row equals the stat bar -- the agreement that
+# used to be a console log. The REAL /suite and /zone over the same rows, the
+# page's own methods (factor_trades.js, Alpine stubbed) on both sides, cap
+# off and on. Planted: the suite's holds stripped must break it under a cap.
+CAP_LEVELS = [4000.0, 100.0, 1e12]       # binds; 1-share everywhere; never binds
+
+
+def calls_with_rows(h, rows, fn):
+    """Run `fn` with every trade-row query (bar the random draw) answered by
+    `rows`, as zones() does."""
+    orig = h.respond
+
+    def respond(sql, args):
+        s = " ".join(sql.split())
+        r = orig(sql, args)
+        if r and "unnest($3::date[], $4::int[])" not in s and "exit_return" in r[0] and "ticker" in r[0]:
+            return rows
+        return r
+    h.respond = respond
+    h.DAYS = SESSIONS
+    try:
+        return fn()
+    finally:
+        h.respond = orig
+
+
+def suite_and_grid(h, ft_mod, rows) -> dict:
+    import app.routers.oi_analysis as oia
+    base = dict(primary_metric="a", secondary_metric="b", n_bins=20,
+                rule_keys=["fixed_stop__5"], max_strike=1000, cells=[[1, 2]])
+
+    def go():
+        oia._TT_CUTOFF_CACHED = None
+        s = asyncio.run(ft_mod.suite(req=ft_mod.SuiteReq(**base, n_draws=1, concurrency=1),
+                                     pool=h.FakePool()))
+        oia._TT_CUTOFF_CACHED = None
+        g = asyncio.run(ft_mod.grid(req=ft_mod.GridReq(**base, sweep_families=["max_days"]),
+                                    pool=h.FakePool()))
+        return {"suite": json.loads(json.dumps(s, default=str)),
+                "grid": json.loads(json.dumps(g, default=str))}
+    return calls_with_rows(h, rows, go)
+
+
+def ref_capped_sizes(trades, days, sec, cap, per_trade=2000.0, daily_cap=10000.0,
+                     same_day=True, rounded=True):
+    """The agreed cap rule, written independently of the page. Sizes in the
+    order of `trades` (None where the page would skip the trade)."""
+    at = {d: i for i, d in enumerate(days)}
+    by_date: dict = {}
+    for j, t in enumerate(trades):
+        by_date.setdefault(t["trade_date"], []).append(j)
+    sizes = [None] * len(trades)
+    booked = []                                   # (sector, entry ix, nights, size)
+
+    def px_of(t):
+        raw = t.get("spot_entry_raw")
+        try:
+            raw = float(raw)
+        except (TypeError, ValueError):
+            raw = float("nan")
+        return raw if math.isfinite(raw) and raw > 0 else float(t.get("spot_entry") or "nan")
+
+    for d in sorted(by_date):
+        js = by_date[d]
+        n = max(1, len({trades[j]["ticker"] for j in js}))
+        alloc = min(per_trade, daily_cap / n)
+        k = at[d]
+        blocks: dict = {}
+        for j in js:
+            t = trades[j]
+            px = px_of(t)
+            if not (math.isfinite(px) and px > 0 and math.isfinite(float(t["ret"]))):
+                continue
+            blocks.setdefault(sec(t["ticker"]), []).append((j, px))
+        for s_, items in blocks.items():
+            open_ = sum(v for ss, i, nn, v in booked if ss == s_ and i <= k <= i + nn and i < k) \
+                if not same_day else \
+                sum(v for ss, i, nn, v in booked if ss == s_ and i <= k <= i + nn)
+            room = max(0.0, cap - open_)
+            full = [max(1, math.floor(alloc / px)) * px for _, px in items]
+            if same_day:
+                block = sum(full) if rounded else alloc * len(items)
+                f = 1.0 if block <= room else room / block
+                for (j, px), fu in zip(items, full):
+                    sizes[j] = fu if f == 1.0 else max(1, math.floor(alloc * f / px)) * px
+            else:                                  # PLANTED: each trade alone
+                for (j, px), fu in zip(items, full):
+                    sizes[j] = fu if fu <= room else max(1, math.floor(alloc * (room / fu) / px)) * px
+            for j, _ in items:
+                eb = trades[j].get("exit_bar")
+                nights = max(0, math.ceil(float(eb) / 390) - 1) if eb is not None else 0
+                booked.append((s_, k, nights, sizes[j]))
+    return sizes
+
+
+CAP_NODE = r"""
+const fs = require('fs'), vm = require('vm');
+const [inPath, chartsPath, sectorsPath, pagePath] = process.argv.slice(2);
+const IN = JSON.parse(fs.readFileSync(inPath, 'utf8'));
+global.window = global;
+let factory = null;
+global.Alpine = { data: (_n, f) => { factory = f; }, raw: x => x };
+global.document = { addEventListener: (_e, f) => f(), getElementById: () => null };
+vm.runInThisContext(fs.readFileSync(chartsPath, 'utf8'));
+vm.runInThisContext(fs.readFileSync(sectorsPath, 'utf8'));
+vm.runInThisContext(fs.readFileSync(pagePath, 'utf8'));
+const FC = window.FactorCharts;
+const idx = ftSectorIndex(IN.sectors);
+const out = { cap: {}, policy: {}, grid: {} };
+const c = factory();
+c.perTrade = 2000; c.dailyCap = 10000; c.sectorIdx = idx;
+for (const win of ['train', 'test']) {
+  const z = IN.zones[win];
+  const uncapped = FC._computeDollarSeries({}, z.window_trades, 2000, 10000);
+  const offNull = FC._computeDollarSeries({}, z.window_trades, 2000, 10000, null);
+  out.cap[win] = { n_uncapped: uncapped.tradeDollarSizes.length,
+                   null_same: JSON.stringify(offNull) === JSON.stringify(uncapped), levels: {} };
+  for (const lvl of IN.levels) {
+    const cap = ftCapOpts(lvl, idx, z.trading_days);
+    const ds = FC._computeDollarSeries({}, z.window_trades, 2000, 10000, cap);
+    const sized = ftStampSizes(FC, {}, z.window_trades, 2000, 10000, cap);
+    const peaks = {};
+    for (const name of [...idx.order, idx.unassigned])
+      peaks[name] = ftPeakSectorExposure(sized, z.trading_days, idx, new Set([name])).usd;
+    out.cap[win].levels[lvl] = {
+      sizes: sized.map(t => t.usd_size ?? null), report: ds.cap,
+      n: ds.tradeDollarSizes.length, peaks,
+      same_as_uncapped: JSON.stringify(ds.equity) === JSON.stringify(uncapped.equity) };
+  }
+  // POLICY ROW == STAT BAR: the page's own paths, cap off and on.
+  out.policy[win] = {};
+  c.window = win; c.zoneData = z;
+  for (const lvl of [null, ...IN.levels]) {
+    c.sectorCap = lvl;
+    c.suiteData = IN.suite;
+    const sb = c._dollarStats(c._zoneDollarSeries(z.window_trades, z));
+    const pol = c.suiteTable.policy[win];
+    c.suiteData = IN.suite_noholds;          // PLANTED: holds stripped
+    const polBad = c.suiteTable.policy[win];
+    out.policy[win][String(lvl)] = { sb, pol, polBad };
+  }
+}
+// The grid: its holds and calendar reach the cap.
+const g = IN.grid;
+c.gridData = g;
+out.grid.n_skel = g.skeleton.t.length;
+out.grid.hold_lens = g.combos.map(x => ftHoldDecode(x.h, x.hw).length);
+out.grid.calendar = g.calendar;
+c.sectorCap = null;
+const off = g.combos.map(x => c._gridStats(x, 'train').total_ret);
+// $100: the grid's fixture holds overnight nothing and has at most two names
+// a sector a day, so only a cap below one position binds there.
+c.sectorCap = IN.levels[1];
+const on = g.combos.map(x => c._gridStats(x, 'train').total_ret);
+out.grid.off = off; out.grid.on = on;
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def run_cap_node(payload: dict) -> dict:
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "in.json").write_text(json.dumps(payload), encoding="utf-8")
+    (tmp / "cap.js").write_text(CAP_NODE, encoding="utf-8")
+    p = subprocess.run(["node", str(tmp / "cap.js"), str(tmp / "in.json"),
+                        str(ROOT / "static/js/factor_charts.js"),
+                        str(ROOT / "static/js/factor_sectors.js"),
+                        str(ROOT / "static/js/factor_trades.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=180)
+    if p.returncode:
+        raise RuntimeError("node failed: " + p.stderr[-1500:])
+    return json.loads(p.stdout)
+
+
+def check_cap(h, ft, rows, zs, sec) -> None:
+    from app import factor_sectors as fs
+    sg = suite_and_grid(h, ft, rows)
+    suite, grid = sg["suite"], sg["grid"]
+    check(not suite.get("error") and not grid.get("error"),
+          "the real /suite and /grid ran over the fixture",
+          str(suite.get("error") or grid.get("error")))
+    noholds = json.loads(json.dumps(suite))
+    for row in noholds["rows"]:
+        for run in row["runs"]:
+            for w in ("train", "test"):
+                run["trades"][w].pop("h", None)
+                run["trades"][w].pop("hw", None)
+    out = run_cap_node({"zones": zs, "sectors": fs.payload(), "levels": CAP_LEVELS,
+                        "suite": suite, "suite_noholds": noholds, "grid": grid})
+
+    for win in ("train", "test"):
+        z, o = zs[win], out["cap"][win]
+        trades, days = z["window_trades"], z["trading_days"]
+        check(o["null_same"], f"{win}: cap=null is the uncapped path exactly")
+        for lvl in CAP_LEVELS:
+            L = o["levels"][next(k for k in o["levels"] if float(k) == lvl)]
+            tag = f"{win}, cap ${lvl:,.0f}"
+            check(L["n"] == o["n_uncapped"], f"{tag}: no trade skipped ({L['n']} of {o['n_uncapped']})")
+            ref = ref_capped_sizes(trades, days, sec, lvl)
+            bad = [i for i, (a, b) in enumerate(zip(L["sizes"], ref))
+                   if not ((a is None and b is None) or (a is not None and b is not None and abs(a - b) < 1e-6))]
+            check(not bad and len(L["sizes"]) == len(ref),
+                  f"{tag}: every size equals the independent reference (greedy, same-day block, rounded)",
+                  f"{len(bad)} differ, first #{bad[0]}: page {L['sizes'][bad[0]]} vs ref {ref[bad[0]]}" if bad else "")
+            # The soft bound: a sector's peak passes the cap only by the
+            # 1-share minimums, which the report states.
+            r = L["report"]
+            worst = max(L["peaks"].values())
+            check(worst <= lvl + max(0.0, r["maxOver"]) + 1e-6,
+                  f"{tag}: every sector's peak <= cap + the reported overshoot "
+                  f"(peak {worst:,.2f}, overshoot {r['maxOver']:,.2f})")
+            check(r["unplaced"] == 0 and r["noHold"] == 0, f"{tag}: every trade placed, every hold known")
+            if lvl == CAP_LEVELS[0]:
+                check(r["sectorDays"] > 0 and r["scaled"] > 0,
+                      f"{tag}: binds on this fixture ({r['scaled']} scaled on {r['sectorDays']} sector-days)")
+                for variant, kw in (("earlier days only", {"same_day": False}),
+                                    ("desired, not rounded", {"rounded": False})):
+                    alt = ref_capped_sizes(trades, days, sec, lvl, **kw)
+                    differs = any((a is None) != (b is None) or (a is not None and abs(a - b) > 1e-6)
+                                  for a, b in zip(L["sizes"], alt))
+                    check(differs, f"{tag}: the planted '{variant}' rule gives different sizes, so the check can see it")
+            if lvl == CAP_LEVELS[1]:
+                check(r["maxOver"] > 0, f"{tag}: a cap below one share is passed, never refused (soft; overshoot {r['maxOver']:,.2f})")
+            if lvl == CAP_LEVELS[2]:
+                check(L["same_as_uncapped"], f"{tag}: a cap that never binds changes nothing")
+
+        # ── policy row == stat bar ─────────────────────────────────────────
+        for lvl, P in out["policy"][win].items():
+            sb, pol, bad_ = P["sb"], P["pol"], P["polBad"]
+            # To the cent on the dollar figures. Calmar to 1e-5 relative: the
+            # suite ships entry prices rounded to 4 dp (the zone does not), so
+            # sizes differ in the sub-cent and a ratio of two such figures in
+            # the 6th digit. A floor flipped by that rounding would move a
+            # whole share -- far past the cent -- and fail here.
+            pairs = [("total_ret", "total_ret_usd"), ("avg_annual", "avg_annual_usd"),
+                     ("max_dd", "max_dd_usd"), ("calmar", "calmar")]
+            diff = [f"{a} {pol.get(a)} vs {sb.get(b)}" for a, b in pairs
+                    if not (pol.get(a) is not None and sb.get(b) is not None
+                            and abs(pol[a] - sb[b]) <= (0.01 if a != "calmar" else 1e-5 * max(1, abs(sb[b]))))]
+            what = "no cap" if lvl == "null" else f"cap ${float(lvl):,.0f}"
+            check(not diff, f"{win}, {what}: the suite's policy row equals the stat bar "
+                            f"(total {sb.get('total_ret_usd'):,.2f}, max DD {sb.get('max_dd_usd'):,.2f})",
+                  " | ".join(diff))
+            if lvl != "null" and float(lvl) == CAP_LEVELS[0]:
+                check(abs((bad_.get("total_ret") or 0) - sb["total_ret_usd"]) > 0.01,
+                      f"{win}, {what}: with the suite's holds stripped they disagree, so the check can see it")
+
+    g = out["grid"]
+    check(all(n == g["n_skel"] for n in g["hold_lens"]),
+          f"grid: every combination's holds decode to one per skeleton trade ({g['n_skel']})")
+    check(g["calendar"] == zs["train"]["trading_days"], "grid: its calendar is /zone's trading_days")
+    check(suite.get("calendar") == zs["train"]["trading_days"], "suite: its calendar is /zone's trading_days")
+    check(any(a is not None and b is not None and abs(a - b) > 0.01 for a, b in zip(g["off"], g["on"])),
+          "grid: the cap reaches the grid's dollar figures")
+
+
 def rows_match(js: list, py: list, keys: dict) -> tuple[bool, str]:
     """keys: field -> tolerance (None = exact)."""
     if len(js) != len(py):
@@ -364,6 +629,9 @@ def main() -> int:
               f"{win}: a one-sector peak is that sector's, and no larger than the every-sector peak")
         check(o["peak_crypto"]["total"] >= o["peak_crypto"]["usd"],
               f"{win}: the share's denominator is the whole book, not the selection")
+
+    # ── the per-sector cap, and the policy row against the stat bar ───────
+    check_cap(h, ft, rows, new, sec)
 
     mc = out["map_check"]
     check("ZZZZ" in mc["unmapped"] and "SPY" not in mc["unmapped"] and "BAC" in mc["notInData"]

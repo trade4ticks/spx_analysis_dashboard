@@ -48,6 +48,7 @@ let _gridStatsKey = null, _gridStatsVal = null, _gridStatsData = null;
 // entries with it.
 const _ftSizedCache = new WeakMap();   // zone -> {key, val: {window, series}}
 const _ftViewCache  = new WeakMap();   // zone -> {key, val: view}
+const _ftCapCache   = new WeakMap();   // calendar -> {usd, idx, val: ftCapOpts}
 
 // ── TEMPORARY DIAGNOSTIC (remove once the matrix stale-value bug is closed) ──
 // Off unless you set  window.FT_DEBUG = true  in the console.
@@ -130,6 +131,11 @@ document.addEventListener('alpine:init', () => {
     ocOutcomes: [],
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
+    // Concurrent per-sector capital cap, $ (null/blank = off). A RISK POLICY
+    // applied at this setting everywhere -- stat bar, panes, grid, suite --
+    // never swept. Inside _computeDollarSeries; see _capDay there.
+    sectorCap: null,
+    capReport: null,              // the stat bar's cap report (_capReport)
     // ── Metric filters ───────────────────────────────────────────────────
     // A POPULATION filter like max strike: rows the server removes from every
     // query before anything is computed, on the metric's RAW daily_features
@@ -1180,13 +1186,19 @@ document.addEventListener('alpine:init', () => {
     _gridStats(c, win) {
       const d = this.gridData, sk = d.skeleton;
       const want = win === 'train' ? 1 : 0;
+      const cap = this._capFor(d.calendar);
+      // This combination's own holds (the cap needs them; exits differ by
+      // combination), decoded only when the cap is on.
+      const holds = cap ? ftHoldDecode(c.h, c.hw) : null;
       const trades = [];
       for (let i = 0; i < sk.w.length; i++) {
         if (sk.w[i] !== want) continue;
         const ret = c.r[i];
         if (ret == null) continue;
-        trades.push({ ticker: d.tickers[sk.t[i]], trade_date: d.dates[sk.d[i]],
-                      ret, spot_entry_raw: sk.p[i] });
+        const t = { ticker: d.tickers[sk.t[i]], trade_date: d.dates[sk.d[i]],
+                    ret, spot_entry_raw: sk.p[i] };
+        if (holds) t.nights = holds[i];
+        trades.push(t);
       }
       const base = { avg_ret: c[win]?.avg_ret ?? null, n: c[win]?.n ?? 0,
                      avg_hold: c[win]?.avg_hold ?? null };
@@ -1194,7 +1206,7 @@ document.addEventListener('alpine:init', () => {
         return { ...base, total_ret: null, max_dd: null, calmar: null, exit_share: null };
       }
       const ds = window.FactorCharts._computeDollarSeries(
-        this, trades, this.perTrade, this.dailyCap);
+        this, trades, this.perTrade, this.dailyCap, cap);
       const $d = this._dollarStats(ds);
       // Exit share of the rules this combination actually selected — the
       // question "how often did this stop fire" only means anything about
@@ -1214,11 +1226,11 @@ document.addEventListener('alpine:init', () => {
     get gridStats() {
       const d = this.gridData;
       if (!d) return null;
-      // perTrade / dailyCap are live inputs and they feed
+      // perTrade / dailyCap / the sector cap are live inputs and they feed
       // _computeDollarSeries, so calmar, max_dd and total_ret all move when
       // position sizing changes. They belong in the key; metric and window
       // do not.
-      const key = `${this.perTrade}|${this.dailyCap}`;
+      const key = this._sizingKey();
       if (key === _gridStatsKey && _gridStatsData === d && _gridStatsVal) {
         return _gridStatsVal;
       }
@@ -1358,7 +1370,7 @@ document.addEventListener('alpine:init', () => {
       // built from d.sweep, i.e. what the completed run actually swept).
       const memoKey = [this.gridPairX, this.gridPairY, this.gridWindow,
                        this.gridMetric, this.gridColourBy,
-                       this.perTrade, this.dailyCap].join('|');
+                       this._sizingKey()].join('|');
       if (memoKey === _gridHeatKey && _gridHeatData === d && _gridHeatVal) {
         _ftDbg('gridHeat MEMO-HIT', {
           metric: this.gridMetric, window: this.gridWindow,
@@ -1780,7 +1792,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       const out = [];
       out.push(['# Factor Trades — parameter response grid']);
       out.push(['# units', d.units_note]);
-      out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap']);
+      out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap',
+                this._capCsv()]);
       out.push(['# cutoff', d.cutoff_date]);
       out.push(['# entry_anchor', d.entry_anchor]);
       for (const r of this._csvPopulationRows(d)) out.push(r);
@@ -1872,13 +1885,18 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     _suiteTrades(d, packed) {
       const out = [];
       const T = d.tickers, D = d.dates;
+      // Holds ride along for the sector cap: random draws are capped too, or
+      // the comparison is rigged against the capped policy.
+      const holds = packed.h != null ? ftHoldDecode(packed.h, packed.hw) : null;
       for (let i = 0; i < packed.r.length; i++) {
-        out.push({
+        const t = {
           ticker: T[packed.t[i]],
           trade_date: D[packed.d[i]],
           ret: packed.r[i],
           spot_entry_raw: packed.p[i],
-        });
+        };
+        if (holds) t.nights = holds[i];
+        out.push(t);
       }
       return out;
     },
@@ -1896,7 +1914,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
                  max_dd: null, calmar: null };
       }
       const ds = window.FactorCharts._computeDollarSeries(
-        this, this._suiteTrades(d, packed), this.perTrade, this.dailyCap);
+        this, this._suiteTrades(d, packed), this.perTrade, this.dailyCap,
+        this._capFor(d.calendar));
       const $d = this._dollarStats(ds);
       return { ...base,
                total_ret:  $d?.total_ret_usd ?? null,
@@ -1933,7 +1952,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     get suiteTable() {
       const d = this.suiteData;
       if (!d) return null;
-      const key = `${this.perTrade}|${this.dailyCap}`;
+      const key = this._sizingKey();
       if (key === _suiteTableKey && _suiteTableData === d && _suiteTableVal) {
         return _suiteTableVal;
       }
@@ -2081,7 +2100,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       // them — a suite exported at $2k/$10k is not comparable to one at
       // $5k/$25k, and nothing else in the file would say which it was.
       out.push(['# sizing', '$' + this.perTrade + '/trade',
-                '$' + this.dailyCap + '/day cap']);
+                '$' + this.dailyCap + '/day cap', this._capCsv()]);
       out.push(['# seeds', (d.seeds || []).join(' ')]);
       if (d.hold) out.push(['# drawn hold (sessions)', d.hold.avg_sessions]);
       for (const e of (d.errors || [])) out.push(['# FAILED', e.key, e.error]);
@@ -2296,7 +2315,14 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         // would be lost on restore if it were not snapshotted here.
         perTrade:          this.perTrade,
         dailyCap:          this.dailyCap,
+        sectorCap:         this._capUsd(),
       };
+    },
+
+    // The cap as an export header cell: it changes every dollar figure.
+    _capCsv() {
+      const v = this._capUsd();
+      return v == null ? 'no sector cap' : '$' + v + '/sector cap (soft: 1-share minimum)';
     },
 
     _applyCfg(cfg) {
@@ -2314,9 +2340,13 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       this.selectedSignalIds = [...(cfg.selectedSignalIds || [])];
       this.perTrade          = cfg.perTrade ?? this.perTrade;
       this.dailyCap          = cfg.dailyCap ?? this.dailyCap;
+      // A card saved before the cap existed was sized with none, so ABSENT
+      // means off -- not "keep whatever the rail says now".
+      this.sectorCap         = cfg.sectorCap ?? null;
       // FactorCharts reads this by object identity, so it is replaced rather
       // than mutated in place.
-      this.equityDollarParams.ft = { perTrade: this.perTrade, dailyCap: this.dailyCap };
+      this.equityDollarParams.ft = { perTrade: this.perTrade, dailyCap: this.dailyCap,
+                                     cap: this._zoneCap(this.zoneData) };
     },
 
     // Saveable only while the current run is the live one. Saving a run that
@@ -2574,6 +2604,14 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // $/trade and daily-cap inputs drive the same maths Recall uses.
     // Total / annualised / max-DD in dollars, off the same capped series the
     // equity pane draws — so the stat bar and the chart cannot disagree.
+    // A zone's trades through the one sizing function, with the rail's
+    // sizing and the sector cap on the zone's calendar. The stat bar's path;
+    // the suite's policy row must equal it (check_ft_sectors, "policy").
+    _zoneDollarSeries(trades, zone) {
+      return window.FactorCharts._computeDollarSeries(
+        this, trades, this.perTrade, this.dailyCap, this._zoneCap(zone));
+    },
+
     _dollarStats(ds) {
       const eq = ds.equity || [];
       if (!eq.length) return null;
@@ -2868,19 +2906,56 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       return 'Sector map — ' + parts.join(' · ');
     },
 
+    // Everything a dollar figure depends on, for memo keys. The cap is in it:
+    // a cache keyed on $/trade and the daily cap alone would keep showing
+    // uncapped figures after the cap is set.
+    _sizingKey() {
+      // The map's arrival too: a cap set before it loads is not applied yet.
+      return `${this.perTrade}|${this.dailyCap}|${this._capUsd() ?? '-'}|${this.sectorIdx ? 1 : 0}`;
+    },
+    _capUsd() {
+      const v = +this.sectorCap;
+      return (this.sectorCap !== null && this.sectorCap !== '' && v > 0) ? v : null;
+    },
+    // The cap's options for one calendar, or null when off (or before the
+    // sector map has loaded -- capInactiveReason says which). Memoised per
+    // calendar array so a recompute does not rebuild the session index.
+    _capFor(calendar) {
+      const usd = this._capUsd();
+      if (usd == null || !this.sectorIdx || !calendar || !calendar.length) return null;
+      const cal = window.Alpine ? Alpine.raw(calendar) : calendar;
+      const hit = _ftCapCache.get(cal);
+      if (hit && hit.usd === usd && hit.idx === this.sectorIdx) return hit.val;
+      const val = ftCapOpts(usd, this.sectorIdx, cal);
+      _ftCapCache.set(cal, { usd, idx: this.sectorIdx, val });
+      return val;
+    },
+    // The zone's calendar: /zone's trading_days (the same tt_bins sessions
+    // the grid and suite send as `calendar`).
+    _zoneCap(zone) {
+      const z = zone && (window.Alpine ? Alpine.raw(zone) : zone);
+      return this._capFor(z && z.trading_days);
+    },
+    capInactiveReason() {
+      if (this._capUsd() == null) return '';
+      if (!this.sectorIdx) return 'not applied — the sector map has not loaded';
+      return '';
+    },
+
     // Each trade of a zone with its dollar size, sized ONCE over the whole
     // list exactly as the unfiltered panes size it (the window list as the
     // stat bar does, the series list as the equity pane does).
     _sectorSized(zone) {
       const z = window.Alpine ? Alpine.raw(zone) : zone;
-      const key = this.perTrade + '|' + this.dailyCap;
+      const key = this._sizingKey();
       const hit = _ftSizedCache.get(z);
       if (hit && hit.key === key) return hit.val;
       const FC = window.FactorCharts;
       const win = z.window_trades || [];
+      const cap = this._zoneCap(z);
       const val = {
-        window: ftStampSizes(FC, this, win, this.perTrade, this.dailyCap),
-        series: ftStampSizes(FC, this, z.series_trades || win, this.perTrade, this.dailyCap),
+        window: ftStampSizes(FC, this, win, this.perTrade, this.dailyCap, cap),
+        series: ftStampSizes(FC, this, z.series_trades || win, this.perTrade, this.dailyCap, cap),
       };
       _ftSizedCache.set(z, { key, val });
       return val;
@@ -2891,8 +2966,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     _sectorViewOf(zone) {
       if (!zone) return null;
       const keep = this.sectorKeep, idx = this.sectorIdx;
-      const key = [keep === null ? '*' : keep.join('\u0001'), this.perTrade,
-                   this.dailyCap, this.window].join('|');
+      const key = [keep === null ? '*' : keep.join('\u0001'), this._sizingKey(),
+                   this.window].join('|');
       if (keep === null || !idx) return zone;
       const z = window.Alpine ? Alpine.raw(zone) : zone;
       const hit = _ftViewCache.get(z);
@@ -2912,7 +2987,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     peakSectorText(zone) {
       zone = zone || this.zoneData;
       if (!zone || !this.sectorIdx) return '';
-      void this.perTrade; void this.dailyCap;
+      void this.perTrade; void this.dailyCap; void this.sectorCap;
       const keep = this.sectorKeep;
       if (keep !== null && !keep.length) return '';
       const z = window.Alpine ? Alpine.raw(zone) : zone;
@@ -2924,6 +2999,27 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         + (p.share != null ? ` — ${(p.share * 100).toFixed(0)}% of ${f$(p.total)} deployed` : '')
         + (p.unplaced ? ` (${p.unplaced} trade${p.unplaced > 1 ? 's' : ''} off the calendar, not counted)` : '');
     },
+    // The cap, in one line: what it did to this window's trades and how far
+    // the 1-share minimum carried a sector past it. Empty when off.
+    capText() {
+      const usd = this._capUsd();
+      if (usd == null) return '';
+      const why = this.capInactiveReason();
+      const f$ = window.FactorCharts._statFmt$;
+      if (why) return `Sector cap ${f$(usd)}: ${why}`;
+      const r = this.capReport;
+      if (!r) return `Sector cap ${f$(usd)} (soft)`;
+      const parts = [`Sector cap ${f$(usd)} (soft)`];
+      parts.push(r.scaled
+        ? `scaled ${r.scaled} entr${r.scaled === 1 ? 'y' : 'ies'} on ${r.sectorDays} sector-day${r.sectorDays === 1 ? '' : 's'}`
+        : (r.sectorDays ? `bound on ${r.sectorDays} sector-day${r.sectorDays === 1 ? '' : 's'} (1-share minimums only)`
+                        : 'never bound in this window'));
+      if (r.maxOver > 0.005) parts.push(`exceeded by up to ${f$(r.maxOver)} (${r.maxOverSector}, ${r.maxOverDate}) from 1-share minimums`);
+      if (r.unplaced) parts.push(`${r.unplaced} trade${r.unplaced === 1 ? '' : 's'} off the calendar, uncapped`);
+      if (r.noHold) parts.push(`${r.noHold} with no hold, counted for their entry day only`);
+      return parts.join(' · ');
+    },
+
     // What the peak line is over, in words.
     peakSectorScope() {
       const keep = this.sectorKeep;
@@ -3014,8 +3110,11 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     renderCharts() {
       const FC = window.FactorCharts;
       if (!FC || !this.zoneData) return;
+      // The cap rides with the sizing into FactorCharts' own dollar paths
+      // (equity, capital, year bars), on the zone's calendar.
       this.equityDollarParams.ft = {
         perTrade: this.perTrade, dailyCap: this.dailyCap,
+        cap: this._zoneCap(this.zoneData),
       };
       // Every pane below reads the SECTOR VIEW: the zone itself with every
       // sector on (so the page is exactly what it was), else the subset with
@@ -3023,27 +3122,26 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       const zv = this.zoneView(), lv = this.lockedView();
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
-      const ds = window.FactorCharts._computeDollarSeries(
-        this, zv.window_trades || [],
-        this.perTrade, this.dailyCap);
+      const ds = this._zoneDollarSeries(zv.window_trades || [], this.zoneData);
       this.dollarStats = this._dollarStats(ds);
-      this.dollarStatsAll = (zv === this.zoneData) ? this.dollarStats
-        : this._dollarStats(window.FactorCharts._computeDollarSeries(
-            this, this.zoneData.window_trades || [], this.perTrade, this.dailyCap));
+      const dsAll = (zv === this.zoneData) ? ds
+        : this._zoneDollarSeries(this.zoneData.window_trades || [], this.zoneData);
+      this.dollarStatsAll = (zv === this.zoneData) ? this.dollarStats : this._dollarStats(dsAll);
+      // From EVERY sector: a chip-filtered subset keeps its stamped sizes,
+      // so the cap decides nothing there and its report would read empty.
+      this.capReport = dsAll.cap || null;
       // The locked row's dollar boxes were blank because these were only ever
       // computed for the edited zone. Same function, same sizing inputs, the
       // locked population.
       this.lockedDollarStats = lv
-        ? this._dollarStats(window.FactorCharts._computeDollarSeries(
-            this, lv.window_trades || [], this.perTrade, this.dailyCap))
+        ? this._dollarStats(this._zoneDollarSeries(lv.window_trades || [], this.lockedZone))
         : null;
       // In TRAIN the two populations are identical by construction, so the
       // equity curve's endpoint must equal Total Ret. If it does not, the
       // arrays have been crossed somewhere. Console-loud rather than silent:
       // a mismatch here is a data-integrity bug, not a rounding artefact.
       if (this.window === 'train' && this.dollarStats) {
-        const seriesDs = window.FactorCharts._computeDollarSeries(
-          this, zv.series_trades || [], this.perTrade, this.dailyCap);
+        const seriesDs = this._zoneDollarSeries(zv.series_trades || [], this.zoneData);
         const endPt = seriesDs.equity.length
           ? seriesDs.equity[seriesDs.equity.length - 1].value : 0;
         const diff = Math.abs(endPt - this.dollarStats.total_ret_usd);

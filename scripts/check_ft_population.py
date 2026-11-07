@@ -216,6 +216,18 @@ def population_statements(log):
     return [(sql, args) for sql, args in log if "trade_paths" in sql and "information_schema" not in sql]
 
 
+# Statements a ref may lack without that being a population change: they
+# select no trades. The session calendar (2026-11-07, the sector cap's holds)
+# is the one /zone has always issued, now also in /suite and /grid. EXACT
+# text only -- anything else that differs is still a failure.
+POPULATION_FREE = {"SELECT DISTINCT trade_date FROM tt_bins ORDER BY trade_date"}
+
+
+def _drop_population_free(log):
+    return [(a, x) for a, x in log
+            if not (" ".join(a.split()) in POPULATION_FREE and not x)]
+
+
 def check_unchanged(old, new):
     print("unchanged when unused")
     for strike in (None, 250.0):
@@ -224,6 +236,9 @@ def check_unchanged(old, new):
         for label in o:
             ro, lo = o[label]
             rn, ln = n[label]
+            # Compared with the population-free statements out of BOTH logs,
+            # so a ref that already issued them compares the same way.
+            lo, ln = _drop_population_free(lo), _drop_population_free(ln)
             ok, why = ran(label, rn)
             check(ok, f"{label} (max_strike={strike}) ran {why}")
             same = [(" ".join(a.split()), list(map(repr, x))) for a, x in lo] == \

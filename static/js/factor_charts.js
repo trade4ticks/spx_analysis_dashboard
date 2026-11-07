@@ -48,7 +48,7 @@ window.FactorCharts = {
     if (isDollar) {
       const params  = cmp.equityDollarParams[modeKey] || { perTrade: 2000, dailyCap: 10000 };
       const trades  = detail.combined_trades || [];
-      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
+      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.cap);
       if (!dollarS.equity.length) return;
       const toMs = d => new Date(d).getTime();
       const eqPxy = dollarS.equity.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
@@ -432,7 +432,7 @@ window.FactorCharts = {
       // count path, dollar weights instead of unit weights.
       const { dayDeployedByDate, tradeDollarSizes } =
         window.FactorCharts._computeDollarSeries(cmp,
-          kept, params.perTrade, params.dailyCap,
+          kept, params.perTrade, params.dailyCap, params.cap,
         );
       weightByDate = dayDeployedByDate;
       // Per-TRADE dollar size, needed because open positions are now walked
@@ -917,7 +917,12 @@ window.FactorCharts = {
     };
   },
 
-  _computeDollarSeries(cmp, trades, perTrade, dailyCap) {
+  // `cap` (optional; Factor Trades only): the concurrent per-sector capital
+  // cap, built by ftCapOpts in factor_sectors.js --
+  //   { usd, sectorOf(ticker), sessionOf(date) -> index|undefined,
+  //     nightsOf(trade) -> int|null, D }
+  // Absent, this function is exactly what it was (every other page's path).
+  _computeDollarSeries(cmp, trades, perTrade, dailyCap, cap) {
     // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
     // _labDsCallsThisHover is set to 0 by the hover/leave handlers before
     // they call anything; we count every _computeDollarSeries invocation
@@ -954,10 +959,17 @@ window.FactorCharts = {
     const tradeDollarSizes  = [];
     const equity = [];
     let cum = 0;
+    const capOn = !!(cap && cap.usd > 0);
+    const capState = capOn ? window.FactorCharts._capStart(cap) : null;
     for (const d of dates) {
       const dayTrades = tradesByDate.get(d);
       const N = Math.max(1, tickersByDate.get(d).size);
       const perTickerAlloc = Math.min(perTrade, dailyCap / N);
+      // THE SECTOR CAP: this day's sizes, decided per sector block before
+      // the loop below books them. null when the cap is off.
+      const capSize = capOn
+        ? window.FactorCharts._capDay(capState, cap, d, dayTrades, perTickerAlloc)
+        : null;
       let dayPnl      = 0;
       let dayDeployed = 0;
       for (const t of dayTrades) {
@@ -996,9 +1008,14 @@ window.FactorCharts = {
           continue;
         }
         if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
-        let shares = Math.floor(perTickerAlloc / px);
-        if (shares < 1) shares = 1;   // 1-share min, no redistribution
-        const dollarSize = shares * px;
+        let dollarSize;
+        if (capSize) {
+          dollarSize = capSize.get(t);
+        } else {
+          let shares = Math.floor(perTickerAlloc / px);
+          if (shares < 1) shares = 1;   // 1-share min, no redistribution
+          dollarSize = shares * px;
+        }
         const tradePnl   = dollarSize * ret;
         dayPnl      += tradePnl;
         dayDeployed += dollarSize;
@@ -1014,7 +1031,100 @@ window.FactorCharts = {
       dayDeployedByDate.set(d, dayDeployed);
       equity.push({ date: d, value: cum });
     }
-    return { equity, dayPnlByDate, dayDeployedByDate, tradeDollarSizes };
+    const out = { equity, dayPnlByDate, dayDeployedByDate, tradeDollarSizes };
+    if (capOn) out.cap = window.FactorCharts._capReport(capState, cap);
+    return out;
+  },
+
+  // ── The per-sector capital cap (Factor Trades) ──────────────────────────
+  //
+  // GREEDY, in date order: a day's entries see the exposure already open in
+  // their sector -- positions entered on an earlier session and still held
+  // on this one (open from the entry session through `nights` sessions
+  // after it, the Peak sector exposure definition) -- and the room left is
+  // cap - open.
+  //
+  // SAME-DAY ENTRIES SCALE TOGETHER. Every trade enters at the same anchor,
+  // so a day's entries in one sector are simultaneous: the block is sized
+  // at full allocation, and if it does not fit the room, every trade in it
+  // is scaled by room / block before rounding to shares.
+  //
+  // NEVER SKIPPED. Each trade keeps at least one share however little room
+  // is left (the spot-price distribution depends on every trade being
+  // there), so the cap is SOFT: a sector can pass it by up to one share's
+  // price per entry. Exposure is booked at the ROUNDED size, which on a
+  // high-priced name can exceed the allocation.
+  //
+  // A trade on a date off the calendar cannot be placed, so it is sized
+  // uncapped and counted (`unplaced`); a trade with no hold is booked for its
+  // entry session only and counted (`noHold`).
+  _capStart(cap) {
+    return { open: new Map(), scaled: 0, sectorDays: 0, maxOver: 0,
+             maxOverSector: null, maxOverDate: null, unplaced: 0, noHold: 0 };
+  },
+
+  _capOpen(st, cap, sec) {
+    let s = st.open.get(sec);
+    if (!s) { s = { diff: new Float64Array(cap.D + 2), run: 0, ptr: 0 }; st.open.set(sec, s); }
+    return s;
+  },
+
+  _capDay(st, cap, d, dayTrades, alloc) {
+    const size = new Map();
+    const k = cap.sessionOf(d);
+    const blocks = new Map();
+    for (const t of dayTrades) {
+      if (t.usd_size != null) continue;          // pre-sized: not re-decided
+      const pxAdj = +t.spot_entry;
+      const pxRawCand = +t.spot_entry_raw;
+      const px = (isFinite(pxRawCand) && pxRawCand > 0) ? pxRawCand : pxAdj;
+      if (!isFinite(px) || px <= 0 || !isFinite(+t.ret)) continue;
+      const full = Math.max(1, Math.floor(alloc / px)) * px;
+      if (k === undefined) { size.set(t, full); st.unplaced++; continue; }
+      const sec = cap.sectorOf(t.ticker);
+      if (!blocks.has(sec)) blocks.set(sec, []);
+      blocks.get(sec).push({ t, px, full });
+    }
+    for (const [sec, items] of blocks) {
+      const s = window.FactorCharts._capOpen(st, cap, sec);
+      while (s.ptr <= k) { s.run += s.diff[s.ptr]; s.ptr++; }
+      const open = s.run;
+      const room = Math.max(0, cap.usd - open);
+      let block = 0;
+      for (const it of items) block += it.full;
+      let booked = 0;
+      if (block <= room) {
+        for (const it of items) { size.set(it.t, it.full); booked += it.full; }
+      } else {
+        const f = room / block;
+        st.sectorDays++;
+        for (const it of items) {
+          const v = Math.max(1, Math.floor(alloc * f / it.px)) * it.px;
+          size.set(it.t, v); booked += v;
+          if (v < it.full) st.scaled++;
+        }
+      }
+      // Booked at the rounded size; closed after the last session held.
+      for (const it of items) {
+        let n = cap.nightsOf(it.t);
+        if (n == null || !isFinite(n)) { n = 0; st.noHold++; }
+        const v = size.get(it.t);
+        s.run += v;
+        const end = Math.min(k + n + 1, cap.D + 1);
+        s.diff[end] -= v;
+      }
+      const over = open + booked - cap.usd;
+      if (over > st.maxOver + 1e-9) {
+        st.maxOver = over; st.maxOverSector = sec; st.maxOverDate = d;
+      }
+    }
+    return size;
+  },
+
+  _capReport(st, cap) {
+    return { usd: cap.usd, scaled: st.scaled, sectorDays: st.sectorDays,
+             maxOver: st.maxOver, maxOverSector: st.maxOverSector,
+             maxOverDate: st.maxOverDate, unplaced: st.unplaced, noHold: st.noHold };
   },
 
   _darkScales(cmp) {
@@ -1138,7 +1248,7 @@ window.FactorCharts = {
       // SAME dayPnlByDate the equity curve does — guarantees
       // reconciliation (sum of bars = endpoint of curve).
       const params = dollarParams || { perTrade: 2000, dailyCap: 10000 };
-      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
+      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.cap);
       const yearPnl = new Map();
       const yearN   = new Map();
       for (const [d, pnl] of dayPnlByDate.entries()) {
