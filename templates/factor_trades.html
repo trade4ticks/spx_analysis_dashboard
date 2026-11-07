@@ -137,13 +137,14 @@
     .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
     .ft-win span.on.test { background:rgba(232,67,147,.25); color:#e84393; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
-    /* Sector chips: the one control for the result panes' sector filter. */
+    /* Sector chips: the one control for the result panes' sector filter.
+       They wear the site's .chip (theme.css: --raised ground, --accent when
+       on), NOT .ft-chip -- that name belongs to the Configure-sweep chips,
+       whose fixed 88px monospace rule clipped every longer sector name.
+       The row wraps; a chip never truncates. */
     .ft-sectors { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
-    .ft-chip { padding:2px 8px; font-size:11px; border:1px solid var(--border); border-radius:10px;
-               cursor:pointer; color:var(--dim); background:transparent; }
-    .ft-chip.on { background:var(--raised); color:var(--text); }
-    .ft-chip.empty { opacity:.45; }
-    .ft-chip i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; }
+    .ft-sectors .chip.empty { opacity:.45; }
+    .ft-sectors .chip i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; }
     .ft-chip-act { font-size:10px; color:var(--dim); cursor:pointer; text-decoration:underline; margin-left:6px; }
     .ft-sector-lines { font-size:10px; color:var(--dim); margin-bottom:8px; }
     .ft-legend { display:inline-flex; gap:10px; margin-left:8px; font-weight:400; font-size:10px; color:var(--dim); }
@@ -868,7 +869,7 @@
         <div class="ft-sectors">
           <span class="ft-note" style="margin-right:4px">Sectors</span>
           <template x-for="name in sectorNames()" :key="'sc-'+name">
-            <span class="ft-chip" :class="{on: sectorOn(name), empty: !sectorCount(name)}"
+            <span class="chip" :class="{on: sectorOn(name), empty: !sectorCount(name)}"
                   @click="toggleSector(name)" :title="sectorCount(name) + ' trades in the ' + window + ' window'">
               <i x-show="sectorColour(name)" :style="'background:' + (sectorColour(name) || 'transparent')"></i><span x-text="name + ' ' + sectorCount(name)"></span>
             </span>

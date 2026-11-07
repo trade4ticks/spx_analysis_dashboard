@@ -216,20 +216,29 @@ def main() -> int:
     names = [n for n, _ in fs.BUCKETS]
     allt = [t for _, ts in fs.BUCKETS for t in ts]
     dup = [t for t, c in Counter(allt).items() if c > 1]
-    check(len(fs.BUCKETS) == 17, f"17 buckets ({len(fs.BUCKETS)})")
+    check(len(fs.BUCKETS) == 14, f"14 buckets ({len(fs.BUCKETS)})")
+    gics = ["Communication Services", "Consumer Discretionary", "Consumer Staples", "Energy",
+            "Financials", "Health Care", "Industrials", "Information Technology", "Materials",
+            "Real Estate", "Utilities"]
+    check(names == gics + ["Crypto", "Broad index", "Bonds"],
+          "the 11 GICS sectors in GICS order, then Crypto, Broad index, Bonds", " | ".join(names))
     check(not dup, "every ticker is in exactly one bucket", ", ".join(dup))
-    check(len(set(names)) == len(names) and fs.UNASSIGNED not in names, "bucket names are distinct, none is Unassigned")
+    check(len(allt) == 121, f"121 tickers ({len(allt)})")
+    dead = [t for t in ("ALL", "AMC", "APLD", "CORZ", "ETHA", "GME", "IBIT", "QBTS") if t in allt]
+    check(not dead, "the eight tickers not in daily_features are gone", " ".join(dead))
+    check(fs.UNASSIGNED not in names, "no bucket is called Unassigned")
     m = fs.sector_map()
-    agreed = {"UNH": "Managed care", "CVS": "Managed care", "HUM": "Managed care",
-              "JNJ": "Pharma & biotech", "PFE": "Pharma & biotech", "LLY": "Pharma & biotech",
-              "MRNA": "Pharma & biotech", "XLV": "Pharma & biotech", "XBI": "Pharma & biotech",
-              "ARKK": "Speculative growth", "VXX": "Volatility", "XLU": "Rates & yield",
-              "T": "Rates & yield", "VZ": "Rates & yield", "MSTR": "Crypto", "HOOD": "Crypto",
-              "XLF": "Financials", "KRE": "Financials", "XLE": "Energy", "XOP": "Energy",
-              "XLK": "Mega-cap & platforms", "XLI": "Industrials & materials",
-              "XLB": "Industrials & materials", "XLP": "Consumer", "SPY": "Broad index"}
+    agreed = {**{t: "Crypto" for t in ("MSTR", "MARA", "RIOT", "CIFR", "COIN", "HOOD")},
+              **{t: "Broad index" for t in ("SPY", "QQQ", "IWM", "DIA", "ARKK")},
+              "TLT": "Bonds", "IEF": "Bonds",
+              "TSLA": "Consumer Discretionary", "NVDA": "Information Technology",
+              "XLK": "Information Technology", "XLF": "Financials", "KRE": "Financials",
+              "XLE": "Energy", "XOP": "Energy", "XLV": "Health Care", "XBI": "Health Care",
+              "XLP": "Consumer Staples", "XLI": "Industrials", "XLB": "Materials",
+              "XLU": "Utilities", "V": "Financials", "MA": "Financials", "PYPL": "Financials",
+              "WMT": "Consumer Staples", "UBER": "Industrials", "GOOGL": "Communication Services"}
     bad = [f"{t}->{m.get(t)}" for t, b in agreed.items() if m.get(t) != b]
-    check(not bad, "the agreed placements (healthcare split, ARKK, VXX, rates, sector ETFs)", " ".join(bad))
+    check(not bad, "the user's buckets, sector ETFs in their own sector, GICS placements", " ".join(bad))
     check([b["name"] for b in fs.payload()["buckets"]] == names, "/sectors returns the buckets in chip order")
 
     # ── zone, before and after the refactor ──────────────────────────────
@@ -246,7 +255,7 @@ def main() -> int:
         check(len(z["window_trades"]) > 100 and len({t["ticker"] for t in z["window_trades"]}) == len(TICKERS),
               f"the {win} fixture has every ticker and >100 trades ({len(z['window_trades'])})")
 
-    keep = ["Semis & AI hardware", "Crypto", "Unassigned"]
+    keep = ["Information Technology", "Crypto", "Unassigned"]
     edges = [[lo, hi if hi != float("inf") else 1e308] for lo, hi in ft.PRICE_BUCKETS]
     live = ["NVDA", "AMD", "JPM", "ZZZZ", "SPY"]
     out = run_node({"zones": new, "sectors": fs.payload(), "edges": edges, "keep": keep, "live": live})

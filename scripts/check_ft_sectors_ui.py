@@ -117,7 +117,7 @@ DRIVER = r"""
   const vis = el => !!(el && el.offsetParent !== null);
   const btn = t => $$('button').find(b => txt(b) === t);
   const C = () => Alpine.$data(document.body);
-  const chips = () => $$('.ft-chip').filter(vis);
+  const chips = () => $$('.ft-sectors .chip').filter(vis);
   const chip = name => chips().find(c => txt(c).replace(/ \d+$/, '') === name);
   const act = t => $$('.ft-chip-act').find(a => txt(a) === t);
   const rowBox = (rowLabel, box) => {
@@ -162,6 +162,29 @@ DRIVER = r"""
        !!mapNote && mapNote.includes('not in daily_features: BAC') && mapNote.includes('no bucket (shown as Unassigned): ZZZZ'), true);
     const totalAll = lastY('ft-equity', 'Equity ($)');
 
+    // ── how the chips render ───────────────────────────────────────────
+    step('chip rendering');
+    const cs = el => getComputedStyle(el);
+    eq('no chip is clipped: its text fits its box', chips().filter(c => c.scrollWidth > c.clientWidth + 1).map(txt), []);
+    eq('no chip ellipsis', chips().filter(c => cs(c).textOverflow === 'ellipsis').map(txt), []);
+    eq('every chip shows its full name and count', chips().every(c => /^.+ \d+$/.test(txt(c))), true);
+    eq('the chips use the page font, not monospace', [...new Set(chips().map(c => cs(c).fontFamily))],
+       [cs(document.body).fontFamily]);
+    eq('padding is even left and right', chips().every(c => cs(c).paddingLeft === cs(c).paddingRight), true);
+    const accent = (() => { const d = document.createElement('div'); d.style.color = 'var(--accent)';
+                            document.body.appendChild(d); const v = cs(d).color; d.remove(); return v; })();
+    eq('an on chip wears the theme --accent (the site chip), not a page-local blue',
+       [cs(chip('Crypto')).borderTopColor, cs(chip('Crypto')).color], [accent, accent]);
+    eq('--accent is the site blue', accent, 'rgb(52, 152, 219)');
+    const row = $('.ft-sectors'), rr = row.getBoundingClientRect();
+    eq('every chip sits inside the row', chips().every(c => c.getBoundingClientRect().right <= rr.right + 0.5), true);
+    row.style.width = '420px'; await wait(100);
+    const tops = [...new Set(chips().map(c => Math.round(c.getBoundingClientRect().top)))];
+    eq('in a narrow column the chips wrap onto more rows, still unclipped',
+       [tops.length > 2, chips().filter(c => c.scrollWidth > c.clientWidth + 1).length,
+        chips().every(c => c.getBoundingClientRect().right <= row.getBoundingClientRect().right + 0.5)], [true, 0, true]);
+    row.style.width = ''; await wait(50);
+
     // ── none, then one ─────────────────────────────────────────────────
     step('none');
     act('none').click();
@@ -180,7 +203,7 @@ DRIVER = r"""
     eq('the chip wears its line colour', vis(chip('Crypto').querySelector('i')), true);
     near('the grey line is the unfiltered curve', lastY('ft-equity', 'all sectors'), totalAll, 0.011);
     eq('the "subset\'s own stats" note is shown',
-       ($$('.ft-sector-lines > div').map(txt).find(t => /^Filtered to/.test(t || '')) || '').startsWith('Filtered to 1 of 18 sectors'), true);
+       ($$('.ft-sector-lines > div').map(txt).find(t => /^Filtered to/.test(t || '')) || '').startsWith('Filtered to 1 of 15 sectors'), true);
     eq('the drawdown note is shown', $$('.ft-note').filter(vis).some(n => /do not: each is measured from that line's own peak/.test(txt(n))), true);
     eq('exit reasons: the shares are the sector\'s (sum 100%)', Math.round(sum(chart('ft-reasons').data.datasets[0].data)), 100);
     eq('P&L distribution counts the sector\'s trades', sum(chart('ft-pnldist').data.datasets[0].data), nc);
@@ -193,12 +216,12 @@ DRIVER = r"""
 
     // ── five ───────────────────────────────────────────────────────────
     step('five');
-    for (const n of ['Semis & AI hardware', 'Financials', 'Managed care', 'Unassigned']) { chip(n).click(); await wait(80); }
+    for (const n of ['Information Technology', 'Financials', 'Health Care', 'Unassigned']) { chip(n).click(); await wait(80); }
     await until('five selected', () => (C().sectorKeep || []).length === 5);
     await wait(200);
     eq('five chips draw one combined line', labels('ft-equity'), ['all sectors', 'all sectors drawdown', '5 sectors', '5 sectors drawdown']);
     eq('and the legend says so', legend(), ['5 sectors combined', 'all sectors']);
-    const n5 = ['Crypto', 'Semis & AI hardware', 'Financials', 'Managed care', 'Unassigned'].reduce((p, s) => p + (E.train.per[s] || 0), 0);
+    const n5 = ['Crypto', 'Information Technology', 'Financials', 'Health Care', 'Unassigned'].reduce((p, s) => p + (E.train.per[s] || 0), 0);
     eq('the stat bar counts the five', rowBox('Current', 'N'), fmtN(n5));
 
     // ── a locked card follows ─────────────────────────────────────────

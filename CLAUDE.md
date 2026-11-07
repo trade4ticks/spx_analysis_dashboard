@@ -1310,13 +1310,27 @@ sides). Not the heatmap, the parameter grid or the baseline suite: those
 are where cells and policies are chosen, and a sector filter must not steer
 that. The filter persists across the train/test toggle and metric switches.
 
-- **The map is `app/factor_sectors.py`** (17 buckets agreed with the user —
-  what moves together, not GICS; sector ETFs at full weight in their sector;
-  healthcare split into managed care and pharma & biotech because managed
-  care fires as a cluster). Served by `GET /api/factor-trades/sectors`. The
-  page diffs it against `/api/factor-analysis/tickers` (`SELECT DISTINCT
-  ticker FROM daily_features`) and prints what is missing either way under
-  the chips. A file, not a table, by decision: reviewable as a diff.
+- **The map is `app/factor_sectors.py`: the 11 GICS sectors plus Crypto,
+  Broad index and Bonds** (14; the user's call, 2026-11-07 — a first
+  "what moves together" taxonomy of 17 was rejected as unrecognisable).
+  Separate buckets only where GICS fails: Crypto (MSTR MARA RIOT CIFR COIN
+  HOOD), Broad index (SPY QQQ IWM DIA ARKK), Bonds (TLT IEF). 2023 GICS
+  applied (V/MA/PYPL Financials, WMT/COST/TGT Staples, UBER Industrials);
+  sector ETFs at full weight in their own sector. Products with NO GICS
+  sector are placed by judgement and say so in the file: country ETFs and
+  VXX → Broad index, GLD/SLV → Materials, USO/UNG → Energy. 121 tickers;
+  ALL AMC APLD CORZ ETHA GME IBIT QBTS removed (not in daily_features).
+  Served by `GET /api/factor-trades/sectors`. The page diffs it against
+  `/api/factor-analysis/tickers` (`SELECT DISTINCT ticker FROM
+  daily_features`) and prints what is missing either way under the chips.
+  A file, not a table, by decision: reviewable as a diff.
+- **The chips are the site's `.chip` (theme.css: `--raised`, `--accent`
+  when on) in a wrapping row — NOT `.ft-chip`.** That class is the
+  Configure-sweep chips', defined later in the page with a fixed 88px
+  monospace width and an ellipsis, so the first build's sector chips
+  inherited it: names clipped, monospace, no side padding, and the sweep's
+  hard-coded `#2a5a82` "on" blue. The UI gate now asserts no clipping, the
+  page font, even padding, `--accent` when on, and wrapping at 420px.
 - **Size once, then filter.** A trade's size is min($/trade, daily cap / N)
   with N the day's DISTINCT tickers across every sector (not firings — a
   ticker under several cells is one position). The page sizes the whole
