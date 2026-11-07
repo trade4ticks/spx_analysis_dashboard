@@ -30,6 +30,14 @@ left out of the DOM comparison, with its subtree -- the sidebar card the
 split adds is the one thing allowed to exist with the split off. What that
 card may hold while Off is asserted separately, by the split's own gate.
 
+THE NAV IS NOT COMPARED (2026-11-07, the user's call). The shared topbar
+(`<nav class="topbar-nav">`, templates/_nav.html) is not what this gate
+guards -- check_nav does -- and holding it to the recording made every menu
+change anywhere on the site fail here (hiding Equities Scan: 7 lines, one
+per step). Its subtree is dropped from BOTH sides, the recording and the
+live page, before comparing; exactly one nav must be dropped from each, so
+the rule cannot hide anything else or pass vacuously.
+
   python scripts/check_oo_offstate.py            compare with the recording
   python scripts/check_oo_offstate.py --record   (re)record -- only on a
       commit whose page is the one to keep; say why in the commit message
@@ -323,6 +331,26 @@ def dom_diff(a: list[str], b: list[str], limit=12) -> list[str]:
     return [l[:200] for l in d]
 
 
+def strip_nav(lines: list) -> tuple[list, int]:
+    """The DOM lines without the topbar nav's subtree, and how many navs went.
+    A line is 'depth|tag|class|...'; the subtree is every following line
+    deeper than the nav's own."""
+    out, dropped, cut = [], 0, None
+    for line in lines:
+        f = line.split("|", 3)
+        depth = int(f[0]) if f[0].isdigit() else -1
+        if cut is not None:
+            if depth > cut:
+                continue
+            cut = None
+        if len(f) > 2 and f[1] == "nav" and "topbar-nav" in f[2].split():
+            dropped += 1
+            cut = depth
+            continue
+        out.append(line)
+    return out, dropped
+
+
 def main() -> int:
     record = "--record" in sys.argv
     rerecord = sys.argv[sys.argv.index("--rerecord-from") + 1] if "--rerecord-from" in sys.argv else None
@@ -401,13 +429,19 @@ def main() -> int:
         fails += ex > 1
         for part in ("dom", "charts", "state"):
             if part == "dom":
-                same = w["dom"] == g["dom"]
-                why = [] if same else dom_diff(w["dom"], g["dom"])
+                wd, wn = strip_nav(w["dom"])
+                gd, gn = strip_nav(g["dom"])
+                ok_nav = wn == 1 and gn == 1
+                print(("  ok    " if ok_nav else "  FAIL  ")
+                      + f"{w['name']}: the topbar nav left out (recording {wn}, page {gn}; exactly 1 each)")
+                fails += not ok_nav
+                same = wd == gd
+                why = [] if same else dom_diff(wd, gd)
             else:
                 same = w[part] == g[part]
                 why = [] if same else first_diffs(w[part], g[part], part)
             print(("  ok    " if same else "  FAIL  ") + f"{w['name']}: {part}"
-                  + (f" ({len(w['dom']):,} elements)" if part == "dom" else ""))
+                  + (f" ({len(strip_nav(w['dom'])[0]):,} elements, nav excluded)" if part == "dom" else ""))
             for line in why:
                 print("          " + line)
             fails += not same

@@ -1331,8 +1331,12 @@ that. The filter persists across the train/test toggle and metric switches.
   inherited it: names clipped, monospace, no side padding, and the sweep's
   hard-coded `#2a5a82` "on" blue. The UI gate now asserts no clipping, the
   page font, even padding, `--accent` when on, and wrapping at 420px.
-  The Configure-sweep chips themselves now wrap too: `min-width:88px`
-  instead of a fixed width, no ellipsis (the user's call, 2026-11-07).
+  The Configure-sweep chips now wear `.chip` too, and `.ft-chip` is gone.
+  **No page-local blue is left**: `#2a5a82` / `#3a7ab0` were hard-coded in
+  three rules (the sweep chips, `.ft-btn.primary` — Run, Run suite, Done —
+  and `.ft-savebtn`), all converted together to `--accent` with white text
+  (theme.css's `.btn.primary`), by the user's rule: all or none. The UI gate
+  fails if any element paints either old value.
 - **Size once, then filter.** A trade's size is min($/trade, daily cap / N)
   with N the day's DISTINCT tickers across every sector (not firings — a
   ticker under several cells is one position). The page sizes the whole
@@ -1961,7 +1965,16 @@ card (12–115 lines a step: the Across/Down controls and the single table
 out, the pair boxes and bands in), state only `grid` → `grids`, every chart,
 the export and every request identical; the check was first shown to flag a
 change outside the card. Reasons are only these two; never to make a failing
-comparison pass.
+comparison pass. **The topbar nav is not compared (2026-11-07, the
+user's call)**: `check_nav` guards it, and holding it to the recording made
+every site-wide menu change fail here. Its subtree is dropped from both the
+recording and the live page, exactly one each (asserted). **Known, not
+fixed — 1px of layout drift**: steps 3–6 record `#ob-rank-inner` at
+`width: 1069px` and render 1070px now; re-rendering the page AT 1c01a4f
+with this driver also gives 1070, so the browser moved, not the page. That
+inline width is `max(parent clientWidth, bars×12+16)` — a layout
+measurement, like the canvas sizes the walker already skips. Awaiting the
+user's call (normalise it, or re-record).
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

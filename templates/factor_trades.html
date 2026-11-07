@@ -69,7 +69,10 @@
     .ft-btn { width:100%; margin-top:10px; padding:6px; border-radius:3px; cursor:pointer;
               border:1px solid var(--border); background:var(--raised);
               color:var(--text); font-size:12px; font-weight:600; }
-    .ft-btn.primary { background:#2a5a82; border-color:#3a7ab0; }
+    /* The site's primary (theme.css .btn.primary: --accent, white text), not
+       the page-local #2a5a82 / #3a7ab0 pair this page used to carry in three
+       rules (2026-11-07: converted together, none left). */
+    .ft-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
     .ft-btn:disabled { opacity:.5; cursor:not-allowed; }
 
     /* Run history — one card per run, params stacked vertically so what is
@@ -89,8 +92,8 @@
                filter:grayscale(1) opacity(.5); }
     .ft-lock.on { filter:none; }
     .ft-savebtn { width:100%; margin-top:6px; padding:4px; border-radius:3px;
-                  cursor:pointer; border:1px solid #3a7ab0; background:#2a5a82;
-                  color:var(--text); font-size:10px; font-weight:700; }
+                  cursor:pointer; border:1px solid var(--accent); background:var(--accent);
+                  color:#fff; font-size:10px; font-weight:700; }
     .ft-run .ft-run-t { font-size:10px; font-weight:700; letter-spacing:.4px;
                         margin-bottom:4px; text-transform:uppercase; }
     .ft-run .p { color:var(--muted); font-family:monospace; white-space:nowrap;
@@ -139,8 +142,8 @@
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
     /* Sector chips: the one control for the result panes' sector filter.
        They wear the site's .chip (theme.css: --raised ground, --accent when
-       on), NOT .ft-chip -- that name belongs to the Configure-sweep chips,
-       whose fixed 88px monospace rule clipped every longer sector name.
+       on). A page-local .ft-chip with a fixed 88px monospace width used to
+       clip them; it is gone, and the sweep chips wear .chip too.
        The row wraps; a chip never truncates. */
     .ft-sectors { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
     .ft-sectors .chip.empty { opacity:.45; }
@@ -204,19 +207,9 @@
     .ft-cfg-grp  { display:flex; align-items:flex-start; gap:10px; margin-bottom:5px; }
     .ft-cfg-glbl { flex:0 0 130px; font-size:10px; color:var(--dim);
                    font-family:monospace; padding-top:5px; }
-    .ft-chips    { display:flex; flex-wrap:wrap; gap:6px; }
-    /* At least 88px so short values still line up, and as wide as the label
-       needs beyond that: a chip never clips (the user's call, 2026-11-07 --
-       a clipped value cannot be read). The row wraps. */
-    .ft-chip     { flex:0 0 auto; min-width:88px; text-align:center; cursor:pointer;
-                   font-family:monospace; font-size:11px; padding:4px 8px;
-                   border-radius:3px; border:1px solid var(--border);
-                   color:var(--dim); background:transparent;
-                   user-select:none; transition:background .1s, color .1s;
-                   white-space:nowrap; box-sizing:border-box; }
-    .ft-chip:hover { border-color:var(--muted); color:var(--text); }
-    .ft-chip.on  { background:#2a5a82; border-color:#3a7ab0; color:#fff;
-                   font-weight:600; }
+    .ft-chips    { display:flex; flex-wrap:wrap; gap:4px; }
+    /* The sweep chips wear the site's .chip (theme.css), like the sector
+       chips: as wide as the label, the row wraps (2026-11-07). */
     .ft-units { font-size:10px; color:#c8c8c8; margin-bottom:8px; padding:5px 9px;
                 border-radius:3px; background:rgba(255,255,255,.04);
                 border:1px solid var(--border); line-height:1.5; }
@@ -1617,7 +1610,7 @@
                         {#- r.chip is the row-relative label (see
                             _chipLabel); r.label is the full one and stays on
                             the tooltip so nothing is lost. -#}
-                        <span class="ft-chip"
+                        <span class="chip"
                               :class="gridValueOn(f.family, r.rule_key) ? 'on' : ''"
                               @click="gridChipClick(f.family, r.rule_key, $event)"
                               :title="r.label"

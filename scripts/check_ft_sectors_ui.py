@@ -262,20 +262,32 @@ DRIVER = r"""
     eq('"all" puts the peak line back to every sector', /^Peak sector exposure \(every sector, test window\)/.test(scope() || ''), true);
     eq('and drops the filtered note', $$('.ft-sector-lines > div').filter(vis).some(d => /^Filtered to/.test(txt(d))), false);
 
-    // ── the Configure-sweep chips wrap too ─────────────────────────────
+    // ── the Configure-sweep chips, and the page's one blue ──────────────
     step('sweep chips');
     const box = document.createElement('div');
     box.className = 'ft-chips'; box.style.width = '300px';
     for (const l of ['max_days 20', 'trailing_stop 7.5% off peak', 'fixed_target 12%', 'x']) {
-      const c = document.createElement('span'); c.className = 'ft-chip'; c.textContent = l; box.appendChild(c);
+      const c = document.createElement('span'); c.className = 'chip'; c.textContent = l; box.appendChild(c);
     }
+    box.children[1].classList.add('on');
     $('.ft-sectors').after(box); await wait(50);
     const sc = [...box.children];
     eq('a sweep chip never clips its label', sc.filter(c => c.scrollWidth > c.clientWidth + 1).map(txt), []);
-    eq('sweep chips keep an 88px minimum and wrap', [sc.every(c => c.getBoundingClientRect().width >= 87.5),
-       new Set(sc.map(c => Math.round(c.getBoundingClientRect().top))).size > 1,
-       sc.every(c => c.getBoundingClientRect().right <= box.getBoundingClientRect().right + 0.5)], [true, true, true]);
+    eq('sweep chips wrap inside their row', [new Set(sc.map(c => Math.round(c.getBoundingClientRect().top))).size > 1,
+       sc.every(c => c.getBoundingClientRect().right <= box.getBoundingClientRect().right + 0.5)], [true, true]);
+    eq('a sweep chip on wears --accent, in the page font',
+       [cs(sc[1]).borderTopColor, cs(sc[1]).fontFamily], [accent, cs(document.body).fontFamily]);
     box.remove();
+    const sweepMarkup = [...document.querySelectorAll('template')].some(tp => /class="ft-chip"/.test(tp.innerHTML));
+    eq('the sweep chip markup uses .chip, not the removed .ft-chip', sweepMarkup, false);
+    eq('the Run button is the site primary (--accent)', cs(btn('Run')).backgroundColor, accent);
+    const save = btn('+ Save to strip');
+    eq('"+ Save to strip" is too', save ? cs(save).backgroundColor : null, accent);
+    const old = [...document.querySelectorAll('*')].filter(el => {
+      const c = cs(el);
+      return [c.backgroundColor, c.borderTopColor, c.color].some(v => v === 'rgb(42, 90, 130)' || v === 'rgb(58, 122, 176)');
+    }).map(el => el.tagName + '.' + el.className);
+    eq('nothing on the page paints the old #2a5a82 / #3a7ab0', old, []);
 
     report();
   }
