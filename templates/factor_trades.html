@@ -205,15 +205,15 @@
     .ft-cfg-glbl { flex:0 0 130px; font-size:10px; color:var(--dim);
                    font-family:monospace; padding-top:5px; }
     .ft-chips    { display:flex; flex-wrap:wrap; gap:6px; }
-    /* Fixed width, so anything longer must be CLIPPED rather than allowed
-       outside the box. The full label is on the chip's title attribute. */
-    .ft-chip     { flex:0 0 auto; width:88px; text-align:center; cursor:pointer;
-                   font-family:monospace; font-size:11px; padding:4px 0;
+    /* At least 88px so short values still line up, and as wide as the label
+       needs beyond that: a chip never clips (the user's call, 2026-11-07 --
+       a clipped value cannot be read). The row wraps. */
+    .ft-chip     { flex:0 0 auto; min-width:88px; text-align:center; cursor:pointer;
+                   font-family:monospace; font-size:11px; padding:4px 8px;
                    border-radius:3px; border:1px solid var(--border);
                    color:var(--dim); background:transparent;
                    user-select:none; transition:background .1s, color .1s;
-                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-                   box-sizing:border-box; }
+                   white-space:nowrap; box-sizing:border-box; }
     .ft-chip:hover { border-color:var(--muted); color:var(--text); }
     .ft-chip.on  { background:#2a5a82; border-color:#3a7ab0; color:#fff;
                    font-weight:600; }
@@ -878,10 +878,10 @@
           <span class="ft-chip-act" @click="sectorClear()">none</span>
         </div>
         <div class="ft-sector-lines">
-          <div x-show="peakSectorText()">Peak sector exposure (every sector, <span x-text="window"></span> window):
+          <div x-show="peakSectorText()">Peak sector exposure (<span x-text="peakSectorScope()"></span>, <span x-text="window"></span> window):
             <b style="color:var(--text)" x-text="peakSectorText()"></b><template x-if="lockedZone"><span> · locked:
             <span x-text="peakSectorText(lockedZone)"></span></span></template>
-            <span title="Open on a session = entered on or before it and not yet exited: the exposure a cap checked at entry would see. Trade activity counts only what is held over a close, so it peaks lower.">ⓘ</span></div>
+            <span title="Open on a session = entered on or before it and not yet exited: the exposure a cap checked at entry would see. Trade activity counts only what is held over a close, so it peaks lower. The share is of everything open that session, every sector.">ⓘ</span></div>
           <div x-show="sectorFiltered()" style="color:#e0b066">Filtered to <span x-text="(sectorKeep || []).length"></span>
             of <span x-text="sectorNames().length"></span> sectors: the stats below are that subset's OWN, not its
             share of the whole, and each trade keeps the size it had with every sector in.</div>

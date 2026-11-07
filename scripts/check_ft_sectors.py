@@ -18,8 +18,8 @@ What it holds:
           up to the total; re-sizing the subset instead gives a DIFFERENT
           answer on this fixture (so the check can see the trap); and
           _computeDollarSeries on unstamped trades is HEAD's, exactly
-  peak    peak concurrent sector exposure equals a brute-force day-by-day
-          count
+  peak    peak concurrent sector exposure -- every sector, one, two -- and
+          its share of the whole book equal a brute-force day-by-day count
   check   the map-vs-daily_features diff names both directions
 
 Runs on the dev machine (node). Exit 1 on any failure.
@@ -164,7 +164,9 @@ for (const win of ['train', 'test']) {
   const b = HEAD._computeDollarSeries(cmp, z.series_trades, 2000, 10000);
   o.head_same = JSON.stringify([a.equity, [...a.dayPnlByDate], [...a.dayDeployedByDate], a.tradeDollarSizes])
              === JSON.stringify([b.equity, [...b.dayPnlByDate], [...b.dayDeployedByDate], b.tradeDollarSizes]);
-  o.peak = ftPeakSectorExposure(sized.window, z.trading_days, idx);
+  o.peak = ftPeakSectorExposure(sized.window, z.trading_days, idx, null);
+  o.peak_crypto = ftPeakSectorExposure(sized.window, z.trading_days, idx, new Set(['Crypto']));
+  o.peak_two = ftPeakSectorExposure(sized.window, z.trading_days, idx, new Set(['Crypto', 'Financials']));
   o.sized_window = sized.window.map(t => [t.ticker, t.trade_date, t.usd_size ?? null, t.exit_bar]);
 }
 out.map_check = ftMapCheck(idx, IN.live);
@@ -328,9 +330,9 @@ def main() -> int:
         # ── peak exposure, brute force ────────────────────────────────────
         days = z["trading_days"]
         at = {d: i for i, d in enumerate(days)}
-        best = (0.0, None, None)
-        for k, day in enumerate(days):
-            per = {}
+        per_day = []                      # [(sector -> open $, total open $)]
+        for k in range(len(days)):
+            per, tot = {}, 0.0
             for tk, d, size, eb in o["sized_window"]:
                 if size is None or d not in at:
                     continue
@@ -338,13 +340,30 @@ def main() -> int:
                 nights = max(0, math.ceil(eb / 390) - 1)
                 if i <= k <= i + nights:
                     per[sec(tk)] = per.get(sec(tk), 0.0) + size
-            for s_, v in per.items():
-                if v > best[0] + 1e-9:
-                    best = (v, s_, day)
-        p = o["peak"]
-        check(abs(p["usd"] - best[0]) < 1e-6 and p["sector"] == best[1] and p["date"] == best[2],
-              f"{win}: peak sector exposure {p['usd']:.2f} {p['sector']} {p['date']} equals the day-by-day count "
-              f"({best[0]:.2f} {best[1]} {best[2]})")
+                    tot += size
+            per_day.append((per, tot))
+
+        def brute(only):
+            best = (0.0, None, None, None)
+            for k, (per, tot) in enumerate(per_day):
+                for s_, v in per.items():
+                    if (only is None or s_ in only) and v > best[0] + 1e-9:
+                        best = (v, s_, days[k], tot)
+            return best
+
+        for key, only, what in (("peak", None, "every sector"),
+                                ("peak_crypto", {"Crypto"}, "Crypto alone"),
+                                ("peak_two", {"Crypto", "Financials"}, "the larger of Crypto and Financials")):
+            p, b = o[key], brute(only)
+            check(abs(p["usd"] - b[0]) < 1e-6 and p["sector"] == b[1] and p["date"] == b[2]
+                  and abs(p["total"] - b[3]) < 1e-6 and abs(p["share"] - b[0] / b[3]) < 1e-12,
+                  f"{win}: peak exposure over {what}: {p['usd']:.2f} {p['sector']} {p['date']}, "
+                  f"{p['share']:.1%} of {p['total']:.2f} deployed -- equals the day-by-day count "
+                  f"({b[0]:.2f} {b[1]} {b[2]}, of {b[3]:.2f})")
+        check(o["peak_crypto"]["sector"] == "Crypto" and o["peak_crypto"]["usd"] < o["peak"]["usd"] + 1e-9,
+              f"{win}: a one-sector peak is that sector's, and no larger than the every-sector peak")
+        check(o["peak_crypto"]["total"] >= o["peak_crypto"]["usd"],
+              f"{win}: the share's denominator is the whole book, not the selection")
 
     mc = out["map_check"]
     check("ZZZZ" in mc["unmapped"] and "SPY" not in mc["unmapped"] and "BAC" in mc["notInData"]

@@ -230,7 +230,13 @@ function ftSectorView(zone, keep, idx, sized, priceEdges, win) {
 
 // ── Peak concurrent sector exposure ──────────────────────────────────────
 // The largest dollar amount one sector had open at once, over `sized`
-// trades (every sector, regardless of the filter).
+// trades, and that amount as a share of EVERYTHING open on the same
+// session (every sector -- the book a cap is a fraction of).
+//
+// `only`: a Set of sector names to search, or null for every sector. The
+// page passes its chip selection, so one chip gives that sector's own peak;
+// several give the largest single-sector peak among them. The share's
+// denominator is always the whole book, whatever `only` says.
 //
 // "Open on session k" = entered on or before k and not exited before k:
 // k in [entry, entry + nights], nights = ceil(exit_bar / 390) - 1. That is
@@ -241,10 +247,11 @@ function ftSectorView(zone, keep, idx, sized, priceEdges, win) {
 //
 // Exposure only rises on entry days, so the peak is always on one; trades
 // running past the calendar's end cannot move it.
-function ftPeakSectorExposure(sized, tradingDays, idx) {
+function ftPeakSectorExposure(sized, tradingDays, idx, only) {
   const D = tradingDays.length;
   const at = new Map(tradingDays.map((d, i) => [d, i]));
   const diff = new Map();
+  const totDiff = new Float64Array(D + 1);
   let unplaced = 0;
   for (const t of sized) {
     if (t.usd_size == null) continue;
@@ -254,17 +261,25 @@ function ftPeakSectorExposure(sized, tradingDays, idx) {
     const nights = isFinite(eb) ? Math.max(0, Math.ceil(eb / FT_BARS_PER_SESSION) - 1) : 0;
     const sec = ftSectorOf(idx, t.ticker);
     if (!diff.has(sec)) diff.set(sec, new Float64Array(D + 1));
-    const a = diff.get(sec);
-    a[i] += t.usd_size;
-    a[Math.min(i + nights + 1, D)] -= t.usd_size;
+    const a = diff.get(sec), end = Math.min(i + nights + 1, D);
+    a[i] += t.usd_size; a[end] -= t.usd_size;
+    totDiff[i] += t.usd_size; totDiff[end] -= t.usd_size;
   }
+  const total = new Float64Array(D);
+  for (let k = 0, run = 0; k < D; k++) { run += totDiff[k]; total[k] = run; }
   let best = null;
   for (const [sec, a] of diff) {
+    if (only && !only.has(sec)) continue;
     let run = 0;
     for (let k = 0; k < D; k++) {
       run += a[k];
-      if (!best || run > best.usd + 1e-9) best = { usd: run, sector: sec, date: tradingDays[k] };
+      if (!best || run > best.usd + 1e-9) best = { usd: run, sector: sec, date: tradingDays[k], k };
     }
   }
-  return best ? { ...best, unplaced } : { usd: 0, sector: null, date: null, unplaced };
+  if (!best || !(best.usd > 0)) {
+    return { usd: 0, sector: null, date: null, total: null, share: null, unplaced };
+  }
+  const tot = total[best.k];
+  return { usd: best.usd, sector: best.sector, date: best.date, total: tot,
+           share: tot > 0 ? best.usd / tot : null, unplaced };
 }

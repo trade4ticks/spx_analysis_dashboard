@@ -2905,17 +2905,30 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     zoneView()   { return this._sectorViewOf(this.zoneData); },
     lockedView() { return this._sectorViewOf(this.lockedZone); },
 
-    // Peak concurrent sector exposure over EVERY sector, whatever the chips
-    // say -- it is the number a cap would be set from.
+    // Peak concurrent sector exposure. Every sector with all chips on; the
+    // SELECTED sectors otherwise (one chip = that sector's own peak), so the
+    // chips can be clicked through to see which sectors burst. The share is
+    // of the whole book open on that session, never just the selection.
     peakSectorText(zone) {
       zone = zone || this.zoneData;
       if (!zone || !this.sectorIdx) return '';
       void this.perTrade; void this.dailyCap;
+      const keep = this.sectorKeep;
+      if (keep !== null && !keep.length) return '';
       const z = window.Alpine ? Alpine.raw(zone) : zone;
-      const p = ftPeakSectorExposure(this._sectorSized(z).window, z.trading_days || [], this.sectorIdx);
-      if (!p.sector) return '';
-      return `${window.FactorCharts._statFmt$(p.usd)} ${p.sector}, ${p.date}`
+      const p = ftPeakSectorExposure(this._sectorSized(z).window, z.trading_days || [],
+                                     this.sectorIdx, keep === null ? null : new Set(keep));
+      if (!p.sector) return 'none open';
+      const f$ = window.FactorCharts._statFmt$;
+      return `${f$(p.usd)} ${p.sector}, ${p.date}`
+        + (p.share != null ? ` — ${(p.share * 100).toFixed(0)}% of ${f$(p.total)} deployed` : '')
         + (p.unplaced ? ` (${p.unplaced} trade${p.unplaced > 1 ? 's' : ''} off the calendar, not counted)` : '');
+    },
+    // What the peak line is over, in words.
+    peakSectorScope() {
+      const keep = this.sectorKeep;
+      if (keep === null) return 'every sector';
+      return keep.length === 1 ? keep[0] : `largest of ${keep.length} selected sectors`;
     },
 
     // The equity pane under a sector filter. Grey: every sector, the curve

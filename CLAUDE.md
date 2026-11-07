@@ -1331,6 +1331,8 @@ that. The filter persists across the train/test toggle and metric switches.
   inherited it: names clipped, monospace, no side padding, and the sweep's
   hard-coded `#2a5a82` "on" blue. The UI gate now asserts no clipping, the
   page font, even padding, `--accent` when on, and wrapping at 420px.
+  The Configure-sweep chips themselves now wrap too: `min-width:88px`
+  instead of a fixed width, no ellipsis (the user's call, 2026-11-07).
 - **Size once, then filter.** A trade's size is min($/trade, daily cap / N)
   with N the day's DISTINCT tickers across every sector (not firings — a
   ticker under several cells is one position). The page sizes the whole
@@ -1355,7 +1357,11 @@ that. The filter persists across the train/test toggle and metric switches.
   palette); 5+ → one combined line. Each line's drawdown is drawn in its
   colour on the right axis and labelled as not additive. The legend is
   HTML, read off the same state as the chips — one control, not two.
-- **Peak sector exposure** (always every sector, whatever the chips): the
+- **Peak sector exposure** follows the chips (2026-11-07, the user's ask):
+  every sector with all on, that sector's OWN peak with one chip (click
+  through to see which burst), the largest single-sector peak among
+  several. Shown with its share of the WHOLE book open that session — the
+  denominator never narrows with the chips. The peak is the
   largest dollar amount one bucket had OPEN on one session — entered on or
   before it and not exited before it (`[entry, entry + ceil(exit_bar/390) −
   1]`), i.e. what a cap checked at entry would see, same-day entries

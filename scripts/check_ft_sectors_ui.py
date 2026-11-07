@@ -16,7 +16,9 @@ What it asks, as a person would:
     a legend that names exactly those lines, and the "not additive" notes
   + the grey line is the unfiltered curve; annual P&L sums to the sector line
   + five chips draw one combined line
-  + the peak line does not move with the chips
+  + the peak line follows the chips (one chip = that sector's own peak),
+    with its share of the whole book, and returns with "all"
+  + the Configure-sweep chips wrap and never clip
   + a locked card follows the same chips
   + the filter survives TRAIN -> TEST, and "all" restores the old page
 And the console stays clean.
@@ -156,7 +158,10 @@ DRIVER = r"""
     eq('the equity pane is the old renderer', labels('ft-equity'), ['Equity ($)', 'Drawdown ($)']);
     eq('no legend with every sector on', legend(), []);
     const pk = peak();
-    eq('the peak sector line names a sector and a date', /^\$[\d.,]+k? .+, \d{4}-\d{2}-\d{2}$/.test(pk || ''), true);
+    const PEAK = /^\$[\d.,]+k? (.+), \d{4}-\d{2}-\d{2} — \d+% of \$[\d.,]+k? deployed$/;
+    eq('the peak sector line names a sector, a date and its share of the book', PEAK.test(pk || ''), true);
+    const scope = () => txt($$('.ft-sector-lines > div').find(d => /^Peak sector exposure/.test(txt(d))));
+    eq('and says it covers every sector', /^Peak sector exposure \(every sector, train window\)/.test(scope() || ''), true);
     const mapNote = txt($$('.ft-sector-lines > div').find(d => /^Sector map/.test(txt(d))));
     eq('the map check names the mapped ticker missing from daily_features and the unmapped one',
        !!mapNote && mapNote.includes('not in daily_features: BAC') && mapNote.includes('no bucket (shown as Unassigned): ZZZZ'), true);
@@ -212,7 +217,7 @@ DRIVER = r"""
     eq('price bins count the sector\'s trades', pbN, nc);
     near('annual P&L adds up to the sector\'s line', sum(chart('ft-yearly').data.datasets[0].data),
          lastY('ft-equity', 'Crypto'), 0.05);
-    eq('the peak line does not move with the chips', peak(), pk);
+    eq('one chip: the peak line is the sector own peak', [(peak() || '').match(PEAK)?.[1], /^Peak sector exposure \(Crypto,/.test(scope() || '')], ['Crypto', true]);
 
     // ── five ───────────────────────────────────────────────────────────
     step('five');
@@ -254,7 +259,23 @@ DRIVER = r"""
     await wait(200);
     eq('"all" restores the old equity renderer', labels('ft-equity'), ['Equity ($)', 'Drawdown ($)']);
     eq('and the whole window in the stat bar', rowBox('Edited', 'N') || rowBox('Current', 'N'), fmtN(E.test.n));
+    eq('"all" puts the peak line back to every sector', /^Peak sector exposure \(every sector, test window\)/.test(scope() || ''), true);
     eq('and drops the filtered note', $$('.ft-sector-lines > div').filter(vis).some(d => /^Filtered to/.test(txt(d))), false);
+
+    // ── the Configure-sweep chips wrap too ─────────────────────────────
+    step('sweep chips');
+    const box = document.createElement('div');
+    box.className = 'ft-chips'; box.style.width = '300px';
+    for (const l of ['max_days 20', 'trailing_stop 7.5% off peak', 'fixed_target 12%', 'x']) {
+      const c = document.createElement('span'); c.className = 'ft-chip'; c.textContent = l; box.appendChild(c);
+    }
+    $('.ft-sectors').after(box); await wait(50);
+    const sc = [...box.children];
+    eq('a sweep chip never clips its label', sc.filter(c => c.scrollWidth > c.clientWidth + 1).map(txt), []);
+    eq('sweep chips keep an 88px minimum and wrap', [sc.every(c => c.getBoundingClientRect().width >= 87.5),
+       new Set(sc.map(c => Math.round(c.getBoundingClientRect().top))).size > 1,
+       sc.every(c => c.getBoundingClientRect().right <= box.getBoundingClientRect().right + 0.5)], [true, true, true]);
+    box.remove();
 
     report();
   }
