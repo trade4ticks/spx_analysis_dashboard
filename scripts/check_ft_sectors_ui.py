@@ -1,0 +1,312 @@
+"""Factor Trades' sector chips, DRIVEN BY CLICKING, in headless Edge.
+
+The zone payloads are the REAL /zone handler's, over check_ft_sectors'
+fixture (eleven tickers across seven buckets plus one the map does not know,
+days where the daily cap binds, both windows). The page JS and template are
+the shipped files; fetch is stubbed in the browser. Real time over the
+DevTools protocol (scripts/edge_cdp.py), no requestAnimationFrame shim.
+
+What it asks, as a person would:
+  + every bucket has a chip, plus Unassigned; the counts add up to the window
+  + the peak-sector line and the map check are on screen
+  + with every chip on, the equity pane is the old renderer's
+  + "none" empties the stat bar; one chip gives that sector's numbers in the
+    stat bar AND every pane (exit reasons, P&L distribution, price bins,
+    ticker breakdown, annual P&L), a coloured line against the grey total,
+    a legend that names exactly those lines, and the "not additive" notes
+  + the grey line is the unfiltered curve; annual P&L sums to the sector line
+  + five chips draw one combined line
+  + the peak line does not move with the chips
+  + a locked card follows the same chips
+  + the filter survives TRAIN -> TEST, and "all" restores the old page
+And the console stays clean.
+
+No Edge: SKIP, not PASS.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import edge_cdp                                           # noqa: E402
+
+EXIT_SKIPPED = 3
+EDGE = [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/microsoft-edge", "/usr/bin/chromium", "/usr/bin/google-chrome"]
+
+
+def payloads() -> dict:
+    import asyncio
+    import check_ft_sectors as cs
+    import app.routers.factor_trades as ft
+    import app.routers.oi_analysis as oia
+    from app import factor_sectors as fs
+    h = cs._harness()
+    rows = cs.fixture_rows(h)
+    zones = cs.zones(h, ft, rows)
+    out = {"sectors": fs.payload()}
+    for win in ("train", "test"):
+        oia._TT_CUTOFF_CACHED = None
+        r = asyncio.run(ft.run(req=ft.RunReq(primary_metric="a", secondary_metric="b", n_bins=20,
+                                             rule_keys=["fixed_stop__5"], max_strike=1000,
+                                             window=win), pool=h.FakePool()))
+        r = json.loads(json.dumps(r, default=str))
+        g = [[None] * 20 for _ in range(20)]
+        g[2][1] = {"n": 120, "avg_ret": 0.004, "test_n": 40, "test_avg": 0.001}
+        r["grid"] = g
+        out["run " + win] = r
+        out["zone " + win] = zones[win]
+    smap = fs.sector_map()
+    exp = {}
+    for win in ("train", "test"):
+        w = zones[win]["window_trades"]
+        per = {}
+        for t in w:
+            s = smap.get(t["ticker"], fs.UNASSIGNED)
+            per[s] = per.get(s, 0) + 1
+        exp[win] = {"n": len(w), "per": per,
+                    "crypto_tickers": sorted({t["ticker"] for t in w if smap.get(t["ticker"]) == "Crypto"})}
+    out["exp"] = exp
+    return out
+
+
+DRIVER = r"""
+<script>
+(function () {
+  const errs = [];
+  window.addEventListener('error', e => errs.push('onerror: ' + e.message));
+  const ce = console.error.bind(console);
+  console.error = (...a) => { errs.push('console.error: ' + a.map(String).join(' ')); ce(...a); };
+  const LIVE = PAY.sectors.buckets.flatMap(b => b.tickers).filter(t => t !== 'BAC').concat(['ZZZZ']);
+  window.fetch = async (url, opts) => {
+    const u = String(url);
+    const body = opts && opts.body ? JSON.parse(opts.body) : null;
+    const ok = b => ({ ok: true, status: 200, json: async () => b, text: async () => JSON.stringify(b) });
+    if (u.includes('/factor-analysis/columns')) return ok({ features: ['a', 'b'], outcomes: [], feature_families: [] });
+    if (u.includes('/factor-analysis/tickers')) return ok(LIVE);
+    if (u.includes('/tt-cutoff')) return ok({ cutoff_date: '2023-01-02' });
+    if (u.includes('/factor-trades/sectors')) return ok(PAY.sectors);
+    if (u.includes('/factor-trades/rules')) return ok({ groups: [] });
+    if (u.includes('/factor-trades/signals')) return ok({ signals: [], cutoff_date: '2023-01-02', max_selectable: 31 });
+    const w = (body && body.window) || 'train';
+    if (u.endsWith('/factor-trades/run')) return ok(PAY['run ' + w]);
+    if (u.endsWith('/factor-trades/zone')) return ok(PAY['zone ' + w]);
+    return { ok: false, status: 404, json: async () => ({}), text: async () => 'no stub ' + u };
+  };
+  const out = [];
+  const step = s => { window.__gateStep = s; const h = document.documentElement;
+                      h.setAttribute('data-progress', s);
+                      h.setAttribute('data-trail', (h.getAttribute('data-trail') || '') + ' > ' + s); };
+  const eq = (name, got, want) => out.push(`${JSON.stringify(got) === JSON.stringify(want) ? 'ok' : 'FAIL'}|${name}|${JSON.stringify(got)}|${JSON.stringify(want)}`);
+  const near = (name, got, want, tol) => out.push(`${(got != null && want != null && Math.abs(got - want) <= tol) ? 'ok' : 'FAIL'}|${name}|${JSON.stringify(got)}|${JSON.stringify(want)}`);
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  async function until(what, fn, ms = 8000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { try { if (fn()) return; } catch (e) {} await wait(50); }
+    throw new Error('timed out waiting for: ' + what);
+  }
+  const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+  const txt = el => (el ? el.textContent.trim().replace(/\s+/g, ' ') : null);
+  const vis = el => !!(el && el.offsetParent !== null);
+  const btn = t => $$('button').find(b => txt(b) === t);
+  const C = () => Alpine.$data(document.body);
+  const chips = () => $$('.ft-chip').filter(vis);
+  const chip = name => chips().find(c => txt(c).replace(/ \d+$/, '') === name);
+  const act = t => $$('.ft-chip-act').find(a => txt(a) === t);
+  const rowBox = (rowLabel, box) => {
+    const row = $$('.ft-statrow').find(r => txt(r.querySelector('.ft-statlbl')).startsWith(rowLabel));
+    if (!row) return null;
+    const it = [...row.querySelectorAll('.stat-item')].find(i => txt(i.querySelector('.stat-label')) === box);
+    return it ? txt(it.querySelector('.stat-value')) : null;
+  };
+  const chart = id => C()._charts[id];
+  const labels = id => chart(id) ? chart(id).data.datasets.map(d => d.label) : null;
+  const lastY = (id, label) => { const d = chart(id).data.datasets.find(x => x.label === label); return d.data[d.data.length - 1].y; };
+  const sum = a => a.reduce((p, x) => p + (+x || 0), 0);
+  const legend = () => $$('.ft-legend > span').filter(vis).map(s => txt(s));
+  const peak = () => txt($$('.ft-sector-lines b')[0]);
+  const fmtN = n => n.toLocaleString();
+  const E = PAY.exp;
+
+  async function run() {
+    step('load');
+    await until('the Run button', () => btn('Run'));
+    await until('the sector map', () => C().sectorIdx);
+    btn('Run').click();
+    step('run');
+    await until('a selectable cell', () => $$('.hm-cell-selectable').length);
+    $$('.hm-cell-selectable').find(c => (c.getAttribute('title') || '').length).click();
+    step('zone');
+    await until('the zone and its chips', () => C().zoneData && chips().length);
+    await wait(300);
+
+    // ── every sector on ────────────────────────────────────────────────
+    const names = PAY.sectors.buckets.map(b => b.name).concat(['Unassigned']);
+    eq('a chip per bucket, plus Unassigned for the unmapped ticker', chips().map(c => txt(c).replace(/ \d+$/, '')), names);
+    eq('every chip starts on', chips().every(c => c.classList.contains('on')), true);
+    eq('chip counts add up to the window', sum(chips().map(c => +txt(c).match(/(\d+)$/)[1])), E.train.n);
+    eq('the stat bar shows every trade', rowBox('Current', 'N'), fmtN(E.train.n));
+    eq('the equity pane is the old renderer', labels('ft-equity'), ['Equity ($)', 'Drawdown ($)']);
+    eq('no legend with every sector on', legend(), []);
+    const pk = peak();
+    eq('the peak sector line names a sector and a date', /^\$[\d.,]+k? .+, \d{4}-\d{2}-\d{2}$/.test(pk || ''), true);
+    const mapNote = txt($$('.ft-sector-lines > div').find(d => /^Sector map/.test(txt(d))));
+    eq('the map check names the mapped ticker missing from daily_features and the unmapped one',
+       !!mapNote && mapNote.includes('not in daily_features: BAC') && mapNote.includes('no bucket (shown as Unassigned): ZZZZ'), true);
+    const totalAll = lastY('ft-equity', 'Equity ($)');
+
+    // ── none, then one ─────────────────────────────────────────────────
+    step('none');
+    act('none').click();
+    await until('an empty stat bar', () => rowBox('Current', 'N') === '0');
+    eq('"none" turns every chip off', chips().some(c => c.classList.contains('on')), false);
+    eq('with nothing selected only the grey total is drawn', labels('ft-equity'), ['all sectors', 'all sectors drawdown']);
+    step('crypto');
+    chip('Crypto').click();
+    const nc = E.train.per['Crypto'];
+    await until('the crypto stat bar', () => rowBox('Current', 'N') === fmtN(nc));
+    eq('one chip: the stat bar is that sector\'s', rowBox('Current', 'N'), fmtN(nc));
+    eq('its Tickers box counts its tickers', rowBox('Current', 'Tickers'), String(E.train.crypto_tickers.length));
+    eq('the equity pane: grey total plus the sector', labels('ft-equity'),
+       ['all sectors', 'all sectors drawdown', 'Crypto', 'Crypto drawdown']);
+    eq('the legend names exactly the drawn lines', legend(), ['Crypto', 'all sectors']);
+    eq('the chip wears its line colour', vis(chip('Crypto').querySelector('i')), true);
+    near('the grey line is the unfiltered curve', lastY('ft-equity', 'all sectors'), totalAll, 0.011);
+    eq('the "subset\'s own stats" note is shown',
+       ($$('.ft-sector-lines > div').map(txt).find(t => /^Filtered to/.test(t || '')) || '').startsWith('Filtered to 1 of 18 sectors'), true);
+    eq('the drawdown note is shown', $$('.ft-note').filter(vis).some(n => /do not: each is measured from that line's own peak/.test(txt(n))), true);
+    eq('exit reasons: the shares are the sector\'s (sum 100%)', Math.round(sum(chart('ft-reasons').data.datasets[0].data)), 100);
+    eq('P&L distribution counts the sector\'s trades', sum(chart('ft-pnldist').data.datasets[0].data), nc);
+    eq('ticker breakdown: only the sector\'s tickers', labels('ft-bubble-edited').slice().sort(), E.train.crypto_tickers);
+    const pbN = (C().zoneView().price_bins || []).reduce((p, b) => p + b.n, 0);
+    eq('price bins count the sector\'s trades', pbN, nc);
+    near('annual P&L adds up to the sector\'s line', sum(chart('ft-yearly').data.datasets[0].data),
+         lastY('ft-equity', 'Crypto'), 0.05);
+    eq('the peak line does not move with the chips', peak(), pk);
+
+    // ── five ───────────────────────────────────────────────────────────
+    step('five');
+    for (const n of ['Semis & AI hardware', 'Financials', 'Managed care', 'Unassigned']) { chip(n).click(); await wait(80); }
+    await until('five selected', () => (C().sectorKeep || []).length === 5);
+    await wait(200);
+    eq('five chips draw one combined line', labels('ft-equity'), ['all sectors', 'all sectors drawdown', '5 sectors', '5 sectors drawdown']);
+    eq('and the legend says so', legend(), ['5 sectors combined', 'all sectors']);
+    const n5 = ['Crypto', 'Semis & AI hardware', 'Financials', 'Managed care', 'Unassigned'].reduce((p, s) => p + (E.train.per[s] || 0), 0);
+    eq('the stat bar counts the five', rowBox('Current', 'N'), fmtN(n5));
+
+    // ── a locked card follows ─────────────────────────────────────────
+    step('lock');
+    act('all').click(); await wait(100);
+    btn('+ Save to strip').click();
+    await until('a saved card', () => $$('.ft-lock').some(l => { try { return !!Alpine.$data(l).c.saved; } catch (e) { return false; } }));
+    $$('.ft-lock').find(l => { try { return !!Alpine.$data(l).c.saved; } catch (e) { return false; } }).click();
+    await until('a Locked row', () => rowBox('Locked', 'N'));
+    act('none').click(); await wait(80);
+    chip('Crypto').click();
+    await until('the locked row filtered', () => rowBox('Locked', 'N') === fmtN(nc));
+    eq('the locked row follows the chips', rowBox('Locked', 'N'), fmtN(nc));
+    eq('the current row too', rowBox('Current', 'N') || rowBox('Edited', 'N'), fmtN(nc));
+    eq('the locked ticker breakdown follows', labels('ft-bubble-locked').slice().sort(), E.train.crypto_tickers);
+
+    // ── TRAIN -> TEST ──────────────────────────────────────────────────
+    step('test');
+    $$('span').find(s => txt(s) === 'TEST').click();
+    await until('the test zone', () => C().window === 'test' && C().zoneData && C().zoneData.window === 'test');
+    await wait(400);
+    eq('the filter survives the window switch', C().sectorKeep, ['Crypto']);
+    const rowN = rowBox('Edited', 'N') || rowBox('Current', 'N');
+    eq('and applies to the test window', rowN, fmtN(E.test.per['Crypto']));
+
+    // ── all ────────────────────────────────────────────────────────────
+    step('all');
+    act('all').click();
+    await until('every chip on', () => C().sectorKeep === null);
+    await wait(200);
+    eq('"all" restores the old equity renderer', labels('ft-equity'), ['Equity ($)', 'Drawdown ($)']);
+    eq('and the whole window in the stat bar', rowBox('Edited', 'N') || rowBox('Current', 'N'), fmtN(E.test.n));
+    eq('and drops the filtered note', $$('.ft-sector-lines > div').filter(vis).some(d => /^Filtered to/.test(txt(d))), false);
+
+    report();
+  }
+  function report() {
+    const pre = document.createElement('pre');
+    pre.id = 'report';
+    pre.textContent = out.join('\n') + '\nerrs|' + (errs.length ? errs.join(' ;; ') : 'clean');
+    document.body.appendChild(pre);
+  }
+  document.addEventListener('alpine:initialized', () => setTimeout(() => run().catch(err => {
+    out.push(`FAIL|the driver stopped at ${window.__gateStep}|${String(err && err.message || err)}|nothing`);
+    report();
+  }), 50));
+})();
+</script>
+"""
+
+
+def build_page(pay: dict) -> str:
+    import jinja2
+    from app.assets import asset
+
+    class _URL:
+        hostname = "localhost"; scheme = "http"; path = "/"
+        def __str__(self): return "http://localhost/"
+
+    class _Req:
+        url = _URL(); headers = {}; query_params = {}; scope = {"type": "http"}
+
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")),
+                             autoescape=True, keep_trailing_newline=True)
+    env.globals["asset"] = asset
+    env.globals["live_port"] = 8001
+    html = env.get_template("factor_trades.html").render(request=_Req())
+    html = html.replace('<script defer src="https://', '<script defer crossorigin="anonymous" src="https://')
+    html = html.replace('<script src="https://', '<script crossorigin="anonymous" src="https://')
+    html = re.sub(r'<link rel="stylesheet" href=[^>]*css/([a-z_]+\.css)[^>]*>',
+                  lambda m: "<style>\n" + (ROOT / "static/css" / m.group(1)).read_text(encoding="utf-8") + "\n</style>",
+                  html)
+    stub = f"<script>const PAY = {json.dumps(pay)};</script>" + DRIVER
+    first = [True]
+
+    def inline(m):
+        pre = stub if first[0] else ""
+        first[0] = False
+        return pre + "<script>\n" + (ROOT / "static/js" / m.group(1)).read_text(encoding="utf-8") + "\n</script>"
+    return re.sub(r"<script src=[^>]*?/static/js/([a-z_]+\.js)[^>]*></script>", inline, html)
+
+
+def main() -> int:
+    browser = next((p for p in EDGE if Path(p).exists()), None)
+    if browser is None:
+        print("  SKIPPED: the sector chips -- no Edge/Chromium on this host, the page was NOT driven")
+        return EXIT_SKIPPED
+    tmp = ROOT / "scripts" / "_ft_sectors_ui.html"
+    tmp.write_text(build_page(payloads()), encoding="utf-8")
+    try:
+        text = edge_cdp.run_page(browser, tmp, timeout_s=150, window="1700,1300")
+    finally:
+        tmp.unlink(missing_ok=True)
+    fails = n = 0
+    for line in text.strip().splitlines():
+        parts = line.split("|", 3)
+        if parts[0] == "errs":
+            if parts[1] != "clean":
+                print(f"  FAIL  the console is not clean: {parts[1][:1500]}")
+                fails += 1
+            continue
+        n += 1
+        ok = parts[0] == "ok"
+        print(("  ok    " if ok else "  FAIL  ") + parts[1] + ("" if ok else f": {parts[2][:300]} (want {parts[3][:200]})"))
+        fails += not ok
+    print(f"factor-trades sector chips UI: {n} assertions, failures: {fails}")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

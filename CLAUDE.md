@@ -1297,6 +1297,91 @@ payloads (`can_skip`). **Headless virtual time does not run Alpine's
 transition frame**, so a hide-after-show via `x-show` never lands there:
 assert on content, not visibility.
 
+## Factor Trades: sector filter on the result panes (2026-11-07)
+
+A DISPLAY filter over trades already in the browser — no request, no
+refetch, no change to which trades exist or how they are sized. A chip row
+above the stat rows (one chip per bucket, plus Unassigned when a zone holds
+a ticker the map lacks), all on by default, drives every result pane:
+equity & drawdown, annual P&L, exit reasons, avg return by entry price,
+trade activity, P&L distribution, ticker breakdown and the stat bar —
+EDITED AND LOCKED alike (a comparison looks at the same sectors on both
+sides). Not the heatmap, the parameter grid or the baseline suite: those
+are where cells and policies are chosen, and a sector filter must not steer
+that. The filter persists across the train/test toggle and metric switches.
+
+- **The map is `app/factor_sectors.py`** (17 buckets agreed with the user —
+  what moves together, not GICS; sector ETFs at full weight in their sector;
+  healthcare split into managed care and pharma & biotech because managed
+  care fires as a cluster). Served by `GET /api/factor-trades/sectors`. The
+  page diffs it against `/api/factor-analysis/tickers` (`SELECT DISTINCT
+  ticker FROM daily_features`) and prints what is missing either way under
+  the chips. A file, not a table, by decision: reviewable as a diff.
+- **Size once, then filter.** A trade's size is min($/trade, daily cap / N)
+  with N the day's DISTINCT tickers across every sector (not firings — a
+  ticker under several cells is one position). The page sizes the whole
+  zone once (`ftStampSizes`, through `_computeDollarSeries` itself), stamps
+  `usd_size` on each trade, and `_computeDollarSeries` keeps a stamped size.
+  No other caller stamps, so for oi_analysis and every other page it is the
+  old path (gated against HEAD's function). Re-sizing a filtered subset was
+  the trap: fewer names per day, bigger positions, and sector curves that no
+  longer add up to the total.
+- **With every chip on the page is exactly what it was**: `zoneView()`
+  returns the zone itself, the server's aggregates are shown and the equity
+  pane is `_renderSecEquity`. Only a narrowed selection swaps in
+  `ftSectorView`: the browser's copies of `/zone`'s single-window
+  aggregates (`_window_stats`, `_price_bins`, `_pnl_dist`,
+  `_ticker_breakdown`, `_exit_breakdown` — the last two pulled out of
+  `/zone` into functions so they can be held to; `/zone` byte-identical to
+  before) over the kept trades. Those are the SUBSET'S OWN stats, not its
+  contribution, and the page says so.
+- **Equity pane**: grey = every sector (the unfiltered curve); 1–4 chips
+  selected → one line each in the first four of `SignalThumb.SLOT_PALETTE`
+  (no new colours, by decision — sixteen lines are unreadable whatever the
+  palette); 5+ → one combined line. Each line's drawdown is drawn in its
+  colour on the right axis and labelled as not additive. The legend is
+  HTML, read off the same state as the chips — one control, not two.
+- **Peak sector exposure** (always every sector, whatever the chips): the
+  largest dollar amount one bucket had OPEN on one session — entered on or
+  before it and not exited before it (`[entry, entry + ceil(exit_bar/390) −
+  1]`), i.e. what a cap checked at entry would see, same-day entries
+  included. Higher than the Trade Activity pane's peak, which counts only
+  what is held over a close; the ⓘ says so. It is the number Part B's cap
+  will be set from.
+- **`dollarStatsAll`** keeps every sector's dollar figures: the suite's
+  policy-row check compares against it, since the suite never filters.
+- Pre-existing, noticed and left: the equity pane's "DD" checkbox (`showDD`)
+  is not read by any renderer; the pane's subtitle claimed "locked grey,
+  edited colour" though only the edited zone is drawn (subtitle corrected).
+  `FactorCharts._renderSecBubble` keeps its old chart when given no tickers,
+  so the page destroys it first (`_renderBubble`).
+
+Gates: `check_ft_sectors.py` (offline, node: the map; `/zone` before/after
+the refactor; every browser aggregate equal to the server's with all chips
+on and to the server's Python on a subset; stamped sizes; per-sector P&L
+adding up to the total, and the fixture proving re-sizing would differ;
+`_computeDollarSeries` unchanged for unstamped trades; peak exposure against
+a day-by-day count) and `check_ft_sectors_ui.py` (Edge, real time, clicked:
+chips, stat bar, every pane, legend, locked row, TRAIN→TEST, "all").
+
+**Part B, the concurrent sector cap, is scoped, not built** (the user's
+call, 2026-11-07: use Part A first, pick a level). Decided: GREEDY (each
+position sized against the actual sizes already open in its sector), with
+same-day entries in one sector scaled together against the room left
+(they share the entry anchor, so they are simultaneous), exposure measured
+with the ROUNDED dollar size, never skip a trade, 1-share minimum always,
+sector ETFs at full weight, applied in the grid and the baseline suite at
+the rail's setting but not swept. Sizing is a sequential browser loop
+already, so greedy costs what the "vectorised" version would (~1.5 ms per
+combination-window at 12,000 synthetic trades). What it does cost: the
+grid and suite must ship each trade's hold per combination and the session
+calendar (the grid's `dates` are entry dates only). Measured on a synthetic
+221-combination × 5,430-trade grid (the `GRID_MAX_RETURNS` 1.2M limit):
+returns alone 39 MB resident / 13.6 MB JSON / 5.1 MB gzip; holds as a JSON
+int array +27% resident (→ ~174 combinations at the same budget); holds as
+ONE base-36 string per combination +3% resident, +9% JSON, +18% gzip
+(→ ~214). Ship the string.
+
 ## The topbar nav: six categories (2026-09-24)
 
 One partial, `templates/_nav.html`, included by all 17 page templates — it is

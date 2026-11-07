@@ -243,6 +243,13 @@ GATES = [
        note="filters reach every query; unchanged when unused; guarded"),
     _s("check_ft_filters_ui.py", can_skip=True,
        note="filter rows, min n, lock banner, CSV header — clicked in Edge"),
+    # The sector filter on the result panes: map, the size-once rule, the
+    # browser's copies of /zone's aggregates held to the server's Python,
+    # peak sector exposure against a brute-force count. Offline (node).
+    _s("check_ft_sectors.py",
+       note="sector map; sizes kept under a filter; pane parity; peak exposure"),
+    _s("check_ft_sectors_ui.py", can_skip=True,
+       note="sector chips clicked in Edge: stat bar, every pane, legend, locked, window"),
     _s("check_strategy_signal.py",
        note="decision, percentile, one clock, one fetch per source, store"),
     _s("check_strategy_signal_ui.py", can_skip=True,
@@ -372,6 +379,8 @@ COVERS = {
     "check_oo_market_sql":       [("ok", 150)],                                     # 197
     "check_ft_population":       [("ok", 90)],                                      # 119
     "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 16)],             # 21
+    "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 32)],             # 42
+    "check_ft_sectors_ui":       [(r"(\d+) assertions, failures", 26)],             # 35
     "check_strategy_signal":     [("ok", 85)],                                      # 112
     "check_strategy_signal_ui":  [(r"(\d+) assertions, failures", 100)],            # 137
     "check_strategy_signal_sql": [("ok", 16)],                                      # 21

@@ -557,6 +557,15 @@ two pages cannot give different answers about the same strategy.
 |---|---|
 | GET | `/sessions`, `/symbols`, `/candles`, `/window`, `/status` |
 
+### 3n2. Factor Trades (`/api/factor-trades`) — not yet inventoried route by route
+
+Added 2026-11-07: `GET /sectors` — the sector buckets from
+`app/factor_sectors.py` (a file in this repo, no table, no pool), read once
+by the Factor Trades page for its display-only sector chips. The page also
+reads `/api/factor-analysis/tickers` to say which mapped tickers are not in
+`daily_features` and which traded tickers have no bucket. See CLAUDE.md
+"Factor Trades: sector filter".
+
 ### 3o. The live service (`live/`, port 8001) — 25 routes
 
 **A separate FastAPI app, process and systemd unit** (`spx-live`), not part of

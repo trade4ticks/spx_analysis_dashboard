@@ -33,6 +33,7 @@ import numpy as np
 from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
+from app import factor_sectors
 from app.db import get_oi_pool
 from app.metric_filter import daily_feature_columns, is_outcome
 from app.trade_path_rules import (
@@ -270,6 +271,49 @@ def _pnl_dist(trades: list) -> list:
             for (lo, hi), n in zip(PNL_BUCKETS, counts)]
 
 
+def _ticker_breakdown(by_ticker: dict) -> list:
+    """The ticker-breakdown pane's rows: {ticker: [ret, ...]} in first-seen
+    order, sorted by trade count (stable, so ties keep that order).
+
+    A function, not inline in /zone, so check_ft_sectors can hold the page's
+    sector-filtered copy (ftTickerBreakdown in factor_sectors.js) to it.
+    """
+    total_pnl = sum(sum(v) for v in by_ticker.values())
+    out = []
+    for tkr, rets in by_ticker.items():
+        n = len(rets)
+        s = sum(rets)
+        out.append({
+            "ticker": tkr, "n": n,
+            "avg_ret":  round(s / n, 6) if n else 0.0,
+            "win_rate": round(sum(1 for x in rets if x > 0) / n, 4) if n else 0.0,
+            "contrib_pct": round(s / total_pnl * 100, 2) if total_pnl else 0.0,
+        })
+    out.sort(key=lambda x: -x["n"])
+    return out
+
+
+def _exit_breakdown(reasons: dict, hold_by_rule: dict, meta_by_key: dict,
+                    horizon_auto_added: bool, tot_active: int) -> list:
+    """The exit-reasons pane's rows, as /zone returns them. Pulled out of
+    /zone for the same reason as _ticker_breakdown."""
+    breakdown = []
+    for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+        m = meta_by_key.get(rk, {})
+        is_backstop = (rk == HORIZON_RULE_KEY and horizon_auto_added)
+        _hb = hold_by_rule.get(rk) or []
+        breakdown.append({
+            # Sessions, same conversion as Avg DIT, so "a stop fires at 1.2
+            # sessions and the backstop at 20" reads directly.
+            "avg_hold": (sum(_hb) / len(_hb) / BARS_PER_SESSION) if _hb else 0.0,
+            "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
+            "label": ("backstop — no selected rule fired" if is_backstop
+                      else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
+            "is_backstop": is_backstop, "n": n, "frac": n / tot_active,
+        })
+    return breakdown
+
+
 def _window_stats(rets: list, holds: list, tickers, span_days: float) -> dict:
     """Full stat set for one window. Matches Recall's box set plus the three
     this page needs (Calmar, Max DD, Avg Hold).
@@ -331,6 +375,17 @@ async def _load_rules(conn) -> list[dict]:
         "       exit_bar_col, exit_return_col, is_horizon "
         "FROM trade_path_rules ORDER BY side, family, rule_key")
     return [dict(r) for r in rows]
+
+
+@router.get("/sectors")
+async def list_sectors():
+    """The sector buckets (app/factor_sectors.py), in chip order.
+
+    Display only: the result panes filter trades ALREADY in the browser by
+    these, and nothing here changes which trades a run returns or how they
+    are sized. Static, so no pool.
+    """
+    return factor_sectors.payload()
 
 
 @router.get("/rules")
@@ -1827,18 +1882,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     eq = _sec_equity_curve(trades, "ret")
 
-    total_pnl = sum(sum(v) for v in by_ticker.values())
-    tickers_out = []
-    for tkr, rets in by_ticker.items():
-        n = len(rets)
-        s = sum(rets)
-        tickers_out.append({
-            "ticker": tkr, "n": n,
-            "avg_ret":  round(s / n, 6) if n else 0.0,
-            "win_rate": round(sum(1 for x in rets if x > 0) / n, 4) if n else 0.0,
-            "contrib_pct": round(s / total_pnl * 100, 2) if total_pnl else 0.0,
-        })
-    tickers_out.sort(key=lambda x: -x["n"])
+    tickers_out = _ticker_breakdown(by_ticker)
 
     def _stats(win: str) -> dict:
         w = zacc[win]
@@ -1846,20 +1890,8 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         return _window_stats(w[0], w[1], w[2], span)
 
     tot_active = tot[active][0] or 1
-    breakdown = []
-    for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
-        m = meta_by_key.get(rk, {})
-        is_backstop = (rk == HORIZON_RULE_KEY and combine_meta["horizon_auto_added"])
-        _hb = hold_by_rule.get(rk) or []
-        breakdown.append({
-            # Sessions, same conversion as Avg DIT, so "a stop fires at 1.2
-            # sessions and the backstop at 20" reads directly.
-            "avg_hold": (sum(_hb) / len(_hb) / BARS_PER_SESSION) if _hb else 0.0,
-            "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
-            "label": ("backstop — no selected rule fired" if is_backstop
-                      else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
-            "is_backstop": is_backstop, "n": n, "frac": n / tot_active,
-        })
+    breakdown = _exit_breakdown(reasons, hold_by_rule, meta_by_key,
+                                combine_meta["horizon_auto_added"], tot_active)
 
     return {
         "cells": req.cells,

@@ -978,6 +978,23 @@ window.FactorCharts = {
         const pxRawCand = +t.spot_entry_raw;
         const px  = (isFinite(pxRawCand) && pxRawCand > 0) ? pxRawCand : pxAdj;
         const ret = +t.ret;
+        // PRE-SIZED trades keep their size (Factor Trades' sector filter).
+        // A trade's size depends on how many tickers fired that DAY, so
+        // re-sizing a filtered subset divides the daily cap among fewer names
+        // and inflates every position -- and the sector curves stop adding
+        // up to the total. The page sizes the whole list once, stamps
+        // usd_size, then filters. No other caller sets it, so for them this
+        // is the old path exactly.
+        if (t.usd_size != null) {
+          if (!isFinite(ret)) continue;
+          const dollarSize = +t.usd_size;
+          const tradePnl   = dollarSize * ret;
+          dayPnl      += tradePnl;
+          dayDeployed += dollarSize;
+          tradeDollarSizes.push({ ticker: t.ticker, trade_date: d,
+                                  dollar_size: dollarSize, dollar_pnl: tradePnl });
+          continue;
+        }
         if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
         let shares = Math.floor(perTickerAlloc / px);
         if (shares < 1) shares = 1;   // 1-share min, no redistribution

@@ -42,6 +42,13 @@ let _gridHeatData = null;
 let _suiteTableKey = null, _suiteTableData = null, _suiteTableVal = null;
 let _gridStatsKey = null, _gridStatsVal = null, _gridStatsData = null;
 
+// Sector views and the sizes behind them, per zone payload (raw, not the
+// Alpine proxy: these loops run per trade). Keyed on everything that changes
+// them, so a stale view cannot be served. WeakMaps: a dropped zone takes its
+// entries with it.
+const _ftSizedCache = new WeakMap();   // zone -> {key, val: {window, series}}
+const _ftViewCache  = new WeakMap();   // zone -> {key, val: view}
+
 // ── TEMPORARY DIAGNOSTIC (remove once the matrix stale-value bug is closed) ──
 // Off unless you set  window.FT_DEBUG = true  in the console.
 //
@@ -149,6 +156,16 @@ document.addEventListener('alpine:init', () => {
     // both tiny -- and never a zone, so memory is bounded however many are
     // saved and a switch is one round trip that cannot serve anything stale.
     dollarStats: null, lockedDollarStats: null,
+    // Every sector's dollar stats, whatever the sector filter says. The suite
+    // policy row is checked against THESE: the suite never filters by sector.
+    dollarStatsAll: null,
+    // ── Sector filter (display only; factor_sectors.js) ──────────────────
+    // sectorKeep null = every sector on (the page exactly as it was);
+    // otherwise the names kept. Applies to every result pane, edited and
+    // locked alike, so a comparison always looks at the same sectors. Not
+    // the heatmap, the grid or the suite: those choose, and a sector filter
+    // must not steer the choice.
+    sectorIdx: null, sectorKeep: null, sectorMapCheck: null,
     // Page-level window. TRAIN by default: the workflow is to iterate on
     // train and treat switching to test as a decision, not a default view.
     window: 'train',
@@ -221,6 +238,15 @@ document.addEventListener('alpine:init', () => {
         this.cutoffDate = tt?.cutoff_date || '';
         if (rules?.error) this.error = rules.error;
       } catch (e) { this.error = String(e); }
+      // The sector map, then what it disagrees with daily_features on. Apart
+      // from the main load: without a map the page runs as before, chipless.
+      try {
+        const sec = await fetch('/api/factor-trades/sectors').then(r => r.ok ? r.json() : null);
+        if (sec) this.sectorIdx = Object.freeze(ftSectorIndex(sec));
+        const live = await fetch('/api/factor-analysis/tickers').then(r => r.ok ? r.json() : null);
+        this.sectorMapCheck = ftMapCheck(this.sectorIdx, live);
+        if (this.zoneData) this.renderCharts();
+      } catch (e) { console.warn('[factor-trades] sector map unavailable', e); }
       // The threshold decides both the hatching and the scale, so moving it
       // re-scopes the range -- as on Factor Analysis.
       this.$watch('hmMinSampleN', () => window.FactorCharts._hmRecomputeRange(this));
@@ -1958,7 +1984,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // same trades, so they must agree to the cent. Logged on both outcomes
     // — a silent pass proves nothing ran.
     _suiteVerifyAgainstStatBar() {
-      const t = this.suiteTable, sb = this.dollarStats;
+      const t = this.suiteTable, sb = this.dollarStatsAll;
       if (!t || !sb) return;
       const p = t.policy?.[this.window];
       if (!p) return;
@@ -2585,7 +2611,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     _renderExitReasons() {
       const el   = document.getElementById('ft-reasons');
       const elH  = document.getElementById('ft-hold');
-      const rows = this.zoneData?.exit_reasons || [];
+      const rows = this.zoneView()?.exit_reasons || [];
       for (const k of ['ft-reasons', 'ft-hold']) {
         if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
       }
@@ -2707,7 +2733,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     _renderPnlDist() {
       const el = document.getElementById('ft-pnldist');
       if (this._charts['ft-pnldist']) { this._charts['ft-pnldist'].destroy(); delete this._charts['ft-pnldist']; }
-      const b = this.zoneData?.pnl_dist || [];
+      const b = this.zoneView()?.pnl_dist || [];
       if (!el || !b.length) return;
       // Same bar language as Annual P&L and the price bins: alpha = n.
       const FC = window.FactorCharts;
@@ -2740,7 +2766,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       if (this._charts['ft-pricebins']) { this._charts['ft-pricebins'].destroy(); delete this._charts['ft-pricebins']; }
       // Server-computed from window_trades, so this pane cannot pick up the
       // wider series population by accident.
-      const bins = this.zoneData?.price_bins || [];
+      const bins = this.zoneView()?.price_bins || [];
       if (!el || !bins.length) return;
       const lbl = bins.map(b => b.label);
       const avg = bins.map(b => b.avg_ret == null ? null : +(b.avg_ret * 100).toFixed(3));
@@ -2780,24 +2806,223 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       });
     },
 
+    // ── Sector filter ────────────────────────────────────────────────────
+    // Every name a chip can carry: the map's buckets, then Unassigned when
+    // a zone on screen holds a ticker the map does not.
+    sectorNames() {
+      const idx = this.sectorIdx;
+      if (!idx) return [];
+      const names = [...idx.order];
+      const has = z => (z?.window_trades || []).some(t => !idx.of.has(t.ticker));
+      if (has(this.zoneData) || has(this.lockedZone)) names.push(idx.unassigned);
+      return names;
+    },
+    sectorOn(name) { return this.sectorKeep === null || this.sectorKeep.includes(name); },
+    sectorFiltered() { return this.sectorKeep !== null; },
+    toggleSector(name) {
+      const all = this.sectorNames();
+      const keep = this.sectorKeep === null ? all.slice() : this.sectorKeep.slice();
+      const i = keep.indexOf(name);
+      if (i >= 0) keep.splice(i, 1); else keep.push(name);
+      // Back to "all" as soon as every chip is on: that state is the page
+      // exactly as it was, server numbers and all.
+      this.sectorKeep = all.every(n => keep.includes(n)) ? null : all.filter(n => keep.includes(n));
+      this.renderCharts();
+    },
+    sectorAll()   { this.sectorKeep = null; this.renderCharts(); },
+    sectorClear() { this.sectorKeep = []; this.renderCharts(); },
+    // Trades per sector in the edited zone's window, for the chip labels.
+    sectorCount(name) {
+      const idx = this.sectorIdx;
+      if (!idx || !this.zoneData) return 0;
+      let n = 0;
+      for (const t of (this.zoneData.window_trades || [])) if (ftSectorOf(idx, t.ticker) === name) n++;
+      return n;
+    },
+    // A line colour per selected sector, only while the selection is small
+    // enough to draw one line each. The first four of the palette the page
+    // already uses for signals -- no new colours.
+    sectorColour(name) {
+      const keep = this.sectorKeep;
+      if (!keep || keep.length > FT_SECTOR_LINES) return null;
+      const i = keep.indexOf(name);
+      const pal = window.SignalThumb?.SLOT_PALETTE || ['#F59E0B', '#10B981', '#A855F7', '#06B6D4'];
+      return i >= 0 ? pal[i % pal.length] : null;
+    },
+    // The equity pane's legend: what is drawn, read off the same state as
+    // the chips. Not clickable -- the chips are the one control.
+    sectorLegend() {
+      const keep = this.sectorKeep;
+      if (keep === null || !keep.length) return [];
+      const lines = keep.length <= FT_SECTOR_LINES
+        ? keep.map(n => ({ name: n, colour: this.sectorColour(n) }))
+        : [{ name: `${keep.length} sectors combined`, colour: '#3498db' }];
+      return [...lines, { name: 'all sectors', colour: 'rgba(170,170,170,0.75)' }];
+    },
+    sectorMapNote() {
+      const c = this.sectorMapCheck;
+      if (!c || (!c.notInData.length && !c.unmapped.length)) return '';
+      const parts = [];
+      if (c.notInData.length) parts.push(`${c.notInData.length} mapped ticker${c.notInData.length > 1 ? 's' : ''} not in daily_features: ${c.notInData.join(' ')}`);
+      if (c.unmapped.length) parts.push(`${c.unmapped.length} in daily_features with no bucket (shown as Unassigned): ${c.unmapped.join(' ')}`);
+      return 'Sector map — ' + parts.join(' · ');
+    },
+
+    // Each trade of a zone with its dollar size, sized ONCE over the whole
+    // list exactly as the unfiltered panes size it (the window list as the
+    // stat bar does, the series list as the equity pane does).
+    _sectorSized(zone) {
+      const z = window.Alpine ? Alpine.raw(zone) : zone;
+      const key = this.perTrade + '|' + this.dailyCap;
+      const hit = _ftSizedCache.get(z);
+      if (hit && hit.key === key) return hit.val;
+      const FC = window.FactorCharts;
+      const win = z.window_trades || [];
+      const val = {
+        window: ftStampSizes(FC, this, win, this.perTrade, this.dailyCap),
+        series: ftStampSizes(FC, this, z.series_trades || win, this.perTrade, this.dailyCap),
+      };
+      _ftSizedCache.set(z, { key, val });
+      return val;
+    },
+    // A zone as the result panes read it: the zone itself with every sector
+    // on, else ftSectorView. Reads sectorKeep, perTrade, dailyCap and window,
+    // so anything bound to it re-evaluates when they change.
+    _sectorViewOf(zone) {
+      if (!zone) return null;
+      const keep = this.sectorKeep, idx = this.sectorIdx;
+      const key = [keep === null ? '*' : keep.join('\u0001'), this.perTrade,
+                   this.dailyCap, this.window].join('|');
+      if (keep === null || !idx) return zone;
+      const z = window.Alpine ? Alpine.raw(zone) : zone;
+      const hit = _ftViewCache.get(z);
+      if (hit && hit.key === key) return hit.val;
+      const val = ftSectorView(z, new Set(keep), idx, this._sectorSized(z),
+                               this._priceBuckets, this.window);
+      _ftViewCache.set(z, { key, val });
+      return val;
+    },
+    zoneView()   { return this._sectorViewOf(this.zoneData); },
+    lockedView() { return this._sectorViewOf(this.lockedZone); },
+
+    // Peak concurrent sector exposure over EVERY sector, whatever the chips
+    // say -- it is the number a cap would be set from.
+    peakSectorText(zone) {
+      zone = zone || this.zoneData;
+      if (!zone || !this.sectorIdx) return '';
+      void this.perTrade; void this.dailyCap;
+      const z = window.Alpine ? Alpine.raw(zone) : zone;
+      const p = ftPeakSectorExposure(this._sectorSized(z).window, z.trading_days || [], this.sectorIdx);
+      if (!p.sector) return '';
+      return `${window.FactorCharts._statFmt$(p.usd)} ${p.sector}, ${p.date}`
+        + (p.unplaced ? ` (${p.unplaced} trade${p.unplaced > 1 ? 's' : ''} off the calendar, not counted)` : '');
+    },
+
+    // The equity pane under a sector filter. Grey: every sector, the curve
+    // the unfiltered pane draws. Colour: each selected sector (up to
+    // FT_SECTOR_LINES), or the selection as one line beyond that. Every line
+    // is summed from the SAME stamped sizes, so the sector lines add up to
+    // the grey one. Their drawdowns do not: each is measured from that
+    // line's own peak.
+    _renderSectorEquity(view) {
+      const FC = window.FactorCharts;
+      const id = 'ft-equity';
+      const canvas = document.getElementById(id);
+      if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
+      if (!canvas || !view) return;
+      const sized = this._sectorSized(this.zoneData).series;
+      const toMs = d => new Date(d).getTime();
+      const line = (trades) => {
+        const eq = FC._computeDollarSeries(this, trades, this.perTrade, this.dailyCap).equity;
+        return { eq: eq.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) })),
+                 dd: FC._drawdownFromDollarEquity(this, eq)
+                       .map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) })) };
+      };
+      const ds = [];
+      const add = (label, col, ddCol, trades, width) => {
+        const l = line(trades);
+        ds.push({ label, data: l.eq, borderColor: col, borderWidth: width, pointRadius: 0,
+                  fill: false, tension: 0, stepped: 'after', yAxisID: 'y' });
+        ds.push({ label: label + ' drawdown', data: l.dd, borderColor: ddCol, borderWidth: 1,
+                  pointRadius: 0, fill: false, tension: 0, stepped: 'after', yAxisID: 'y1' });
+      };
+      const keep = this.sectorKeep || [];
+      add('all sectors', 'rgba(170,170,170,0.75)', 'rgba(170,170,170,0.25)', sized, 1.2);
+      const idx = this.sectorIdx;
+      if (keep.length && keep.length <= FT_SECTOR_LINES) {
+        for (const name of keep) {
+          const col = this.sectorColour(name);
+          add(name, col, col + '59', sized.filter(t => ftSectorOf(idx, t.ticker) === name), 1.6);
+        }
+      } else if (keep.length) {
+        add(`${keep.length} sectors`, '#3498db', 'rgba(232,67,147,.32)',
+            view.series_trades || [], 1.6);
+      }
+      const all = ds.flatMap(d => d.data);
+      if (!all.length) return;
+      const xs = all.map(p => p.x);
+      const ax = FC._seriesAxis(this, id) || {};
+      const fmt$ = v => FC._statFmt$(v);
+      this._charts[id] = new Chart(canvas.getContext('2d'), {
+        plugins: [...FC._cutoffPlugin(this, 'time', null, id), ...FC._crosshairPlugin(this, 'time')],
+        type: 'line',
+        data: { datasets: ds },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { mode: 'index', intersect: false, callbacks: {
+              title: it => it.length ? new Date(it[0].parsed.x).toISOString().slice(0, 10) : '',
+              label: it => `${it.dataset.label}: ${fmt$(it.parsed.y)}` } },
+          },
+          scales: {
+            x: { type: 'linear', min: ax.fromMs ?? Math.min(...xs), max: ax.toMs ?? Math.max(...xs),
+                 ticks: { color: '#888', font: { size: 9 }, maxTicksLimit: 10, autoSkip: true,
+                          autoSkipPadding: 16, callback: v => new Date(v).toISOString().slice(0, 7) },
+                 grid: { color: '#222' } },
+            y:  { position: 'left', ticks: { color: '#888', font: { size: 9 }, callback: fmt$ },
+                  grid: { color: '#222' } },
+            y1: { position: 'right', ticks: { color: 'rgba(170,170,170,.6)', font: { size: 9 }, callback: fmt$ },
+                  grid: { drawOnChartArea: false }, max: 0 },
+          },
+        },
+      });
+    },
+
+    // FactorCharts._renderSecBubble returns BEFORE destroying its old chart
+    // when there are no tickers, so a sector filter that empties the pane
+    // left the previous bubbles standing. Destroyed here first.
+    _renderBubble(id, detail) {
+      const key = id.replace(/-canvas$/, '').replace(/^chart-/, '');
+      if (this._charts[key]) { this._charts[key].destroy(); delete this._charts[key]; }
+      window.FactorCharts._renderSecBubble(this, id, detail);
+    },
+
     renderCharts() {
       const FC = window.FactorCharts;
       if (!FC || !this.zoneData) return;
       this.equityDollarParams.ft = {
         perTrade: this.perTrade, dailyCap: this.dailyCap,
       };
+      // Every pane below reads the SECTOR VIEW: the zone itself with every
+      // sector on (so the page is exactly what it was), else the subset with
+      // its trades' original sizes.
+      const zv = this.zoneView(), lv = this.lockedView();
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
       const ds = window.FactorCharts._computeDollarSeries(
-        this, this.zoneData.window_trades || [],
+        this, zv.window_trades || [],
         this.perTrade, this.dailyCap);
       this.dollarStats = this._dollarStats(ds);
+      this.dollarStatsAll = (zv === this.zoneData) ? this.dollarStats
+        : this._dollarStats(window.FactorCharts._computeDollarSeries(
+            this, this.zoneData.window_trades || [], this.perTrade, this.dailyCap));
       // The locked row's dollar boxes were blank because these were only ever
       // computed for the edited zone. Same function, same sizing inputs, the
       // locked population.
-      this.lockedDollarStats = this.lockedZone
+      this.lockedDollarStats = lv
         ? this._dollarStats(window.FactorCharts._computeDollarSeries(
-            this, this.lockedZone.window_trades || [], this.perTrade, this.dailyCap))
+            this, lv.window_trades || [], this.perTrade, this.dailyCap))
         : null;
       // In TRAIN the two populations are identical by construction, so the
       // equity curve's endpoint must equal Total Ret. If it does not, the
@@ -2805,7 +3030,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       // a mismatch here is a data-integrity bug, not a rounding artefact.
       if (this.window === 'train' && this.dollarStats) {
         const seriesDs = window.FactorCharts._computeDollarSeries(
-          this, this.zoneData.series_trades || [], this.perTrade, this.dailyCap);
+          this, zv.series_trades || [], this.perTrade, this.dailyCap);
         const endPt = seriesDs.equity.length
           ? seriesDs.equity[seriesDs.equity.length - 1].value : 0;
         const diff = Math.abs(endPt - this.dollarStats.total_ret_usd);
@@ -2826,25 +3051,27 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       // consumer reads a server-computed single-window aggregate and never
       // sees a trade list at all. One line to audit instead of a convention
       // to remember.
-      const seriesView = { ...this.zoneData,
-                           combined_trades: this.zoneData.series_trades
-                                            || this.zoneData.window_trades || [] };
+      const seriesView = { ...zv,
+                           combined_trades: zv.series_trades
+                                            || zv.window_trades || [] };
       // Each pane in its own try. One shared try/catch meant a throw in the
       // second renderer silently blanked the four after it -- one bug
       // presenting as five broken panes, with nothing to say which was the
       // cause. Now a failure costs exactly its own pane and names itself.
       const panes = [
-        ['equity',          () => FC._renderSecEquity(this, 'ft-equity', seriesView, true)],
+        ['equity',          () => this.sectorFiltered()
+                                    ? this._renderSectorEquity(zv)
+                                    : FC._renderSecEquity(this, 'ft-equity', seriesView, true)],
         ['annual P&L',      () => FC._renderZoneYearly(this, 'ft-yearly', seriesView)],
         ['activity',        () => FC._renderSecActivity(this, 'ft-activity-edited', seriesView)],
-        ['ticker breakdown',() => FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData)],
+        ['ticker breakdown',() => this._renderBubble('ft-bubble-edited', zv)],
         ['exit reasons',    () => this._renderExitReasons()],
         ['price bins',      () => this._renderPriceBins()],
         ['P&L distribution',() => this._renderPnlDist()],
       ];
       if (this.lockedZone) {
-        panes.push(['activity (locked)', () => FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone)]);
-        panes.push(['ticker (locked)',   () => FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone)]);
+        panes.push(['activity (locked)', () => FC._renderSecActivity(this, 'ft-activity-locked', lv)]);
+        panes.push(['ticker (locked)',   () => this._renderBubble('ft-bubble-locked', lv)]);
       }
       for (const [name, fn] of panes) {
         try { fn(); }
@@ -2856,7 +3083,9 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // One row until a run is locked, then locked / edited / change. Never
     // two values in one box.
     statRows() {
-      const src = this.zoneData || this.runData;
+      // The sector view when a zone is on screen: with chips narrowed, the
+      // rows are the SUBSET's own stats (sizes from the whole zone).
+      const src = this.zoneData ? this.zoneView() : this.runData;
       if (!src) return [];
       // Formatters and the Calmar guard now live in FactorCharts, shared
       // with the portfolio bar. These are thin aliases so the Change row
@@ -2916,7 +3145,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       // zone-minus-universe subtraction with nothing on screen saying so.
       // Absent instead, with lockedZoneNote stating why.
       if (!this.lockedRun || !this.lockedZone) return [edited].filter(Boolean);
-      const lockedSrc = this.lockedZone;
+      const lockedSrc = this.lockedView();
       const locked = mk('locked', bMark(this.lockedRun, 'Locked'),
                         lockedSrc[this.window], this.lockedDollarStats, this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);

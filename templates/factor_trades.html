@@ -137,6 +137,17 @@
     .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
     .ft-win span.on.test { background:rgba(232,67,147,.25); color:#e84393; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
+    /* Sector chips: the one control for the result panes' sector filter. */
+    .ft-sectors { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
+    .ft-chip { padding:2px 8px; font-size:11px; border:1px solid var(--border); border-radius:10px;
+               cursor:pointer; color:var(--dim); background:transparent; }
+    .ft-chip.on { background:var(--raised); color:var(--text); }
+    .ft-chip.empty { opacity:.45; }
+    .ft-chip i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; }
+    .ft-chip-act { font-size:10px; color:var(--dim); cursor:pointer; text-decoration:underline; margin-left:6px; }
+    .ft-sector-lines { font-size:10px; color:var(--dim); margin-bottom:8px; }
+    .ft-legend { display:inline-flex; gap:10px; margin-left:8px; font-weight:400; font-size:10px; color:var(--dim); }
+    .ft-legend i { display:inline-block; width:12px; height:2px; vertical-align:middle; margin-right:4px; }
     /* Metric filter rows: metric on its own line (the rail is narrow), then
        operator, value and remove, then the train-window distribution. */
     .ft-filter { border:1px solid var(--border); border-radius:4px; padding:5px 6px; margin-bottom:6px; }
@@ -218,6 +229,7 @@
       from. Loaded BEFORE the page JS, which delegates to it. -#}
   <script src={{ asset('js/signal_thumbnail.js') }}></script>
   <script src={{ asset('js/factor_charts.js') }}></script>
+  <script src={{ asset('js/factor_sectors.js') }}></script>
   <script src={{ asset('js/factor_trades.js') }}></script>
 </head>
 
@@ -849,6 +861,33 @@
         heatmap are not like-for-like.
       </div>
 
+      {#- Sector filter: a DISPLAY filter over the trades already here, on
+          every result pane below, edited and locked alike. Not the heatmap,
+          the grid or the suite. Sizes stay what the whole zone gave them. -#}
+      <div x-show="zoneData && sectorIdx">
+        <div class="ft-sectors">
+          <span class="ft-note" style="margin-right:4px">Sectors</span>
+          <template x-for="name in sectorNames()" :key="'sc-'+name">
+            <span class="ft-chip" :class="{on: sectorOn(name), empty: !sectorCount(name)}"
+                  @click="toggleSector(name)" :title="sectorCount(name) + ' trades in the ' + window + ' window'">
+              <i x-show="sectorColour(name)" :style="'background:' + (sectorColour(name) || 'transparent')"></i><span x-text="name + ' ' + sectorCount(name)"></span>
+            </span>
+          </template>
+          <span class="ft-chip-act" @click="sectorAll()">all</span>
+          <span class="ft-chip-act" @click="sectorClear()">none</span>
+        </div>
+        <div class="ft-sector-lines">
+          <div x-show="peakSectorText()">Peak sector exposure (every sector, <span x-text="window"></span> window):
+            <b style="color:var(--text)" x-text="peakSectorText()"></b><template x-if="lockedZone"><span> · locked:
+            <span x-text="peakSectorText(lockedZone)"></span></span></template>
+            <span title="Open on a session = entered on or before it and not yet exited: the exposure a cap checked at entry would see. Trade activity counts only what is held over a close, so it peaks lower.">ⓘ</span></div>
+          <div x-show="sectorFiltered()" style="color:#e0b066">Filtered to <span x-text="(sectorKeep || []).length"></span>
+            of <span x-text="sectorNames().length"></span> sectors: the stats below are that subset's OWN, not its
+            share of the whole, and each trade keeps the size it had with every sector in.</div>
+          <div x-show="sectorMapNote()" x-text="sectorMapNote()"></div>
+        </div>
+      </div>
+
       <!-- 2. Stat rows. One row until a card is locked, then three. -->
       <template x-for="row in statRows()" :key="'sr-'+row.key">
         <div class="ft-statrow">
@@ -868,11 +907,18 @@
            stays 2x2 rather than gaining a fifth pane to balance it. -->
       <div class="chart-box" x-show="zoneData">
         <div class="chart-title">Equity &amp; drawdown
-          <span class="ft-note"><span x-text="window.toUpperCase()"></span> — locked grey, edited colour</span>
+          <span class="ft-note"><span x-text="window.toUpperCase()"></span> — edited zone</span>
+          <span class="ft-legend" x-show="sectorLegend().length">
+            <template x-for="l in sectorLegend()" :key="'lg-'+l.name">
+              <span><i :style="'background:' + l.colour"></i><span x-text="l.name"></span></span>
+            </template>
+          </span>
           <label class="ft-note" style="margin-left:8px"><input type="checkbox" x-model="showDD"> DD</label>
           <button class="ft-fs" @click="openFs('ft-equity')" title="Full screen">⛶</button>
         </div>
         <div class="chart-canvas"><canvas id="ft-equity"></canvas></div>
+        <div class="ft-note" x-show="sectorFiltered()" style="margin-top:4px">Sector equity lines add up to the
+          grey total. Their drawdowns (the faint lines, right axis) do not: each is measured from that line's own peak.</div>
       </div>
 
       <div class="ft-grid3" x-show="zoneData">
