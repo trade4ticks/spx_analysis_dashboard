@@ -1335,8 +1335,9 @@ that. The filter persists across the train/test toggle and metric switches.
   **No page-local blue is left**: `#2a5a82` / `#3a7ab0` were hard-coded in
   three rules (the sweep chips, `.ft-btn.primary` — Run, Run suite, Done —
   and `.ft-savebtn`), all converted together to `--accent` with white text
-  (theme.css's `.btn.primary`), by the user's rule: all or none. The UI gate
-  fails if any element paints either old value.
+  (theme.css's `.btn.primary`), by the user's rule: all or none, hover
+  included (`#2980b9`, theme.css's value). The UI gate fails if any
+  element paints either old value or a primary hovers differently.
 - **Size once, then filter.** A trade's size is min($/trade, daily cap / N)
   with N the day's DISTINCT tickers across every sector (not firings — a
   ticker under several cells is one position). The page sizes the whole
@@ -1968,13 +1969,12 @@ change outside the card. Reasons are only these two; never to make a failing
 comparison pass. **The topbar nav is not compared (2026-11-07, the
 user's call)**: `check_nav` guards it, and holding it to the recording made
 every site-wide menu change fail here. Its subtree is dropped from both the
-recording and the live page, exactly one each (asserted). **Known, not
-fixed — 1px of layout drift**: steps 3–6 record `#ob-rank-inner` at
-`width: 1069px` and render 1070px now; re-rendering the page AT 1c01a4f
-with this driver also gives 1070, so the browser moved, not the page. That
-inline width is `max(parent clientWidth, bars×12+16)` — a layout
-measurement, like the canvas sizes the walker already skips. Awaiting the
-user's call (normalise it, or re-record).
+recording and the live page, exactly one each (asserted). **Nor is the ranking's
+inline width (2026-11-07, the user's call)**: `#ob-rank-inner`'s lone
+`width: Npx;` is `max(parent clientWidth, bars×12+16)` — a layout
+measurement, like the canvas sizes the walker skips. A browser update moved
+it 1069 → 1070px with the page unchanged (re-rendered at 1c01a4f: 1070);
+any other style on that element is still compared.
 
 **`check_alpine_syntax` checked NOTHING for weeks** (fixed 2026-09-26). It
 rendered with `request=None`; once `_nav.html` read `request.url.hostname`

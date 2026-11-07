@@ -288,6 +288,14 @@ DRIVER = r"""
       return [c.backgroundColor, c.borderTopColor, c.color].some(v => v === 'rgb(42, 90, 130)' || v === 'rgb(58, 122, 176)');
     }).map(el => el.tagName + '.' + el.className);
     eq('nothing on the page paints the old #2a5a82 / #3a7ab0', old, []);
+    // :hover cannot be produced from script, so read the rules themselves:
+    // the page's primaries must hover exactly as theme.css's .btn.primary.
+    const rules = [...document.styleSheets].flatMap(sh => { try { return [...sh.cssRules]; } catch (e) { return []; } });
+    const hoverBg = sel => { const r = rules.find(x => x.selectorText === sel); return r ? r.style.backgroundColor : null; };
+    const site = hoverBg('.btn.primary:hover');
+    eq('the site primary hover is #2980b9', site, 'rgb(41, 128, 185)');
+    eq('Run / Run suite / Done and Save hover as the site primary',
+       [hoverBg('.ft-btn.primary:hover:not(:disabled)'), hoverBg('.ft-savebtn:hover:not(:disabled)')], [site, site]);
 
     report();
   }

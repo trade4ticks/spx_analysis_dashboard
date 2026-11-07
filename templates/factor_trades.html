@@ -73,6 +73,8 @@
        the page-local #2a5a82 / #3a7ab0 pair this page used to carry in three
        rules (2026-11-07: converted together, none left). */
     .ft-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    /* theme.css .btn.primary:hover, value for value. */
+    .ft-btn.primary:hover:not(:disabled) { background:#2980b9; }
     .ft-btn:disabled { opacity:.5; cursor:not-allowed; }
 
     /* Run history — one card per run, params stacked vertically so what is
@@ -94,6 +96,7 @@
     .ft-savebtn { width:100%; margin-top:6px; padding:4px; border-radius:3px;
                   cursor:pointer; border:1px solid var(--accent); background:var(--accent);
                   color:#fff; font-size:10px; font-weight:700; }
+    .ft-savebtn:hover:not(:disabled) { background:#2980b9; }
     .ft-run .ft-run-t { font-size:10px; font-weight:700; letter-spacing:.4px;
                         margin-bottom:4px; text-transform:uppercase; }
     .ft-run .p { color:var(--muted); font-family:monospace; white-space:nowrap;

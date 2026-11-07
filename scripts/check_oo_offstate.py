@@ -38,6 +38,13 @@ per step). Its subtree is dropped from BOTH sides, the recording and the
 live page, before comparing; exactly one nav must be dropped from each, so
 the rule cannot hide anything else or pass vacuously.
 
+THE RANKING'S INLINE WIDTH IS NOT COMPARED (2026-11-07, the user's call).
+#ob-rank-inner's style is `width: max(parent clientWidth, bars x 12 + 16)px`,
+set by renderRanking: a LAYOUT MEASUREMENT, like the canvas sizes the walker
+already skips. A browser update moved it 1069 -> 1070px with the page
+unchanged (re-rendered at 1c01a4f: 1070). Only that element, and only a style
+that is a lone `width: Npx;` -- anything else in it is still compared.
+
   python scripts/check_oo_offstate.py            compare with the recording
   python scripts/check_oo_offstate.py --record   (re)record -- only on a
       commit whose page is the one to keep; say why in the commit message
@@ -351,6 +358,22 @@ def strip_nav(lines: list) -> tuple[list, int]:
     return out, dropped
 
 
+_RANK_WIDTH = re.compile(r"^style=width: \d+(\.\d+)?px;$")
+
+
+def strip_rank_width(lines: list) -> tuple[list, int]:
+    """The DOM lines with #ob-rank-inner's lone `width: Npx;` style removed."""
+    out, n = [], 0
+    for line in lines:
+        f = line.split("|")
+        if len(f) > 2 and f[1] == "div" and "ob-rank-inner" in f[2].split():
+            kept = [x for x in f if not _RANK_WIDTH.match(x)]
+            n += len(kept) != len(f)
+            line = "|".join(kept)
+        out.append(line)
+    return out, n
+
+
 def main() -> int:
     record = "--record" in sys.argv
     rerecord = sys.argv[sys.argv.index("--rerecord-from") + 1] if "--rerecord-from" in sys.argv else None
@@ -431,6 +454,8 @@ def main() -> int:
             if part == "dom":
                 wd, wn = strip_nav(w["dom"])
                 gd, gn = strip_nav(g["dom"])
+                wd, _ = strip_rank_width(wd)
+                gd, _ = strip_rank_width(gd)
                 ok_nav = wn == 1 and gn == 1
                 print(("  ok    " if ok_nav else "  FAIL  ")
                       + f"{w['name']}: the topbar nav left out (recording {wn}, page {gn}; exactly 1 each)")
