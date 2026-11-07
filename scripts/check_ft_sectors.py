@@ -363,6 +363,17 @@ const off = g.combos.map(x => c._gridStats(x, 'train').total_ret);
 c.sectorCap = IN.levels[1];
 const on = g.combos.map(x => c._gridStats(x, 'train').total_ret);
 out.grid.off = off; out.grid.on = on;
+// Provenance: the cap in every export's population block and on the card,
+// off as well as on (an uncapped file must say so, not stay silent).
+out.prov = {};
+for (const lvl of [null, IN.levels[0]]) {
+  c.sectorCap = lvl;
+  out.prov[lvl === null ? "off" : "on"] = { rows: c._csvPopulationRows({ max_strike: 1000, filters: [] }),
+                            card: c.capCardText() };
+}
+c.sectorCap = IN.levels[0]; c.sectorIdx = null;
+out.prov.unloaded = { rows: c._csvPopulationRows({}), card: c.capCardText() };
+c.sectorIdx = idx;
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -397,6 +408,19 @@ def check_cap(h, ft, rows, zs, sec) -> None:
     out = run_cap_node({"zones": zs, "sectors": fs.payload(), "levels": CAP_LEVELS,
                         "suite": suite, "suite_noholds": noholds, "grid": grid})
 
+    # ── the cap's provenance: CSV population block and run card ─────────
+    pv = out["prov"]
+    def cap_row(rows):
+        r = [x for x in rows if x and x[0] == "# sector_cap"]
+        return r[0][1] if len(r) == 1 else None
+    off_row, on_row = cap_row(pv["off"]["rows"]), cap_row(pv["on"]["rows"])
+    check(off_row == "none" and pv["off"]["card"] == "",
+          "cap off: the export says '# sector_cap,none' and the card adds no line", f"{off_row!r} / {pv['off']['card']!r}")
+    check(on_row is not None and "$4000" in on_row and "soft" in on_row and "sector cap $4,000" in pv["on"]["card"],
+          "cap on: the export's population block and the run card name the level", f"{on_row!r} / {pv['on']['card']!r}")
+    ur = cap_row(pv["unloaded"]["rows"])
+    check(ur is not None and "not applied" in ur and "not applied" in pv["unloaded"]["card"],
+          "cap set before the sector map loads: the export and card say it was not applied", f"{ur!r}")
     for win in ("train", "test"):
         z, o = zs[win], out["cap"][win]
         trades, days = z["window_trades"], z["trading_days"]

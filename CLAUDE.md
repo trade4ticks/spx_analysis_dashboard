@@ -1402,7 +1402,10 @@ grid combos and suite windows ship `h`/`hw` (one code per trade,
 whether the sector map has loaded). Saved cards snapshot `sectorCap`; a card
 from before it restores as OFF. The status line under the peak
 (`capText`) reports scaled entries, sector-days bound and the worst
-overshoot. **Soft, and the overshoot compounds**: each entry passes the cap
+overshoot. **Provenance**: every export's population block (`_csvPopulationRows`,
+beside max_strike and the filters) writes `# sector_cap` — `none` when off, and
+"not applied" when set before the sector map loaded; every run card, edited and
+locked, shows `capCardText()` (the rail's cap sizes both). **Soft, and the overshoot compounds**: each entry passes the cap
 by at most one share, but on a name priced above its allocation those
 1-share minimums stack for as long as they are held. Gate:
 `check_ft_sectors` "cap" (sizes equal an independent Python reference;

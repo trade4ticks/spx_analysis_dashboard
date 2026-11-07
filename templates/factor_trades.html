@@ -733,6 +733,11 @@
             <div class="p" x-show="c.r.max_strike"
                  title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
                  x-text="'max strike $' + c.r.max_strike"></div>
+            {#- The rail's cap: it sizes every card's dollar figures, edited
+                and locked alike, so every card says so. -#}
+            <div class="p" x-show="capCardText()"
+                 title="Concurrent per-sector capital cap from the rail. It changes every dollar figure on this card. Soft: a trade is never skipped and keeps at least 1 share."
+                 x-text="capCardText()"></div>
             {#- Metric filters, and what they removed. Coloured like the other
                 things that change what every number means. -#}
             <template x-for="(fl, fli) in (c.r.filters || [])" :key="'rf-'+c.i+'-'+fli">

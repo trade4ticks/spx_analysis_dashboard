@@ -384,6 +384,9 @@ document.addEventListener('alpine:init', () => {
       if (!fs.length) out.push(['# filters', 'none']);
       for (const f of fs) out.push(['# filter', f.metric, f.op, f.value]);
       if (fs.length) out.push(['# filters', 'raw daily_features values, ANDed; bins unchanged']);
+      // The rail's cap, not the payload's: sizing is client-side, and a capped
+      // export must never read like an uncapped one. Written when off, too.
+      out.push(['# sector_cap', this._capCsv()]);
       return out;
     },
 
@@ -1792,8 +1795,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       const out = [];
       out.push(['# Factor Trades — parameter response grid']);
       out.push(['# units', d.units_note]);
-      out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap',
-                this._capCsv()]);
+      out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap']);
       out.push(['# cutoff', d.cutoff_date]);
       out.push(['# entry_anchor', d.entry_anchor]);
       for (const r of this._csvPopulationRows(d)) out.push(r);
@@ -2100,7 +2102,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       // them — a suite exported at $2k/$10k is not comparable to one at
       // $5k/$25k, and nothing else in the file would say which it was.
       out.push(['# sizing', '$' + this.perTrade + '/trade',
-                '$' + this.dailyCap + '/day cap', this._capCsv()]);
+                '$' + this.dailyCap + '/day cap']);
       out.push(['# seeds', (d.seeds || []).join(' ')]);
       if (d.hold) out.push(['# drawn hold (sessions)', d.hold.avg_sessions]);
       for (const e of (d.errors || [])) out.push(['# FAILED', e.key, e.error]);
@@ -2322,7 +2324,17 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     // The cap as an export header cell: it changes every dollar figure.
     _capCsv() {
       const v = this._capUsd();
-      return v == null ? 'no sector cap' : '$' + v + '/sector cap (soft: 1-share minimum)';
+      if (v == null) return 'none';
+      const why = this.capInactiveReason();
+      return '$' + v + ' per sector, soft (1-share minimum)' + (why ? ' -- ' + why : '');
+    },
+    // The same for the run card: one line, empty when off (the card's other
+    // lines only appear when they narrow something).
+    capCardText() {
+      const v = this._capUsd();
+      if (v == null) return '';
+      const why = this.capInactiveReason();
+      return 'sector cap $' + v.toLocaleString('en-US') + (why ? ' (not applied)' : ' (soft)');
     },
 
     _applyCfg(cfg) {
