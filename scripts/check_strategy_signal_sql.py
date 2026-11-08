@@ -15,6 +15,13 @@ real database. What it pins:
 
 PG_BIN points at initdb/pg_ctl if they are somewhere unusual. No binaries:
 SKIP, not PASS.
+
+--live: the same checks in a THROWAWAY SCHEMA of an existing database
+(DATABASE_URL, or --dsn), for a host that cannot run initdb -- every
+connection confined to it, dropped at the end (check_oo_market_sql's
+run_in_scratch).
+
+    python scripts/check_strategy_signal_sql.py --live
 """
 from __future__ import annotations
 
@@ -29,15 +36,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from check_oo_market_sql import Cluster, EXIT_SKIPPED, find_bin  # noqa: E402
+import check_oo_market_sql as _base  # noqa: E402
+from check_oo_market_sql import Cluster, EXIT_SKIPPED, find_bin, live_dsn, run_in_scratch  # noqa: E402
 
-FAILS: list[str] = []
-
-
-def check(ok: bool, msg: str) -> None:
-    print(("  ok    " if ok else "  FAIL  ") + msg)
-    if not ok:
-        FAILS.append(msg)
+# One list with the base module's, so its run_in_scratch checks count here.
+FAILS: list[str] = _base.FAILS
+check = _base.check
 
 
 def png(w, h):
@@ -52,13 +56,13 @@ def cfg(name, **kw):
             "states": ["TRADE", "NO TRADE"], "logic": "and", "metrics": [], "manual": [], **kw}
 
 
-async def run(dsn: str) -> None:
+async def run(dsn: str, **pool_kw) -> None:
     import asyncpg
     from fastapi import HTTPException, UploadFile
     from app.routers import strategy_signal as router
     from app.strategy_signal import images, store
 
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3, **pool_kw)
     try:
         print("migration")
         async with pool.acquire() as conn:
@@ -154,8 +158,23 @@ async def run(dsn: str) -> None:
 
 
 def main() -> int:
+    dsn = live_dsn()
+    if dsn:
+        try:
+            import asyncpg  # noqa: F401
+            import PIL  # noqa: F401
+        except ImportError as exc:
+            print(f"SKIP: {exc.name} not installed")
+            return EXIT_SKIPPED
+        asyncio.run(run_in_scratch(dsn, run))
+        print()
+        if FAILS:
+            print(f"FAIL: {len(FAILS)} strategy-signal SQL check(s) failed (live, scratch schema)")
+            return 1
+        print("PASS: strategy signal SQL — legacy rows, schedule fields, order, images (live, scratch schema)")
+        return 0
     if os.name == "posix" and os.geteuid() == 0:
-        print("SKIP: running as root — initdb refuses to create a cluster as root")
+        print("SKIP: running as root — initdb refuses to create a cluster as root; use --live")
         return EXIT_SKIPPED
     bindir = find_bin()
     if bindir is None:

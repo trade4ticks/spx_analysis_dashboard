@@ -51,6 +51,13 @@ that as SKIP, and as FAIL under --deploy. Set PG_BIN to the directory holding
 initdb/pg_ctl if they are somewhere unusual.
 
     python scripts/check_oo_market_sql.py
+
+--live: the same checks in a THROWAWAY SCHEMA of an existing database
+(DATABASE_URL, or --dsn), for a host that cannot run initdb. Every
+connection is confined to that schema alone and it is dropped at the end;
+see run_in_scratch. Without node the sweep-scale part is SKIPPED (exit 3).
+
+    python scripts/check_oo_market_sql.py --live
 """
 from __future__ import annotations
 
@@ -299,9 +306,9 @@ async def load(pool) -> None:
         assert n_art == ARTIFACT_BARS, n_art
 
 
-async def run(dsn: str) -> None:
+async def run(dsn: str, **pool_kw) -> None:
     import asyncpg
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3)
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3, **pool_kw)
     try:
         await load(pool)
         await check_daily(pool)
@@ -908,12 +915,15 @@ async def check_saved_strategies(pool) -> None:
         await conn.execute(f"DROP TABLE {store.TABLE}")
         await conn.execute(store.CREATE_SQL.replace("    capital_per_position DOUBLE PRECISION,\n", ""))
         before = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                     "AND table_schema = current_schema() "
                                      "AND column_name = 'capital_per_position'", store.TABLE)
     await store.list_strategies(pool)
     async with pool.acquire() as conn:
         after = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                    "AND table_schema = current_schema() "
                                     "AND column_name = 'capital_per_position'", store.TABLE)
         sweep_col = await conn.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_name = $1 "
+                                        "AND table_schema = current_schema() "
                                         "AND column_name = 'sweep'", store.TABLE)
         files_tbl = await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", store.FILES_TABLE)
     check(sweep_col == 1 and files_tbl, "a pre-sweep table gains the sweep column and the files table on first use")
@@ -1332,6 +1342,9 @@ async def check_surface_sweep_scale(pool) -> None:
         return {"date_opened": [r[0] for r in rows], "time_opened": [r[1] for r in rows], "pnl": [r[2] for r in rows]}
     cols90, cols30 = sweep(90), sweep(30)
 
+    if shutil.which("node") is None:
+        SKIPPED.append("surface routes at sweep scale -- no node on this host (the request is built by the page's JS)")
+        return
     core = (ROOT / "static" / "js" / "backtest_core.js").read_text(encoding="utf-8")
     driver = core + """
 const fs = require('fs'); const job = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -1399,9 +1412,141 @@ process.stdout.write(JSON.stringify(out));"""
             check(exc.status_code == 400 and exc.detail == want, f"refused (400): {exc.detail}")
 
 
+# ── --live: a throwaway SCHEMA in an existing database ────────────────────
+#
+# For a host that cannot run initdb (the VPS runs as root). These gates WRITE
+# -- they load fabricated index_ohlc / surface tables, save, delete and even
+# DROP the strategy tables to test migrations, all by UNQUALIFIED name -- so
+# the one thing that matters is that an unqualified name can never resolve to
+# a real table. Hence:
+#   * a NEW schema, gate_scratch_<pid>_<hex>, created without IF NOT EXISTS
+#     (an existing schema is never adopted, so never dropped);
+#   * every pool connection opens with search_path = that schema ALONE (no
+#     public), and an `init` hook refuses the connection unless
+#     current_schema() is the scratch schema -- checked on EVERY connection,
+#     before any statement of the gate runs;
+#   * a first check that the real tables are invisible (to_regclass(
+#     'index_ohlc') is NULL inside the scratch path);
+#   * DROP SCHEMA <scratch> CASCADE at the end, success or failure, and a
+#     check that it is gone. A run killed outright leaves it behind: the name
+#     is printed at the start, and the next run lists any leftovers with the
+#     command to drop them (never drops them itself).
+# surface.TABLE_COLUMNS_SQL names table_schema = 'public' (production's
+# schema); under --live it is pointed at current_schema() for the run and
+# restored after, so the surface code reads the scratch table's columns.
+
+SCRATCH_PREFIX = "gate_scratch_"
+SKIPPED: list[str] = []
+
+
+def live_dsn(argv=None, env="DATABASE_URL"):
+    """None without --live; else the DSN (--dsn, or `env` from the
+    environment / .env). Exits 1 when --live has nothing to connect to."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--live", action="store_true",
+                    help=f"run in a throwaway schema of an EXISTING database ({env}, or --dsn) "
+                         "instead of a temporary cluster")
+    ap.add_argument("--dsn", help=f"with --live: the database (default {env})")
+    a = ap.parse_args(argv)
+    if not a.live:
+        return None
+    dsn = a.dsn
+    if not dsn:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(ROOT / ".env")
+        except ImportError:
+            pass
+        dsn = os.getenv(env)
+    if not dsn:
+        print(f"FAIL: --live needs {env} (environment or .env) or --dsn")
+        sys.exit(1)
+    return dsn
+
+
+async def run_in_scratch(dsn: str, run) -> None:
+    """run(dsn, **pool_kwargs) inside a throwaway schema; see above."""
+    import secrets
+    import asyncpg
+    from app.oo_backtest import surface
+
+    name = f"{SCRATCH_PREFIX}{os.getpid()}_{secrets.token_hex(4)}"
+    conn = await asyncpg.connect(dsn)
+    try:
+        old = [r["nspname"] for r in await conn.fetch(
+            "SELECT nspname FROM pg_namespace WHERE nspname LIKE $1 ORDER BY 1", SCRATCH_PREFIX + "%")]
+        for o in old:
+            print(f"  note  a scratch schema from an earlier run was left behind: {o}"
+                  f" -- drop it with: DROP SCHEMA {o} CASCADE;")
+        await conn.execute(f"CREATE SCHEMA {name}")
+    finally:
+        await conn.close()
+    print(f"  note  scratch schema {name} created; it is dropped at the end of the run")
+
+    async def guard(c):
+        cs = await c.fetchval("SELECT current_schema()")
+        if cs != name:
+            raise RuntimeError(f"refusing a connection whose schema is {cs!r}, not the scratch {name!r}")
+
+    kw = {"server_settings": {"search_path": name}, "init": guard}
+    saved_sql = surface.TABLE_COLUMNS_SQL
+    try:
+        probe = await asyncpg.create_pool(dsn, min_size=1, max_size=1, **kw)
+        try:
+            async with probe.acquire() as c:
+                cs = await c.fetchval("SELECT current_schema()")
+                sp = await c.fetchval("SHOW search_path")
+                real = await c.fetchval("SELECT to_regclass('index_ohlc') IS NULL"
+                                        " AND to_regclass('oo_backtest_strategies') IS NULL")
+        finally:
+            await probe.close()
+        check(cs == name and sp.strip('"') == name,
+              f"every connection is confined to the scratch schema (search_path={sp})")
+        check(bool(real), "the real tables are invisible from inside it")
+        if not (cs == name and real):
+            return
+        surface.TABLE_COLUMNS_SQL = saved_sql.replace("'public'", "current_schema()")
+        await run(dsn, **kw)
+    finally:
+        surface.TABLE_COLUMNS_SQL = saved_sql
+        conn = await asyncpg.connect(dsn)
+        try:
+            await conn.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
+            gone = await conn.fetchval("SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", name)
+        finally:
+            await conn.close()
+        check(bool(gone), f"scratch schema {name} dropped")
+
+
+def finish(label: str, ok_text: str) -> int:
+    print()
+    if FAILS:
+        print(f"FAIL: {len(FAILS)} {label} check(s) failed")
+        return 1
+    if SKIPPED:
+        for s in SKIPPED:
+            print(f"SKIPPED: {s}")
+        return EXIT_SKIPPED
+    print(ok_text)
+    return 0
+
+
+OK_TEXT = "PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, saved strategies, surface metrics, planted faults"
+
+
 def main() -> int:
+    dsn = live_dsn()
+    if dsn:
+        try:
+            import asyncpg  # noqa: F401
+        except ImportError:
+            print("SKIP: asyncpg not installed")
+            return EXIT_SKIPPED
+        asyncio.run(run_in_scratch(dsn, run))
+        return finish("market SQL (live, scratch schema)", OK_TEXT + " (live, scratch schema)")
     if os.name == "posix" and os.geteuid() == 0:
-        print("SKIP: running as root — initdb refuses to create a cluster as root; run as an ordinary user")
+        print("SKIP: running as root — initdb refuses to create a cluster as root; run as an ordinary user, or use --live")
         return EXIT_SKIPPED
     bindir = find_bin()
     if bindir is None:
@@ -1415,12 +1560,7 @@ def main() -> int:
         return EXIT_SKIPPED
     with Cluster(bindir) as c:
         asyncio.run(run(c.dsn))
-    print()
-    if FAILS:
-        print(f"FAIL: {len(FAILS)} market SQL check(s) failed")
-        return 1
-    print("PASS: market SQL — rollup, early close, prior row, entry bar, gaps, null reasons, saved strategies, surface metrics, planted faults")
-    return 0
+    return finish("market SQL", OK_TEXT)
 
 
 if __name__ == "__main__":

@@ -1941,6 +1941,17 @@ a gate that could not run is a FAIL.
   server binaries (the DB is elsewhere), so the SQL gate can never run there.
 
 One-time VPS setup for the gates: the `gates.py` docstring (its one copy).
+**The three Postgres gates have `--live` for the VPS** (root, no initdb; by
+hand, not in `gates.py`): `check_ft_values_sql --live` is READ-ONLY against
+OI_DATABASE_URL; `check_oo_market_sql --live` and `check_strategy_signal_sql
+--live` WRITE, so they run in a throwaway schema of DATABASE_URL
+(`run_in_scratch`): created new (never adopted), every connection's
+search_path that schema ALONE with an `init` guard refusing any other, the
+real tables proven invisible first, dropped at the end; a killed run's
+leftover is listed next time, never auto-dropped. `surface.TABLE_COLUMNS_SQL`
+(`'public'`) is pointed at `current_schema()` for the run. Without node the
+sweep-scale part SKIPs. **Never run `--live` from a dev session**: with no
+`--dsn` it reads the real DSN from `.env`.
 **Deploying, restarting, stopping and pre-pull installs:
 `DEPLOYMENT_NOTES.md` "Deploying, restarting, stopping"** — the deploy link
 on the VPS Dashboard (`git pull`, then `systemctl restart` of every unit of
