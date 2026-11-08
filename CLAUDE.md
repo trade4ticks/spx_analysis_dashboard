@@ -1313,7 +1313,13 @@ writes `# metric values,UNAVAILABLE: …` and exports without the columns.
 Gates: `check_ft_filters_ui` (values derived from each key, so a row given
 another key's value fails — planted, it does), `check_ft_values_sql` (the
 endpoint and the min-strike fragment on a temporary Postgres; `can_skip`,
-needs initdb — **it has not run on the dev box that wrote it**).
+needs initdb — **it has not run on the dev box that wrote it**). On the
+VPS (root, no initdb) run it with `--live`: the same questions against the
+existing OI database, READ-ONLY (default_transaction_read_only=on, a write
+proven refused first), real keys sampled and each value compared with a
+plain per-key lookup; NaN prices as VALUES lists. Live mode cannot plant a
+NaN daily_features value or a metric with no bin column, so it checks those
+only where the real tables happen to have them.
 
 Gates: `check_ft_population.py` (offline) drives /run, /zone and all three
 baselines, /suite and /grid, in signal AND portfolio mode, against a

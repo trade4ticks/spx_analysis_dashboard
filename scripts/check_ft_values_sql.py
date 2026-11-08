@@ -16,6 +16,14 @@ real database. What it pins:
 
 PG_BIN points at initdb/pg_ctl if they are somewhere unusual. No binaries:
 SKIP, not PASS.
+
+--live (for a host that cannot run initdb, e.g. as root): the same questions
+against the EXISTING database (OI_DATABASE_URL, or --dsn), READ-ONLY --
+every connection opens with default_transaction_read_only=on and the gate
+proves a write is refused before it reads anything. Real rows are sampled
+from tt_bins / daily_features / one ticker of trade_paths and each value
+compared with a plain per-key lookup; the NaN cases are VALUES lists.
+  .venv/bin/python scripts/check_ft_values_sql.py --live
 """
 from __future__ import annotations
 
@@ -121,9 +129,168 @@ async def run(dsn: str) -> None:
         await pool.close()
 
 
+# ── --live: the same questions against an EXISTING database, read-only ────
+#
+# For a host that cannot run initdb (the VPS runs as root). Nothing is
+# created, written or dropped: every connection is opened with
+# default_transaction_read_only=on, so Postgres itself refuses a write, and
+# the gate checks that setting took before it asks anything. Rows the
+# fixture planted (NaN, a stored 0 bin) are found in the real tables where
+# they exist, or built in a VALUES list where they cannot be (the NaN
+# entry_price). Expected values come from a DIFFERENT path than the
+# endpoint's: one plain SELECT per key, and the bin collapse in Python.
+
+LIVE_KEYS = 40
+LIVE_NBINS = 7          # not 20 and not a divisor of it: the collapse must work
+
+
+def _collapse_py(b, n):
+    return None if b is None or b <= 0 else min(((int(b) - 1) * n) // 20, n - 1)
+
+
+async def run_live(dsn: str) -> None:
+    import asyncpg
+    from app.metric_filter import DAILY_FEATURES_NUMERIC_SQL
+    from app.routers import factor_trades as ft
+
+    pool = await asyncpg.create_pool(
+        dsn, min_size=1, max_size=2,
+        server_settings={"default_transaction_read_only": "on", "statement_timeout": "60000"})
+    try:
+        async with pool.acquire() as conn:
+            ro = await conn.fetchval("SHOW default_transaction_read_only")
+            check(ro == "on", f"every connection is read-only (default_transaction_read_only={ro})")
+            if ro != "on":
+                return
+            try:
+                await conn.execute("CREATE TEMP TABLE ft_gate_probe (x int)")
+                wrote = True
+            except asyncpg.exceptions.ReadOnlySQLTransactionError:
+                wrote = False
+            check(not wrote, "and a write is refused by the server")
+
+            have = [r["column_name"] for r in await conn.fetch(DAILY_FEATURES_NUMERIC_SQL)]
+            bins = await ft._bin_columns(conn)
+            both = [m for m in have if f"bin20_{m}" in bins and not ft.is_outcome(m)]
+            outcome = next((m for m in have if ft.is_outcome(m)), None)
+            raw_only = next((m for m in have if f"bin20_{m}" not in bins and not ft.is_outcome(m)), None)
+            check(len(both) >= 2, f"daily_features and tt_bins share binned metrics ({len(both)})")
+            if len(both) < 2:
+                return
+            p, s = both[0], both[1]
+            pc = ft._qi("bin20_" + p)
+            keys = [(r["ticker"], r["trade_date"]) for r in await conn.fetch(
+                f"SELECT ticker, trade_date FROM tt_bins WHERE {pc} > 0 LIMIT {LIVE_KEYS}")]
+            n_pos = len(keys)
+            # A stored 0 / NULL bin, where the table has one.
+            keys += [(r["ticker"], r["trade_date"]) for r in await conn.fetch(
+                f"SELECT ticker, trade_date FROM tt_bins WHERE {pc} IS NULL OR {pc} <= 0 LIMIT 3")]
+            check(len(keys) >= 10, f"sampled {len(keys)} real trade days for {p} x {s}")
+            keys = keys + [("ZZ_GATE_NO_SUCH_TICKER", keys[0][1]), keys[0]]   # no row; a duplicate
+
+            # Expected: one plain lookup per key.
+            async def one(table, col, t, d):
+                return await conn.fetchval(
+                    f"SELECT {col} FROM {table} WHERE ticker = $1 AND trade_date = $2 LIMIT 1", t, d)
+            exp = {m: [] for m in (p, s)}
+            expb = {m: [] for m in (p, s)}
+            for t, d in keys:
+                for m in (p, s):
+                    v = await one("daily_features", f"{ft._qi(m)}::float8", t, d)
+                    exp[m].append(None if v is None or not math.isfinite(v) else float(v))
+                    expb[m].append(_collapse_py(await one("tt_bins", ft._qi("bin20_" + m), t, d), LIVE_NBINS))
+
+        metrics = [p] + ([raw_only] if raw_only else []) + ["ft_gate_no_such_metric"] \
+            + ([outcome] if outcome else [])
+        req = ft.TradeValuesReq(primary_metric=p, secondary_metric=s, n_bins=LIVE_NBINS, metrics=metrics,
+                                tickers=[k[0] for k in keys], dates=[k[1].isoformat() for k in keys])
+        d = await ft.trade_values(req=req, pool=pool)
+        check("error" not in d and d.get("n") == len(keys),
+              f"/trade-values answers every key, in order ({d.get('n')} of {len(keys)}) {d.get('error') or ''}")
+        if "error" in d:
+            return
+
+        def same(a, b):
+            return len(a) == len(b) and all((x is None and y is None) or
+                                            (x is not None and y is not None and abs(x - y) <= 1e-12 * max(1, abs(y)))
+                                            for x, y in zip(a, b))
+        for m, role in ((p, "primary"), (s, "secondary")):
+            check(same(d["values"].get(m, []), exp[m]), f"{role} {m}: every raw value equals a direct lookup of its key")
+            check(d["bins"].get(m) == expb[m], f"{role} {m}: every bin equals the stored bin20 collapsed to {LIVE_NBINS}")
+        check(d["values"][p][-1] == d["values"][p][0] and d["values"][p][-2] is None,
+              "a duplicate key repeats its value; a key with no row is null")
+        zero = d["bins"][p][n_pos:-2]
+        if zero:
+            check(all(b is None for b in zero), f"a stored 0 / NULL bin exports as no bin ({len(zero)} found)")
+        if raw_only:
+            check(raw_only in d["values"] and raw_only not in d["bins"],
+                  f"a filter metric with no bin column ({raw_only}): raw value only")
+        miss = set(d["missing"])
+        want = {"ft_gate_no_such_metric (raw value)"} | ({f"{outcome} (raw value)"} if outcome else set())
+        check(miss == want, f"an unknown metric{' and a forward return (' + outcome + ')' if outcome else ''} "
+                            f"are reported missing, not exported: {sorted(miss)}")
+
+        # ── min strike ─────────────────────────────────────────────────
+        async with pool.acquire() as conn:
+            for cast in ("numeric", "double precision"):
+                pop = ft.Population(250.0, [], 20.0)
+                ps = pop.sql(0)
+                rows = await conn.fetch(
+                    f"SELECT tp.ticker FROM (VALUES ('P1', 5::{cast}), ('P2', 20::{cast}), ('P3', 300::{cast}),"
+                    f" ('P4', 'NaN'::{cast}), ('P5', NULL::{cast})) AS tp(ticker, entry_price)"
+                    f" WHERE true{ps.where} ORDER BY 1", *ps.args)
+                check([r["ticker"] for r in rows] == ["P2"],
+                      f"min 20 / max 250 on {cast}: keeps 20 only; NaN and NULL out ({[r['ticker'] for r in rows]})")
+            naive = await conn.fetch("SELECT 1 FROM (VALUES ('NaN'::float8)) v(x) WHERE x >= 20")
+            check(len(naive) == 1, "the trap is real here too: a bare >= keeps NaN")
+            # On the real trade_paths, one ticker (its primary-key prefix):
+            # the fragment's count equals Python's count of the same rows.
+            t0 = keys[0][0]
+            px = [r["entry_price"] for r in await conn.fetch(
+                "SELECT entry_price FROM trade_paths WHERE ticker = $1", t0)]
+            fin = sorted(float(x) for x in px if x is not None and math.isfinite(float(x)))
+            if fin:
+                lo = fin[len(fin) // 2]
+                ps = ft.Population(None, [], lo).sql(1)
+                n = await conn.fetchval(f"SELECT count(*) FROM trade_paths tp WHERE tp.ticker = $1{ps.where}",
+                                        t0, *ps.args)
+                check(n == sum(1 for x in fin if x >= lo),
+                      f"real trade_paths ({t0}, {len(px)} rows): min strike {lo:g} keeps {n}, as counted directly")
+            else:
+                check(False, f"real trade_paths has no priced rows for {t0}")
+    finally:
+        await pool.close()
+
+
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--live", action="store_true",
+                    help="read-only against an existing database instead of a temporary cluster "
+                         "(OI_DATABASE_URL from the environment or .env, or --dsn)")
+    ap.add_argument("--dsn", help="with --live: the database to read (default OI_DATABASE_URL)")
+    a = ap.parse_args()
+    if a.live:
+        dsn = a.dsn
+        if not dsn:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(ROOT / ".env")
+            except ImportError:
+                pass
+            dsn = os.getenv("OI_DATABASE_URL")
+        if not dsn:
+            print("FAIL: --live needs OI_DATABASE_URL (environment or .env) or --dsn")
+            return 1
+        asyncio.run(run_live(dsn))
+        print()
+        if FAILS:
+            print(f"FAIL: {len(FAILS)} factor-trades values check(s) failed (live, read-only)")
+            return 1
+        print("PASS: factor-trades export values and min strike on the live database (read-only)")
+        return 0
     if os.name == "posix" and os.geteuid() == 0:
-        print("SKIP: running as root — initdb refuses to create a cluster as root")
+        print("SKIP: running as root — initdb refuses to create a cluster as root; use --live for a read-only run against the existing database")
         return EXIT_SKIPPED
     bindir = find_bin()
     if bindir is None:
