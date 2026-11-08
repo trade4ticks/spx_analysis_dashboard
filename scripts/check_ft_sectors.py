@@ -538,19 +538,23 @@ def main() -> int:
     new = zones(h, ft, rows)
     old_mod = h.load_old("HEAD")
     old = zones(h, old_mod, rows)
-    # The one deliberate addition since (2026-11-07): exit-reason rows carry
-    # avg_ret. Stripped only where HEAD's rows lack it, so after the commit
-    # that adds it this is byte-identity again.
+    # Declared additions since (2026-11-07): exit-reason rows carry avg_ret,
+    # and the echo carries min_strike (null here: the fixture sets none).
+    # Each stripped only where HEAD lacks it, so after the commit that adds
+    # it this is byte-identity again.
+    ADDED_TOP = {"min_strike": None}
     def _cmp(z, ref):
         z = json.loads(json.dumps(z))
-        old_has = any("avg_ret" in r for r in ref.get("exit_reasons", []))
-        if not old_has:
+        if not any("avg_ret" in r for r in ref.get("exit_reasons", [])):
             for r in z.get("exit_reasons", []):
                 r.pop("avg_ret", None)
+        for k, must in ADDED_TOP.items():
+            if k not in ref and k in z and z[k] == must:
+                z.pop(k)
         return json.dumps(z, sort_keys=True)
     for win in ("train", "test"):
         check(_cmp(new[win], old[win]) == json.dumps(old[win], sort_keys=True),
-              f"/zone ({win}) is byte-identical to HEAD's (bar exit reasons' avg_ret, if HEAD predates it)")
+              f"/zone ({win}) is byte-identical to HEAD's (bar the declared additions, if HEAD predates them)")
     for win in ("train", "test"):
         z = new[win]
         check(len(z["window_trades"]) > 100 and len({t["ticker"] for t in z["window_trades"]}) == len(TICKERS),

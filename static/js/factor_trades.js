@@ -130,7 +130,7 @@ document.addEventListener('alpine:init', () => {
     // is the catalog's rather than a copy of it.
     ocOutcomes: [],
     selected: {},                 // family -> rule_key (absent = family off)
-    perTrade: 2000, dailyCap: 10000, maxStrike: 1000,
+    perTrade: 2000, dailyCap: 10000, maxStrike: 1000, minStrike: null,
     // Concurrent per-sector capital cap, $ (null/blank = off). A RISK POLICY
     // applied at this setting everywhere -- stat bar, panes, grid, suite --
     // never swept. Inside _computeDollarSeries; see _capDay there.
@@ -286,8 +286,17 @@ document.addEventListener('alpine:init', () => {
     // ITS OWN population, not the rail's.
     populationBody(src) {
       const s = src || {};
+      // A run's own floor, never the rail's: a src is always a server
+      // payload, and one without min_strike (null, or saved before it
+      // existed) was run with no floor.
       return { max_strike: s.max_strike ?? this.maxStrike,
+               min_strike: src ? (s.min_strike ?? null) : this._minStrike(),
                filters: s.filters ?? this.activeFilters() };
+    },
+    // Blank / 0 / negative = no floor, sent as null.
+    _minStrike() {
+      const v = +this.minStrike;
+      return (this.minStrike !== null && this.minStrike !== '' && v > 0) ? v : null;
     },
     _statsKey(metric) { return metric + '|' + this.entryAnchor; },
     async ensureFilterStats(metric) {
@@ -344,12 +353,13 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
     _popKey(r) {
-      return JSON.stringify({ s: r?.max_strike ?? null,
+      return JSON.stringify({ s: r?.max_strike ?? null, lo: r?.min_strike ?? null,
                               f: (r?.filters || []).map(f => [f.metric, f.op, f.value]) });
     },
     _popText(r) {
       const f = (r?.filters || []).map(x => this.filterLabel(x));
       const bits = [];
+      if (r?.min_strike) bits.push('min strike $' + r.min_strike);
       if (r?.max_strike) bits.push('max strike $' + r.max_strike);
       bits.push(f.length ? f.join(' AND ') : 'no filters');
       return bits.join(' · ');
@@ -379,7 +389,8 @@ document.addEventListener('alpine:init', () => {
     },
     // CSV provenance for the population, shared by every export.
     _csvPopulationRows(d) {
-      const out = [['# max_strike', d?.max_strike ?? '']];
+      const out = [['# max_strike', d?.max_strike ?? ''],
+                   ['# min_strike', d?.min_strike ?? 'none']];
       const fs = d?.filters || [];
       if (!fs.length) out.push(['# filters', 'none']);
       for (const f of fs) out.push(['# filter', f.metric, f.op, f.value]);
@@ -2310,6 +2321,7 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         secondaryMetric:   this.secondaryMetric,
         entryAnchor:       this.entryAnchor,
         maxStrike:         this.maxStrike,
+        minStrike:         this._minStrike(),
         filters:           this.filters.map(f => ({ ...f })),
         window:            this.window,
         // The rail's family -> rule_key MAP, not the flat rule_keys list the
@@ -2349,6 +2361,8 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       this.secondaryMetric   = cfg.secondaryMetric ?? this.secondaryMetric;
       this.entryAnchor       = cfg.entryAnchor ?? this.entryAnchor;
       this.maxStrike         = cfg.maxStrike ?? this.maxStrike;
+      // A card saved before min strike existed had no floor: restore as off.
+      this.minStrike         = cfg.minStrike ?? null;
       this.filters           = (cfg.filters || []).map(f => ({ ...f }));
       for (const f of this.filters) this.ensureFilterStats(f.metric);
       this.window            = cfg.window ?? this.window;
@@ -3313,16 +3327,23 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
       return [locked, edited, diff].filter(Boolean);
     },
 
-    exportCsv() {
-      const t = this.zoneData?.combined_trades || [];
+    // The trade list, with the values its selection was made on: primary
+    // (and secondary) metric raw value and bin, every filter metric's raw
+    // value. Fetched at export time for the exported trades' keys
+    // (/trade-values) -- /zone stays as it is for every page load. The run's
+    // own echo decides which metrics, never the rail.
+    async exportCsv() {
+      const z = this.zoneData;
+      const t = z?.combined_trades || [];
       if (!t.length) return;
+      const mv = await this._tradeValues(z, t);
       // Attribution columns only when the rows actually carry a mask. A
       // portfolio BASELINE is mode=portfolio with randomly drawn tickers and
       // no mask, so `mode` alone is the wrong thing to branch on.
-      const tagged = !!this.zoneData?.has_sig_mask;
-      const legend = this.signalLegend(this.zoneData);
+      const tagged = !!z?.has_sig_mask;
+      const legend = this.signalLegend(z);
       const head = ['ticker', 'trade_date', 'entry_price', 'ret_pct',
-                    'exit_bar', 'exit_rule', 'window'];
+                    'exit_bar', 'exit_rule', 'window', ...mv.cols];
       if (tagged) {
         // Both the raw mask and one column per signal: the mask is the exact
         // combination's identity (group by it), the named columns are what a
@@ -3337,21 +3358,23 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
       };
       const prov = [['# Factor Trades — trades'],
-                    ['# window', this.zoneData?.window ?? ''],
-                    ['# entry_anchor', this.zoneData?.entry_anchor ?? ''],
-                    ...this._csvPopulationRows(this.zoneData),
+                    ['# window', z?.window ?? ''],
+                    ['# entry_anchor', z?.entry_anchor ?? ''],
+                    ...this._csvPopulationRows(z),
                     ...this._csvSelectionRows(this.runData),
-                    ['# rules', (this.zoneData?.rules || []).join(' | ')]].map(r => r.map(esc).join(','));
+                    ['# rules', (z?.rules || []).join(' | ')],
+                    ...mv.notes].map(r => r.map(esc).join(','));
       const rows = t.map(x => {
         const base = [x.ticker, x.trade_date, x.entry_price ?? '',
-                      (x.ret * 100).toFixed(6), x.exit_bar, x.exit_rule, x.window];
+                      (x.ret * 100).toFixed(6), x.exit_bar, x.exit_rule, x.window,
+                      ...mv.row(x)];
         if (tagged) {
           const m = x.sig_mask | 0;
           base.push(m, this._popcount(m), ...legend.map(s => (m >> s.bit) & 1));
         }
-        return base.join(',');
+        return base.map(esc).join(',');
       });
-      const blob = new Blob([[...prov, head.join(','), ...rows].join(String.fromCharCode(10))],
+      const blob = new Blob([[...prov, head.map(esc).join(','), ...rows].join(String.fromCharCode(10))],
                             { type: 'text/csv' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -3359,6 +3382,59 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
                                     : (this.runData?.primary_metric || 'run');
       a.download = `factor_trades_${stem}.csv`;
       a.click(); URL.revokeObjectURL(a.href);
+    },
+
+    // {cols, row(trade) -> cells, notes}: the value columns for exportCsv.
+    // Keys are sent once per distinct (ticker, trade_date) -- the values
+    // belong to the day, not the trade. A failed or short answer is written
+    // into the file's header, never dropped silently.
+    async _tradeValues(z, t) {
+      const portfolio = z.mode === 'portfolio';
+      const prim = portfolio ? null : (z.primary_metric || null);
+      const sec  = portfolio ? null : (z.secondary_metric || null);
+      const fm = (z.filters || []).map(f => f.metric);
+      const notes = [];
+      if (portfolio) notes.push(['# metric values', 'portfolio run: filter metrics only (each signal has its own metric pair; see its sig_ column)']);
+      const raw = [...new Set([prim, sec, ...fm].filter(Boolean))];
+      const none = { cols: [], row: () => [], notes };
+      if (!raw.length) return none;
+      const at = new Map(), tickers = [], dates = [];
+      for (const x of t) {
+        const k = x.ticker + '|' + x.trade_date;
+        if (!at.has(k)) { at.set(k, tickers.length); tickers.push(x.ticker); dates.push(x.trade_date); }
+      }
+      let d;
+      try {
+        const r = await fetch('/api/factor-trades/trade-values', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ primary_metric: prim, secondary_metric: sec,
+                                 n_bins: z.n_bins ?? 20, metrics: fm, tickers, dates }),
+        });
+        d = r.ok ? await r.json() : { error: 'HTTP ' + r.status };
+        if (!d.error && d.n !== tickers.length && Object.keys({ ...d.values, ...d.bins }).length)
+          d = { error: `answered ${d.n} of ${tickers.length} trade days` };
+      } catch (e) {
+        d = { error: String(e) };
+      }
+      if (d.error) {
+        notes.push(['# metric values', 'UNAVAILABLE: ' + d.error]);
+        return none;
+      }
+      const nb = d.n_bins ?? z.n_bins ?? 20;
+      const spec = [];               // [header, array]
+      for (const m of raw) {
+        if (d.values?.[m]) spec.push([m, d.values[m]]);
+        if ((m === prim || m === sec) && d.bins?.[m]) spec.push([m + '_bin', d.bins[m]]);
+      }
+      notes.push(['# metric values', 'raw daily_features values on the trade date; '
+        + `<metric>_bin = 0-based cell index at n_bins ${nb} (as in # cells); blank = no value`]);
+      if ((d.missing || []).length) notes.push(['# metric values missing', ...d.missing]);
+      return {
+        cols: spec.map(s => s[0]),
+        row: x => { const i = at.get(x.ticker + '|' + x.trade_date);
+                    return spec.map(s => s[1][i] ?? ''); },
+        notes,
+      };
     },
 
     // How many signals claimed one trade. Bit-twiddling popcount rather than

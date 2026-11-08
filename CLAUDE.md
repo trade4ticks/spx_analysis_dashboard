@@ -1285,6 +1285,36 @@ only the rows where, say, `ret_5d > 0.05`.
   raises its own banner (`lockedPopMismatch`). Portfolio mode keeps the
   filter rows; the signal list's n is labelled `n(FA, unfiltered)`.
 
+**Min strike (2026-11-07)**: `entry_price >= min_strike` beside max strike
+(rail: one row, two fields, `.ft-pair`; blank = off). It is a `Population`
+bound like max_strike, so every trade-selecting statement gets it from the
+builder — heatmap, zone, baselines, suite, grid, filter report — but through
+`_pred`, the metric filters' NaN-safe predicate (`NaN >= x` is TRUE in
+Postgres; max_strike's bare `<=` needs no such guard). Appended after
+max_strike so a request without it is byte-identical to before. Echoed by
+/run /zone /suite /grid; on the card, in `_popKey`/`_popText`, every CSV's
+population block (`# min_strike`, `none` when off) and saved cards (a card
+from before restores as off). A locked card refetches with ITS OWN floor
+(`populationBody(src)`), never the rail's. min > max is refused.
+
+**The trade CSV carries the selection's metric values (2026-11-07)**: per
+trade, the primary (and secondary) raw value and `<metric>_bin` (0-based cell
+index at the run's n_bins — the `# cells` numbering), and every filter
+metric's raw value; portfolio runs get the filter metrics only (said in the
+header). Fetched AT EXPORT TIME from `POST /trade-values` for the distinct
+(ticker, trade_date) keys — /zone and every page load are untouched (a
+design call; the cost is one request per export). The raw values come
+through `Population`'s own daily_features join and column expression (the
+keys aliased `tp`), so a filter value in the file is the value the filter
+judged; bins through `_collapse_expr`. NaN/no row = blank. A metric that is
+not a daily_features column, a forward return, or a metric with no
+`bin20_` column is listed in `# metric values missing`; a failed request
+writes `# metric values,UNAVAILABLE: …` and exports without the columns.
+Gates: `check_ft_filters_ui` (values derived from each key, so a row given
+another key's value fails — planted, it does), `check_ft_values_sql` (the
+endpoint and the min-strike fragment on a temporary Postgres; `can_skip`,
+needs initdb — **it has not run on the dev box that wrote it**).
+
 Gates: `check_ft_population.py` (offline) drives /run, /zone and all three
 baselines, /suite and /grid, in signal AND portfolio mode, against a
 recording fake pool: with no filters every statement is byte-identical to

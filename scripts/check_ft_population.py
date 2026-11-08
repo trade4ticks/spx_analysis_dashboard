@@ -258,7 +258,7 @@ def check_everywhere(new):
     print("everywhere when used")
     filters = [{"metric": "ret_5d", "op": ">", "value": 0.0512},
                {"metric": "rv_20d", "op": "<", "value": 0.4321}]
-    res = drive(new, {"max_strike": 250.0, "filters": filters})
+    res = drive(new, {"max_strike": 250.0, "min_strike": 20.5, "filters": filters})
     for label, (resp, log) in res.items():
         ok, why = ran(label, resp)
         check(ok, f"{label} with filters ran {why}")
@@ -278,14 +278,19 @@ def check_everywhere(new):
             m = re.search(r"tp\.entry_price <= \$(\d+)", flat)
             if not m or args[int(m.group(1)) - 1] != 250.0:
                 bad.append(("max_strike placeholder wrong", flat[:160]))
+            # min_strike through the shared NaN-safe predicate, never a bare >=.
+            m = re.search(r"\(tp\.entry_price::float8 <> 'NaN'::float8 AND tp\.entry_price::float8 >= \$(\d+)\)", flat)
+            if not m or args[int(m.group(1)) - 1] != 20.5:
+                bad.append(("min_strike missing, bare, or its placeholder wrong", flat[:160]))
             top = max([int(x) for x in re.findall(r"\$(\d+)", flat)] or [0])
             if top > len(args):
                 bad.append((f"${top} with {len(args)} args", flat[:160]))
         for why, what in bad[:3]:
             print(f"      {why}: {what}")
-        check(stmts and not bad, f"{label}: all {len(stmts)} trade-selecting statements carry both filters and max_strike")
+        check(stmts and not bad, f"{label}: all {len(stmts)} trade-selecting statements carry both filters, max_strike and min_strike")
         if isinstance(resp, dict) and "filters" in resp:
             check([f["metric"] for f in resp["filters"]] == ["ret_5d", "rv_20d"], f"{label}: echoes its filters")
+            check(resp.get("min_strike") == 20.5 and resp.get("max_strike") == 250.0, f"{label}: echoes min and max strike")
     for label in ("run", "zone", "portfolio zone"):
         rep = res[label][0].get("filter_report")
         check(bool(rep) and rep["train"]["filters"][0]["no_value"] == 1 and rep["train"]["filters"][0]["failed"] == 2,
@@ -306,6 +311,13 @@ def check_guard(new):
         refused = isinstance(resp, dict) and resp.get("error")
         touched = any("trade_paths" in s for s, _ in pool.log)
         check(bool(refused) and not touched, f"refuses {why} before any trade query")
+    for kw, why in (({"min_strike": 300.0, "max_strike": 250.0}, "a min strike above the max"),
+                    ({"min_strike": float("nan")}, "a NaN min strike")):
+        pool = FakePool()
+        base = {k: v for k, v in BASE.items() if k not in ("cells", "max_strike")}
+        resp = asyncio.run(new.run(req=new.RunReq(**{**base, **kw}), pool=pool))
+        touched = any("trade_paths" in s for s, _ in pool.log)
+        check(bool(isinstance(resp, dict) and resp.get("error")) and not touched, f"refuses {why} before any trade query")
     pool = FakePool()
     r = asyncio.run(new.filter_stats(metric="ret_5d", entry_anchor="open", pool=pool))
     sql = " ".join(next(s for s, _ in pool.log if "percentile_cont" in s).split())

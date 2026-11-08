@@ -250,6 +250,8 @@ GATES = [
        note="sector map; sizes kept under a filter; pane parity; peak exposure"),
     _s("check_ft_sectors_ui.py", can_skip=True,
        note="sector chips clicked in Edge: stat bar, every pane, legend, locked, window"),
+    _s("check_ft_values_sql.py", can_skip=True,
+       note="export metric values by key, bins, missing; min strike NaN-safe (needs initdb)"),
     _s("check_strategy_signal.py",
        note="decision, percentile, one clock, one fetch per source, store"),
     _s("check_strategy_signal_ui.py", can_skip=True,
@@ -378,7 +380,8 @@ COVERS = {
     "check_oo_split_ui":         [(r"(\d+) assertions, failures", 130)],            # 176
     "check_oo_market_sql":       [("ok", 150)],                                     # 197
     "check_ft_population":       [("ok", 90)],                                      # 119
-    "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 16)],             # 21
+    "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 24)],             # 32 (+ min strike, export values; 2026-11-07)
+    "check_ft_values_sql":       [("ok", 11)],                                      # 15
     "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 82)],             # 109 (+ cap provenance, exit avg_ret; 2026-11-07)
     "check_ft_sectors_ui":       [(r"(\d+) assertions, failures", 53)],             # 71 (+ exit pane layout; 2026-11-07)
     "check_strategy_signal":     [("ok", 85)],                                      # 112

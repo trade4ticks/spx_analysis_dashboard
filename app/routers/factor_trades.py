@@ -796,7 +796,7 @@ async def _resolve_selection(conn, req, bin_cols, base: int, cutoff: str) -> tup
         "mode": "2f" if two_factor else "1f", "signals": []}
 
 
-# ── The trade POPULATION: max_strike and metric filters ──────────────────
+# ── The trade POPULATION: max_strike, min_strike and metric filters ──────
 #
 # ONE BUILDER FOR EVERY QUERY. max_strike used to be hand-written into eleven
 # statements, each numbering its own placeholder ($3 here, $6 in one sampler,
@@ -843,9 +843,19 @@ def _qi(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _pred(expr: str, op: str, ph: str) -> str:
+    """THE population predicate: a value that exists, is not NaN, and passes
+    `op`. Postgres sorts NaN above every number, so `NaN > x` and `NaN >= x`
+    are TRUE -- every lower bound needs the NaN test, which is why min_strike
+    goes through this and not a bare `>=`."""
+    return f"({expr} <> 'NaN'::float8 AND {expr} {op} {ph})"
+
+
 class Population:
-    def __init__(self, max_strike, filters: list[tuple[str, str, float]]):
+    def __init__(self, max_strike, filters: list[tuple[str, str, float]],
+                 min_strike=None):
         self.max_strike = float(max_strike) if max_strike and max_strike > 0 else None
+        self.min_strike = float(min_strike) if min_strike and min_strike > 0 else None
         self.filters = filters
 
     def col(self, metric: str) -> str:
@@ -862,8 +872,7 @@ class Population:
                 f" LIMIT 1) df ON true")
 
     def passes(self, metric: str, op: str, ph: str) -> str:
-        c = self.col(metric)
-        return f"({c} <> 'NaN'::float8 AND {c} {op} {ph})"
+        return _pred(self.col(metric), op, ph)
 
     def sql(self, start: int, *, filters: bool = True) -> PopSQL:
         """Placeholders numbered from $start+1."""
@@ -876,6 +885,10 @@ class Population:
         where = ""
         if self.max_strike is not None:
             where += f" AND tp.entry_price <= {ph(self.max_strike)}"
+        # After max_strike, so a request without it issues exactly the
+        # statements it always did (check_ft_population's byte identity).
+        if self.min_strike is not None:
+            where += " AND " + _pred("tp.entry_price::float8", ">=", ph(self.min_strike))
         if not (filters and self.filters):
             return PopSQL("", where, args)
         for m, op, v in self.filters:
@@ -911,7 +924,12 @@ async def _population(conn, req) -> "Population | str":
             if not math.isfinite(f.value):
                 return f"filter value for {f.metric!r} must be a finite number"
             out.append((f.metric, f.op, float(f.value)))
-    return Population(getattr(req, "max_strike", None), out)
+    lo, hi = getattr(req, "min_strike", None), getattr(req, "max_strike", None)
+    if lo is not None and not math.isfinite(lo):
+        return "min strike must be a finite number"
+    if lo and hi and lo > 0 and hi > 0 and lo > hi:
+        return f"min strike ${lo:g} is above max strike ${hi:g} -- no trade could pass"
+    return Population(hi, out, lo)
 
 
 async def _filter_report(conn, combine_sql: str, where_bins: str, cell_pred: str,
@@ -984,6 +1002,9 @@ class RunReq(BaseModel):
     # that cannot be reconciled and no way to tell which population a given
     # box covered.
     max_strike:       Optional[float] = None
+    # The floor beside it: entry_price >= min_strike, through the same
+    # builder and the same NaN-safe predicate as the metric filters.
+    min_strike:       Optional[float] = None
     # Raw-value metric filters, ANDed. A population filter exactly like
     # max_strike: applied in every query through Population, never in the
     # client. See the Population block above.
@@ -1252,6 +1273,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "secondary_metric": req.secondary_metric,
         "entry_anchor":     req.entry_anchor,
         "max_strike":       req.max_strike,
+        "min_strike":       req.min_strike,
         "filters":          pop.describe(),
         "filter_report":    filter_report,
         # Echoed so a locked run carries its own window: comparing a TRAIN
@@ -1922,6 +1944,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "primary_metric":   req.primary_metric,
         "secondary_metric": req.secondary_metric,
         "max_strike":       req.max_strike,
+        "min_strike":       req.min_strike,
         "filters":          pop.describe(),
         "filter_report":    filter_report,
         "n_bins":           max(2, min(20, int(req.n_bins))),
@@ -2562,6 +2585,7 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         "rule_keys": list(req.rule_keys),
         "entry_anchor": req.entry_anchor,
         "max_strike": req.max_strike,
+        "min_strike": req.min_strike,
         "filters": pop.describe(),
         "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in SUITE_METRICS],
         "rows": out_rows,
@@ -3125,6 +3149,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "cells": req.cells,
         "entry_anchor": req.entry_anchor,
         "max_strike": req.max_strike,
+        "min_strike": req.min_strike,
         "filters": pop.describe(),
         "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in GRID_METRICS],
         "tickers": tickers,
@@ -3282,3 +3307,95 @@ def _grid_reasons(rows) -> dict:
         n = tot[w] or 1
         out[w] = {k: v / n for k, v in out[w].items()}
     return out
+
+
+# ── Metric values for the trade export ────────────────────────────────────
+#
+# The trade CSV carries, per trade, the values its selection was made on: the
+# primary (and secondary) metric's RAW daily_features value and its cell bin,
+# and the raw value of every filter metric. Asked for at EXPORT time, for the
+# exported trades' (ticker, trade_date) keys, so /zone -- every page load --
+# is untouched. The raw values come through Population's own daily_features
+# join and column expression (`tp` is the keys here), so a filter value in
+# the file is exactly the value the filter judged. Bins through
+# _collapse_expr, the cell definition every query uses, at the run's n_bins:
+# the same 0-based index as the '# cells' line in the same file.
+
+MAX_VALUE_KEYS = 250_000
+
+
+class TradeValuesReq(BaseModel):
+    primary_metric:   Optional[str] = None
+    secondary_metric: Optional[str] = None
+    n_bins:           int = 20
+    # Filter metrics: raw values only (they were never binned on).
+    metrics:          list[str] = []
+    # One (ticker, trade_date) per key, ISO dates; the answer is in this order.
+    tickers:          list[str] = []
+    dates:            list[str] = []
+
+
+def _finite_or_none(v):
+    if v is None:
+        return None
+    v = float(v)
+    return v if math.isfinite(v) else None
+
+
+@router.post("/trade-values")
+async def trade_values(req: TradeValuesReq = Body(...), pool=Depends(get_oi_pool)):
+    """{values: {metric: [...]}, bins: {metric: [...]}, n_bins, missing} in key
+    order. A metric daily_features does not hold (or a bin tt_bins does not)
+    is listed in `missing` -- named in the export, never silently absent.
+    NaN is returned as null: no value, as the filters treat it."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if len(req.tickers) != len(req.dates):
+        return {"error": "tickers and dates must pair up"}
+    if len(req.tickers) > MAX_VALUE_KEYS:
+        return {"error": f"at most {MAX_VALUE_KEYS:,} trades per export"}
+    try:
+        days = [_date.fromisoformat(d) for d in req.dates]
+    except (TypeError, ValueError):
+        return {"error": "dates must be ISO yyyy-mm-dd"}
+    n_bins = max(2, min(20, int(req.n_bins)))
+    binned = [m for m in (req.primary_metric, req.secondary_metric) if m]
+    raw = list(dict.fromkeys(binned + list(req.metrics)))
+    async with pool.acquire() as conn:
+        from app.metric_filter import DAILY_FEATURES_NUMERIC_SQL
+        have = {r["column_name"] for r in await conn.fetch(DAILY_FEATURES_NUMERIC_SQL)}
+        bin_cols = await _bin_columns(conn)
+        missing = []
+        # Names reach SQL only from these two catalogs. A forward return is
+        # never exported as a "metric value" beside the trades it would date.
+        raw_ok = [m for m in raw if m in have and not is_outcome(m)]
+        missing += [f"{m} (raw value)" for m in raw if m not in raw_ok]
+        bin_ok = [m for m in binned if f"bin20_{m}" in bin_cols]
+        missing += [f"{m} (bin)" for m in binned if m not in bin_ok]
+        pop = Population(None, [(m, ">", 0.0) for m in raw_ok])
+        sel = ["tp.ord"]
+        sel += [f"{pop.col(m)} AS v{i}" for i, m in enumerate(raw_ok)]
+        sel += [f"CASE WHEN bt.{_qi('bin20_' + m)} > 0 THEN "
+                f"{_collapse_expr(_qi('bin20_' + m), n_bins)} END AS b{i}"
+                for i, m in enumerate(bin_ok)]
+        bt_join = ""
+        if bin_ok:
+            cols = ", ".join(_qi("bin20_" + m) for m in bin_ok)
+            bt_join = (f"\n        LEFT JOIN LATERAL (SELECT {cols} FROM tt_bins b"
+                       f" WHERE b.ticker = tp.ticker AND b.trade_date = tp.trade_date"
+                       f" LIMIT 1) bt ON true")
+        rows = []
+        if req.tickers and (raw_ok or bin_ok):
+            rows = await conn.fetch(f"""
+        SELECT {", ".join(sel)}
+        FROM unnest($1::text[], $2::date[]) WITH ORDINALITY AS tp(ticker, trade_date, ord){pop.join()}{bt_join}
+        ORDER BY tp.ord
+        """, list(req.tickers), days)
+    return {
+        "n_bins": n_bins,
+        "values": {m: [_finite_or_none(r[f"v{i}"]) for r in rows] for i, m in enumerate(raw_ok)},
+        "bins": {m: [None if r[f"b{i}"] is None else int(r[f"b{i}"]) for r in rows]
+                 for i, m in enumerate(bin_ok)},
+        "missing": missing,
+        "n": len(rows),
+    }

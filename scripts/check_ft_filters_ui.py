@@ -63,7 +63,7 @@ def payloads() -> dict:
     for v in (0.05, 0.1):
         f = [{"metric": "ret_5d", "op": ">", "value": v}]
         r = call(ft.run, ft.RunReq(primary_metric="a", secondary_metric="b", n_bins=20,
-                                   rule_keys=rk, max_strike=1000, filters=f))
+                                   rule_keys=rk, max_strike=1000, min_strike=20, filters=f))
         # A grid with cells of different sizes, so min-n has something to split.
         g = [[None] * 20 for _ in range(20)]
         for (iy, ix, n) in ((2, 1, 12), (4, 3, 60), (6, 5, 140), (8, 7, 30)):
@@ -72,7 +72,7 @@ def payloads() -> dict:
         out[f"run {v}"] = r
         out[f"zone {v}"] = call(ft.zone, ft.ZoneReq(primary_metric="a", secondary_metric="b",
                                                     n_bins=20, rule_keys=rk, max_strike=1000,
-                                                    filters=f, cells=[[1, 2]]))
+                                                    min_strike=20, filters=f, cells=[[1, 2]]))
     out["portfolio"] = call(ft.zone, ft.ZoneReq(signal_ids=[1], n_bins=20, rule_keys=rk, max_strike=1000,
                                                 filters=[{"metric": "ret_5d", "op": ">", "value": 0.1}]))
     return out
@@ -117,10 +117,22 @@ DRIVER = r"""
     if (u.includes('/factor-trades/rules')) return ok({ groups: [] });
     if (u.includes('/factor-trades/signals')) return ok(STUBS.signals);
     if (u.includes('/filter-stats')) return ok(STUBS.stats);
+    if (u.endsWith('/factor-trades/trade-values')) {
+      if (window.__tvFail) return ok({ error: 'planted failure' });
+      // Values derived from the KEY, so a row given another key's value fails.
+      const vals = {}, bins = {};
+      for (const m of [body.primary_metric, body.secondary_metric, ...body.metrics].filter(Boolean))
+        vals[m] = body.tickers.map((t, i) => fakeV(m, t, body.dates[i]));
+      for (const m of [body.primary_metric, body.secondary_metric].filter(Boolean))
+        bins[m] = body.tickers.map((t, i) => fakeB(m, t, body.dates[i]));
+      return ok({ n_bins: body.n_bins, values: vals, bins, missing: [], n: body.tickers.length });
+    }
     if (u.endsWith('/factor-trades/run')) return ok(PAY['run ' + fv]);
     if (u.endsWith('/factor-trades/zone')) return ok(body.signal_ids ? PAY.portfolio : PAY['zone ' + fv]);
     return { ok: false, status: 404, json: async () => ({}), text: async () => 'no stub ' + u };
   };
+  const fakeV = (m, t, d) => +((+d.replace(/-/g, '') % 9973) / 1000 + m.length + t.charCodeAt(0) / 100).toFixed(6);
+  const fakeB = (m, t, d) => (+d.slice(-2) + m.length + t.length) % 20;
   const out = [];
   const eq = (name, got, want) => out.push(`${JSON.stringify(got) === JSON.stringify(want) ? 'ok' : 'FAIL'}|${name}|${JSON.stringify(got)}|${JSON.stringify(want)}`);
   const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -149,14 +161,25 @@ DRIVER = r"""
     // virtual time does not run.
     eq('a complete row is applied (no warning left)', txt($('.ft-filter-off')), '');
 
+    // ── min strike, beside max strike ─────────────────────────────────
+    const lo = $$('.ft-pair input').find(i => i.getAttribute('x-model.number.lazy') === 'minStrike');
+    const hi = $$('.ft-pair input').find(i => i.getAttribute('x-model.number.lazy') === 'maxStrike');
+    eq('min and max strike share one row, side by side, inside the rail',
+       !!lo && !!hi && Math.abs(lo.getBoundingClientRect().top - hi.getBoundingClientRect().top) < 1
+         && lo.getBoundingClientRect().right <= hi.getBoundingClientRect().left
+         && hi.getBoundingClientRect().right <= $('.ft-rail').getBoundingClientRect().right, true);
+    eq('min strike starts off', [lo && lo.value, lo && lo.placeholder], ['', 'off']);
+    setVal(lo, '20', ['change']); await wait(100);
+
     // ── run ────────────────────────────────────────────────────────────
     btn('Run').click(); await wait(400);
     eq('the run did not error', Alpine.$data(document.body).error, '');
     const rb = lastBody('/run');
-    eq('Run sends the filter and max strike together', rb && [rb.filters, rb.max_strike],
-       [[{ metric: 'ret_5d', op: '>', value: 0.05 }], 1000]);
+    eq('Run sends the filter, max strike and min strike together', rb && [rb.filters, rb.max_strike, rb.min_strike],
+       [[{ metric: 'ret_5d', op: '>', value: 0.05 }], 1000, 20]);
     const card = () => txt($$('.ft-run').slice(-1)[0]);
     eq('the card names the filter', card().includes('filter ret_5d > 0.05'), true);
+    eq('the card names min strike', card().includes('min strike $20'), true);
     eq('the card reports kept, failed and no value apart',
        /kept 6 of 10/.test(card()) && /ret_5d: 2 failed · 1 no value/.test(card()), true);
 
@@ -180,21 +203,52 @@ DRIVER = r"""
     const banner = $$('div').find(d => d.getAttribute('x-show') === 'lockedPopMismatch');
     eq('a locked card with another filter raises the population banner, naming both',
        banner ? txt(banner) : null,
-       'Locked and current runs cover different populations — locked: max strike $1000 · ret_5d > 0.05 — current: max strike $1000 · ret_5d > 0.1. The Change row compares two different trade sets.');
+       'Locked and current runs cover different populations — locked: min strike $20 · max strike $1000 · ret_5d > 0.05 — current: min strike $20 · max strike $1000 · ret_5d > 0.1. The Change row compares two different trade sets.');
 
     // ── select a cell, export ──────────────────────────────────────────
     const cells = $$('.hm-cell-selectable');
     if (cells.length) cells.find(c => (c.getAttribute('title') || '').length) ?.click();
     await wait(600);
     const zb = lastBody('/zone');
-    eq('the zone request carries the population', zb && [zb.filters, zb.max_strike],
-       [[{ metric: 'ret_5d', op: '>', value: 0.1 }], 1000]);
+    eq('the zone request carries the population', zb && [zb.filters, zb.max_strike, zb.min_strike],
+       [[{ metric: 'ret_5d', op: '>', value: 0.1 }], 1000, 20]);
     const exp = btn('Export CSV');
     if (exp) exp.click();
     await wait(100);
     const head = (csv || '').split('\n').filter(l => l.startsWith('#'));
     eq('the trade CSV header carries the filter', head.includes('# filter,ret_5d,>,0.1'), true);
     eq('and max strike', head.includes('# max_strike,1000'), true);
+    eq('and min strike', head.includes('# min_strike,20'), true);
+
+    // ── the metric values, per trade ──────────────────────────────────
+    const tv = lastBody('/trade-values');
+    const ztr = Alpine.$data(document.body).zoneData.combined_trades;
+    const keys = new Set(ztr.map(x => x.ticker + '|' + x.trade_date));
+    eq('export asks for the run\'s metrics once per distinct trade day',
+       tv && [tv.primary_metric, tv.secondary_metric, tv.metrics, tv.n_bins, tv.tickers.length],
+       ['a', 'b', ['ret_5d'], 20, keys.size]);
+    const lines = (csv || '').split('\n').filter(l => l && !l.startsWith('#'));
+    const hdr = lines[0].split(','), body_ = lines.slice(1).map(l => l.split(','));
+    eq('value columns: primary and its bin, secondary and its bin, the filter metric',
+       hdr.slice(7, 12), ['a', 'a_bin', 'b', 'b_bin', 'ret_5d']);
+    eq('one row per trade', body_.length, ztr.length);
+    const at = c => hdr.indexOf(c);
+    const badRows = body_.filter(r => {
+      const tk = r[0], dt = r[1];
+      return +r[at('a')] !== fakeV('a', tk, dt) || +r[at('b')] !== fakeV('b', tk, dt)
+          || +r[at('ret_5d')] !== fakeV('ret_5d', tk, dt)
+          || +r[at('a_bin')] !== fakeB('a', tk, dt) || +r[at('b_bin')] !== fakeB('b', tk, dt);
+    }).length;
+    eq('every row carries ITS OWN trade day\'s values and bins', badRows, 0);
+    eq('the header says what the values are and the bin resolution',
+       head.some(l => l.startsWith('# metric values,raw daily_features values') && l.includes('n_bins 20')), true);
+    window.__tvFail = true; csv = null;
+    btn('Export CSV').click(); await wait(200);
+    const fl = (csv || '').split('\n');
+    eq('a failed values request is written into the file, no value columns',
+       [fl.includes('# metric values,UNAVAILABLE: planted failure'),
+        fl.find(l => l.startsWith('ticker,')) === 'ticker,trade_date,entry_price,ret_pct,exit_bar,exit_rule,window'], [true, true]);
+    window.__tvFail = false;
 
     // ── portfolio ──────────────────────────────────────────────────────
     $$('span').find(s => txt(s) === 'Portfolio').click(); await wait(300);
@@ -209,6 +263,14 @@ DRIVER = r"""
     eq('a portfolio run sends the filter', pb && [pb.signal_ids, pb.filters],
        [[1], [{ metric: 'ret_5d', op: '>', value: 0.1 }]]);
     eq('the portfolio card names the filter', card().includes('filter ret_5d > 0.1'), true);
+    csv = null; btn('Export CSV').click(); await wait(200);
+    const pl = (csv || '').split('\n');
+    const ptv = lastBody('/trade-values');
+    eq('a portfolio export carries the filter metric only, and says why',
+       [ptv && [ptv.primary_metric, ptv.secondary_metric, ptv.metrics],
+        (pl.find(l => l.startsWith('ticker,')) || '').split(',').slice(7, 8),
+        pl.some(l => l.startsWith('# metric values,portfolio run: filter metrics only'))],
+       [[null, null, ['ret_5d']], ['ret_5d'], true]);
 
     const pre = document.createElement('pre');
     pre.id = 'report';

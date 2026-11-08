@@ -13,6 +13,9 @@
                 border-right:1px solid var(--border); background:rgba(255,255,255,.02); }
     .ft-main  { flex:1; min-width:0; overflow-y:auto; padding:14px 16px; }
     .ft-sec   { margin-bottom:14px; }
+    /* Two fields abreast (min / max strike): equal halves, min-width:0 so a
+       number input cannot push its neighbour out of the rail. */
+    .ft-pair  { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; }
     .ft-sec-h { font-size:10px; color:var(--dim); text-transform:uppercase;
                 letter-spacing:.4px; margin-bottom:6px; font-weight:700; }
     .ft-rail label { display:block; font-size:10px; color:var(--dim);
@@ -471,13 +474,22 @@
         <label title="Most dollars open in any one sector at once. Blank = no cap.">Sector cap ($)</label>
         <input type="number" x-model.number.lazy="sectorCap" step="1000" min="0"
                placeholder="off" @change="renderCharts()">
-        <!-- Max strike: a trade on a ticker priced above this is not taken
-             at all. Default $1,000. -->
-        {#- Also .lazy, though max strike is a SERVER-side population filter
-            and does not re-price anything client-side: a half-typed value
-            would still be what the next Run sent. -#}
-        <label>Max strike ($)</label>
-        <input type="number" x-model.number.lazy="maxStrike" step="50">
+        <!-- Min / max strike: a trade on a ticker priced outside them is not
+             taken at all. Max defaults to $1,000; min is blank = off. -->
+        {#- Also .lazy, though both are SERVER-side population filters and
+            re-price nothing client-side: a half-typed value would still be
+            what the next Run sent. Side by side: one population bound, two
+            ends. -#}
+        <div class="ft-pair">
+          <div>
+            <label title="Trades on tickers priced below this are not taken. Blank = no floor.">Min strike ($)</label>
+            <input type="number" x-model.number.lazy="minStrike" step="5" min="0" placeholder="off">
+          </div>
+          <div>
+            <label>Max strike ($)</label>
+            <input type="number" x-model.number.lazy="maxStrike" step="50">
+          </div>
+        </div>
       </div>
 
       {#- ── Save this zone as a signal ─────────────────────────────────
@@ -745,6 +757,9 @@
             <div class="p" x-show="c.r.max_strike"
                  title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
                  x-text="'max strike $' + c.r.max_strike"></div>
+            <div class="p" x-show="c.r.min_strike"
+                 title="Trades on tickers priced below this were excluded from the whole run — grid, stats and every chart."
+                 x-text="'min strike $' + c.r.min_strike"></div>
             {#- The rail's cap: it sizes every card's dollar figures, edited
                 and locked alike, so every card says so. -#}
             <div class="p" x-show="capCardText()"
