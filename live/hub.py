@@ -95,12 +95,12 @@ class Hub:
         # aggregate, so what is kept is the duration-weighted sums per minute
         # -- ~240 bytes a symbol against ~42 MB for a quote tape at 430.
         self.spread: dict[str, SpreadAccum] = {}
-        # THE WALL TIER. symbol -> its current quote, and nothing else.
+        # THE WALL TIER. symbol -> its spread window (WALL_WINDOW_S of
+        # 100 ms buckets), and nothing else.
         #
         # A THIRD STORE for the same reason the scan is a second one: it wants
-        # a different shape of the same feed -- here the smallest one, the
-        # live spread of up to 300 symbols, on the QUOTE channel only. See
-        # live/wall.py.
+        # a different shape of the same feed -- here a small one, the spread
+        # of up to 300 symbols, on the QUOTE channel only. See live/wall.py.
         self.wall: dict[str, WallSym] = {}
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
@@ -391,7 +391,7 @@ class Hub:
         return add, drop, refused
 
     def wall_status(self) -> dict:
-        """What the wall tier is holding. Quotes only, one record a symbol."""
+        """What the wall tier is holding. Quotes only, one window a symbol."""
         return {
             "held": len(self.wall),
             "cap": config.WALL_MAX_SYMBOLS,
@@ -575,7 +575,8 @@ class Hub:
                         if acc is not None:
                             acc.push(float(ts), float(bp), float(ap))
                         if wsym is not None:
-                            wsym.push_quote(float(ts), float(bp), float(ap))
+                            wsym.push_quote(float(ts), float(bp), float(ap),
+                                            now_ms)
                 if sym in self.quotes:
                     rec = {"t": m.get("t"), "bp": m.get("bp"),
                            "ap": m.get("ap"), "bs": m.get("bs"),

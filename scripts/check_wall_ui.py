@@ -1,8 +1,10 @@
 """The Equities Wall rotation list at 300 symbols -- clicked, in headless Edge.
 
 The real template and bundle, with the one WebSocket replaced by a fake that
-speaks the server's frame format (hello, then a tick every 250 ms carrying the
-spreads that changed), and `fetch` replaced by one that echoes the save.
+speaks the server's frame format (hello, then ticks carrying the windows --
+[p10, median, p90] -- that changed), and `fetch` replaced by one that echoes
+the save. The fake ticks every 250 ms, faster than the server's 2 s, so the
+run is short; the page takes its cadence from the frames.
 Nothing reaches the live service or the market-data account.
 
 What it holds, and what it MEASURES (printed):
@@ -10,8 +12,12 @@ What it holds, and what it MEASURES (printed):
   * 300 rows, alphabetical (the hello's list is shuffled), flowing DOWN each
     column and then on to the next -- read from the rows' geometry -- ~250 px
     wide, 16 px tall, all on one screen without scrolling.
-  * colour and bar from the two thresholds, read from computed styles; both
-    sliders moved by input events re-colour and re-scale.
+  * colour from p90 against the two thresholds, read from computed styles;
+    the bar FLOATS from p10 to p90 with the median tick inside it, measured
+    from the rendered geometry; a name gapping 20c -> 65c (median under the
+    floor, p90 over it) is lit, not dimmed, and a flat 55c name is a stub
+    in the same place; both sliders moved by input events re-colour and
+    re-scale.
   * a click marks a row green and a second click clears it; a marked row is
     never dimmed or hidden.
   * "hide below floor" removes the dim rows and nothing else; unticked, every
@@ -62,8 +68,16 @@ DRIVER = r"""
   const N = 300;
   const syms = Array.from({length: N}, (_, i) => 'S' + String(i).padStart(3, '0'));
   // Spreads 5..200c, spread over the list so every column has every tier.
+  // sp is each symbol's p90; its window is [p90/3, p90/2, p90], except the
+  // two named cases below.
   const sp = {}; syms.forEach((s, i) => { sp[s] = 5 + ((i * 37) % 196); });
   sp.S000 = null;                                   // never quoted
+  sp.S001 = 65; sp.S002 = 55;
+  const special = { S001: [20, 22, 65],             // tight, gapping wide
+                    S002: [55, 55, 55] };           // parked flat
+  const win = (s, v) => (v == null ? null : special[s] && v === sp[s] ? special[s].slice()
+                          : [Math.round(v / 3), Math.round(v / 2), v]);
+  const all = () => { const o = {}; syms.forEach(s => { o[s] = win(s, sp[s]); }); return o; };
   const shuffled = syms.slice().sort((a, b) => ((a.charCodeAt(3) * 7 + a.charCodeAt(2)) % 11) - ((b.charCodeAt(3) * 7 + b.charCodeAt(2)) % 11));
   const sends = [], posts = [];
   let sock = null, paused = false;
@@ -79,16 +93,16 @@ DRIVER = r"""
       setTimeout(() => { this.readyState = 1; this.onopen && this.onopen();
         this.emit({ev: 'hello', data: {}, entries: shuffled.map(s => ({symbol: s, scale: null})),
                    settings: {min_spread_cents: 59, wide_cents: 120},
-                   caps: {symbols: N, tick_s: 0.25}});
-        this.emit({ev: 'tick', at: Date.now() / 1000, syms: Object.assign({}, sp)});
+                   caps: {symbols: N, tick_s: 2, window_s: 30, pct_lo: 10, pct_hi: 90}});
+        this.emit({ev: 'tick', at: Date.now() / 1000, syms: all()});
         // Deltas: forty names a tick change by a cent and change back, so
         // the picture the assertions read is the same between ticks.
         let flip = 0;
         this.timer = setInterval(() => {
           if (paused) return;
           flip ^= 1; const d = {};
-          for (let k = 0; k < 40; k++) { const s = syms[1 + ((k * 7 + flip) % 299)]; d[s] = sp[s] + flip; }
-          if (!flip) Object.keys(d).forEach(s => { d[s] = sp[s]; });
+          for (let k = 0; k < 40; k++) { const s = syms[3 + ((k * 7 + flip) % 297)]; d[s] = win(s, sp[s] == null ? null : sp[s] + flip); }
+          if (!flip) Object.keys(d).forEach(s => { d[s] = win(s, sp[s]); });
           this.emit({ev: 'tick', at: Date.now() / 1000, syms: d});
         }, 250);
       }, 30); }
@@ -111,10 +125,20 @@ DRIVER = r"""
   const visibleSyms = () => rows().filter(r => getComputedStyle(r).display !== 'none').map(r => r.dataset.sym);
   function look(s) {
     const r = row(s), f = r.querySelector('.wl-fill'), t = r.querySelector('.wl-track');
+    const m = r.querySelector('.wl-med');
     const cs = getComputedStyle(r);
+    const tb = t.getBoundingClientRect(), fb = f.getBoundingClientRect(), mb = m.getBoundingClientRect();
+    const at = (x) => Math.round((x - tb.left) / tb.width * 1000) / 10;
     return { cls: r.className, opacity: +cs.opacity, bg: cs.backgroundColor,
              fill: getComputedStyle(f).backgroundColor,
-             pct: Math.round(f.getBoundingClientRect().width / t.getBoundingClientRect().width * 100),
+             shown: getComputedStyle(f).display !== 'none' && fb.width > 0,
+             lo: at(fb.left), hi: at(fb.right), mid: at(mb.left),
+             fillPx: Math.round(fb.width * 10) / 10,
+             inTrack: fb.left >= tb.left - 0.5 && fb.right <= tb.right + 0.5,
+             trackPx: Math.round(tb.width),
+             medPx: Math.round(mb.width * 10) / 10,
+             medColor: getComputedStyle(m).backgroundColor,
+             title: (r.dispatchEvent(new Event('mouseenter')), r.getAttribute('title')),
              text: r.querySelector('.wl-cents').textContent.trim(),
              tk: getComputedStyle(r.querySelector('.wl-tk')).color };
   }
@@ -146,7 +170,7 @@ DRIVER = r"""
     await sleep(800);
     paused = true; await sleep(300);
     // The ticks change and change back; settle on the base picture.
-    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: Object.assign({}, sp)});
+    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: all()});
     await Alpine.nextTick(); await frameDone();
 
     out.order = rows().map(r => r.dataset.sym);
@@ -165,6 +189,8 @@ DRIVER = r"""
     out.symSixty = syms.find(s => sp[s] === 60) || pick(60, 61);
     out.below = look(out.symBelow); out.mid = look(out.symMid); out.wide = look(out.symWide);
     out.none = look('S000');
+    out.gapper = look('S001'); out.flat = look('S002');
+    out.legend = [...document.querySelectorAll('.wl-note')].map(e => e.textContent.trim());
     out.sixty = look(out.symSixty);
     out.spOf = {below: sp[out.symBelow], mid: sp[out.symMid], wide: sp[out.symWide], sixty: sp[out.symSixty]};
 
@@ -175,6 +201,7 @@ DRIVER = r"""
     out.wideAt240 = look(out.symWide);
     slide('floor' === 'x' ? '' : 'min_spread_cents', 20); await Alpine.nextTick(); await frameDone();
     out.belowAt20 = look(out.symBelow);
+    out.flatAt240 = look('S002');
     await sleep(700);                               // the debounced save
     out.posts = posts.map(p => p.settings);
     slide('min_spread_cents', 59); slide('wide_cents', 120);
@@ -195,6 +222,7 @@ DRIVER = r"""
     const vis = visibleSyms();
     out.hideVisible = vis.length;
     out.hideExpected = syms.filter(s => (sp[s] != null && sp[s] >= 59) || s === out.symBelow).length;
+    out.hideKeepsGapper = vis.includes('S001');
     out.hideKeepsMarked = vis.includes(out.symBelow);
     out.hideDropsBelow = !vis.includes(pick(20, 50) === out.symBelow ? syms.find(s => sp[s] != null && sp[s] < 59 && s !== out.symBelow) : pick(20, 50));
     out.hideFlow = flow();
@@ -217,7 +245,7 @@ DRIVER = r"""
     // ── live updates: one row's number changes in place ────────────────
     mark('update');
     paused = false;
-    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: {S005: 99}});
+    sock.emit({ev: 'tick', at: Date.now() / 1000, syms: {S005: [10, 30, 99]}});
     await Alpine.nextTick(); await frameDone();
     out.updated = look('S005').text;
     // WORST CASE: all 300 spreads change in one tick, timed through Alpine's
@@ -225,7 +253,7 @@ DRIVER = r"""
     paused = true;
     const full = [];
     for (let k = 0; k < 8; k++) {
-      const d = {}; syms.forEach((s, i) => { d[s] = 5 + ((i * 37 + k + 1) % 196); });
+      const d = {}; syms.forEach((s, i) => { const v = 5 + ((i * 37 + k + 1) % 196); d[s] = [Math.round(v / 3), Math.round(v / 2), v]; });
       const t0 = performance.now();
       sock.emit({ev: 'tick', at: Date.now() / 1000, syms: d});
       await Alpine.nextTick();
@@ -290,6 +318,12 @@ BLUE, PINK, GREY = "rgb(52, 152, 219)", "rgb(232, 67, 147)", "rgb(119, 119, 119)
 GREEN_BG, GREEN = "rgba(46, 204, 113, 0.22)", "rgb(46, 204, 113)"
 
 
+def p90_of(sym: str):
+    """The fixture's p90 per symbol (the driver's `sp`)."""
+    i = int(sym[1:])
+    return {0: None, 1: 65, 2: 55}.get(i, 5 + ((i * 37) % 196))
+
+
 def main() -> int:
     browser = N.find_browser()
     if browser is None:
@@ -324,16 +358,45 @@ def main() -> int:
         check("mid" in m["cls"] and m["opacity"] == 1 and m["fill"] == BLUE,
               f"{tag} a {o['spOf']['mid']}c row between floor and wide: {m}")
         check("wide" in w["cls"] and w["opacity"] == 1 and w["fill"] == PINK
-              and w["pct"] == 100,
+              and abs(w["hi"] - 100) <= 1 and w["inTrack"],
               f"{tag} a {o['spOf']['wide']}c row over 120c wide: {w}")
-        check("none" in n["cls"] and n["opacity"] == 0.3 and n["text"] == "—",
+        check("none" in n["cls"] and n["opacity"] == 0.3 and n["text"] == "—"
+              and not n["shown"],
               f"{tag} a symbol with no quote: {n}")
-        check(abs(o["sixty"]["pct"] - round(o["spOf"]["sixty"] / 120 * 100)) <= 1,
-              f"{tag} a {o['spOf']['sixty']}c bar is {o['sixty']['pct']}% at wide 120")
-        check(abs(o["sixtyAt240"]["pct"] - round(o["spOf"]["sixty"] / 240 * 100)) <= 1
-              and o["wideAt240"]["fill"] == BLUE,
+        # THE FLOATING BAR: p10 to p90 on the wide scale, the tick at the
+        # median, the number p90. 1% of a ~130 px track is ~1.3 px.
+        six, v = o["sixty"], o["spOf"]["sixty"]
+        lo, md = round(v / 3), round(v / 2)
+        check(abs(six["lo"] - lo / 1.2) <= 1.5 and abs(six["hi"] - v / 1.2) <= 1.5
+              and abs(six["mid"] - md / 1.2) <= 1.5 and six["text"] == str(v),
+              f"{tag} a [{lo}, {md}, {v}] window drew lo {six['lo']}% hi "
+              f"{six['hi']}% tick {six['mid']}% number {six['text']!r}; want "
+              f"{lo / 1.2:.1f} / {v / 1.2:.1f} / {md / 1.2:.1f}% and {v}")
+        check(six["medPx"] == 2 and six["medColor"] not in (BLUE, PINK, GREY),
+              f"{tag} the median tick is {six['medPx']} px in {six['medColor']}")
+        g, fl = o["gapper"], o["flat"]
+        check("mid" in g["cls"] and g["opacity"] == 1 and g["fill"] == BLUE
+              and g["text"] == "65" and abs(g["lo"] - 20 / 1.2) <= 1.5
+              and abs(g["mid"] - 22 / 1.2) <= 1.5 and abs(g["hi"] - 65 / 1.2) <= 1.5,
+              f"{tag} 20c gapping to 65c (median 22, p90 65) under a 59c "
+              f"floor must be lit by p90, a long bar with the tick low: {g}")
+        check("below" in fl["cls"] and fl["opacity"] == 0.3 and fl["text"] == "55"
+              and 3 <= fl["fillPx"] <= 4 and abs(fl["lo"] - 55 / 1.2) <= 1.5,
+              f"{tag} a flat 55c name must be a dimmed stub at 55: {fl}")
+        check(g["fillPx"] > 10 * fl["fillPx"],
+              f"{tag} the gapper's bar ({g['fillPx']} px) and the flat one's "
+              f"({fl['fillPx']} px) are not told apart")
+        check(g["title"] and "p90 65" in g["title"] and "median 22" in g["title"],
+              f"{tag} the row's hover says {g['title']!r}")
+        check(any("p10–p90 of the last 30 s" in t and "number p90" in t
+                  for t in o["legend"]),
+              f"{tag} the legend reads {o['legend']}")
+        s240 = o["sixtyAt240"]
+        check(abs(s240["hi"] - v / 2.4) <= 1.5 and abs(s240["lo"] - lo / 2.4) <= 1.5
+              and o["wideAt240"]["fill"] == BLUE
+              and abs(o["flatAt240"]["lo"] - 55 / 2.4) <= 1.5,
               f"{tag} moving wide to 240 did not rescale/recolour: "
-              f"{o['sixtyAt240']}, {o['wideAt240']}")
+              f"{s240}, {o['wideAt240']}")
         check(o["belowAt20"]["opacity"] == 1 and "mid" in o["belowAt20"]["cls"],
               f"{tag} a floor of 20 left a {o['spOf']['below']}c row dim: {o['belowAt20']}")
         check(o["posts"] and o["posts"][-1] == {"min_spread_cents": 20, "wide_cents": 240},
@@ -349,7 +412,7 @@ def main() -> int:
               f"{tag} a second click did not clear the mark: {um}")
 
         check(o["hideVisible"] == o["hideExpected"] and o["hideKeepsMarked"]
-              and o["hideDropsBelow"],
+              and o["hideDropsBelow"] and o["hideKeepsGapper"],
               f"{tag} hide below floor shows {o['hideVisible']} (want "
               f"{o['hideExpected']}), marked kept {o['hideKeepsMarked']}, "
               f"below dropped {o['hideDropsBelow']}")
@@ -357,8 +420,7 @@ def main() -> int:
               f"{tag} the hidden list does not flow down in order: {o['hideFlow']}")
         check(o["unhidden"] == 300, f"{tag} unticking left {o['unhidden']} rows")
 
-        wide_vals = [None if s == "S000" else 5 + ((int(s[1:]) * 37) % 196)
-                     for s in o["wideOrder"]]
+        wide_vals = [p90_of(s) for s in o["wideOrder"]]
         nums = [v for v in wide_vals if v is not None]
         check(nums == sorted(nums, reverse=True) and wide_vals[-1] is None
               and o["sortLabel2"] == "widest first" and o["wideFlow"]["bad"] == 0,

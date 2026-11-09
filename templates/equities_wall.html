@@ -71,10 +71,16 @@
     }
     .wl-row:hover { background:rgba(255,255,255,0.05); }
     .wl-tk { color:var(--text); font-weight:700; overflow:hidden; }
-    .wl-track { height:8px; background:rgba(255,255,255,0.05);
+    /* THE RANGE BAR (2026-11-09): it FLOATS from p10 to p90 of the last
+       30 s on the common scale (wide = the right-hand end), with a tick at
+       the median. A flat name is a stub (min-width), not nothing; left is
+       capped so a stub past `wide` stays inside the track. */
+    .wl-track { position:relative; height:8px; background:rgba(255,255,255,0.05);
                 border-radius:2px; overflow:hidden; }
-    .wl-fill { display:block; height:100%; border-radius:2px;
-               background:var(--dim); }
+    .wl-fill { position:absolute; top:0; bottom:0; min-width:3px;
+               border-radius:2px; background:var(--dim); }
+    .wl-med { position:absolute; top:0; bottom:0; width:2px;
+              background:var(--text); }
     .wl-cents { text-align:right; color:var(--text); }
     /* The bar colours are the TAPE's blue and pink (tape_theme.js, set as
        --wl-mid / --wl-wide in init), not copies of them. */
@@ -133,10 +139,11 @@
       <div class="wl-grp sep">
         <button class="wl-btn wl-sort" :class="widest ? 'on' : ''" @click="toggleSort()"
                 x-text="widest ? 'widest first' : 'A → Z'"
-                title="Alphabetical, or widest spread first (re-sorted every 2 s)"></button>
+                title="Alphabetical, or widest p90 first (re-sorted on every frame)"></button>
       </div>
 
       <span class="wl-spacer"></span>
+      <span class="wl-note" x-text="legend()"></span>
       <span class="wl-note" x-text="connSummary()"></span>
     </div>
 
@@ -154,13 +161,14 @@
       <template x-if="!entries.length">
         <div class="wl-empty" x-text="emptyMessage()"></div>
       </template>
-      <!-- Click a row to mark it green; click it again to clear. -->
+      <!-- Click a row to mark it green; click it again to clear. A row is
+           ticker | p10–p90 bar with a median tick | p90 in cents. -->
       <div class="wl-list" x-ref="list">
         <template x-for="sym in order" :key="sym">
           <div class="wl-row" :class="rowClass(sym)" :data-sym="sym"
-               @click="toggleMark(sym)">
+               @mouseenter="$el.title = rowTitle(sym)" @click="toggleMark(sym)">
             <span class="wl-tk" x-text="sym"></span>
-            <span class="wl-track"><span class="wl-fill" :style="barStyle(sym)"></span></span>
+            <span class="wl-track"><span class="wl-fill" :style="barStyle(sym)"></span><span class="wl-med" :style="tickStyle(sym)"></span></span>
             <span class="wl-cents" x-text="spText(sym)"></span>
           </div>
         </template>

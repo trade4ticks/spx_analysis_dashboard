@@ -236,21 +236,35 @@ SCAN_ROLLUP_SLICE_MS = float(os.environ.get("LIVE_SCAN_ROLLUP_SLICE_MS", "8"))
 # A ROTATION LIST (2026-11-06): one row per symbol, ticker | spread bar |
 # spread in cents, every symbol on one page. It used to be a grid of small
 # tapes, 100 to a page; the prints went unread, so the tier now subscribes
-# QUOTES ONLY (Hub._wants) and keeps one record a symbol, the last quote.
+# QUOTES ONLY (Hub._wants) and keeps one spread window a symbol (below).
 #
 # 300 symbols. The previous measurement (scripts/measure_wall_capacity.py)
 # held 300 symbols of trades AND quotes inside budget; without trades and
-# without the rings it is strictly less work.
+# without the rings it is strictly less work. The 30 s window (2026-11-09)
+# is re-measured there too.
 WALL_MAX_SYMBOLS = int(os.environ.get("LIVE_WALL_MAX_SYMBOLS", "300"))
 
-# FOUR FRAMES A SECOND, each carrying only the symbols whose spread (in
-# cents) changed since that socket's last frame. Every quote is ingested --
-# nothing is sampled -- so a row is at most 250 ms behind the market. Faster
-# buys nothing a person can read: a busy name requotes 50 times a second and
-# a number changing every 20 ms is flicker, not information. Building a frame
-# is one comparison per symbol (~0.1 ms at 300); the page updates only the
-# rows it is sent.
-WALL_TICK_S = float(os.environ.get("LIVE_WALL_TICK_S", "0.25"))
+# THE SPREAD WINDOW (2026-11-09) -- the user's starting values, not measured
+# ones; change them HERE (the page reads them from the hello's caps, never a
+# copy). Per symbol, WALL_WINDOW_S of WALL_BUCKET_MS buckets, each holding the
+# spread standing at its end, carried forward through quiet stretches (see
+# live/wall.py). The page shows WALL_PCT_LO..WALL_PCT_HI as the bar, the
+# median as a tick, and WALL_PCT_HI as the number -- and the floor, the wide
+# colour, hide-below-floor and widest-first all compare that same number.
+# No UI control for any of them, by decision.
+WALL_WINDOW_S = 30
+WALL_BUCKET_MS = 100
+WALL_BUCKETS = int(WALL_WINDOW_S * 1000 // WALL_BUCKET_MS)
+WALL_PCT_LO = 10.0
+WALL_PCT_HI = 90.0
+
+# A FRAME EVERY TWO SECONDS, carrying only the symbols whose (p10, median,
+# p90) changed since that socket's last frame. The window does the smoothing;
+# the tick only has to be quick enough not to feel dead, and a name that has
+# just started opening up shows within one. Not slower than this (the user's
+# call). It was 0.25 s when the page drew the latest quote, which flashed.
+# Widest-first re-sorts on this same tick.
+WALL_TICK_S = float(os.environ.get("LIVE_WALL_TICK_S", "2.0"))
 
 # THE TWO THRESHOLDS, in cents, saved with the list. PRESENTATION ONLY:
 # nothing downstream of either reaches the hub, so a name below the floor

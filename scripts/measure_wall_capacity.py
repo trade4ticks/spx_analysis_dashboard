@@ -20,9 +20,15 @@ trade rate, ~8,100 a second -- as if the watchlist were the 300 busiest names
 in the universe. A list of quiet names costs much less. Per-symbol rates are
 Zipf-shaped so a few names are very busy, as measured.
 
+THE SPREAD WINDOW (2026-11-09): every quote now also writes into the
+symbol's 30 s ring of 100 ms buckets, and each tick sorts every window once.
+The synthetic spreads JUMP (one to four times a base width, per quote) so the
+windows actually move and the frames carry what a live list would.
+
 What it reports, per simulated second at steady state (the window full):
   ingest   parsing and storing every upstream message (the hub's reader)
-  frame    building one wall page's deltas (WALL_TICK_S apart), and their size
+  frame    computing the windows and building one page's delta, every
+           WALL_TICK_S, and their size (also per symbol sent)
 and the share of one core both take at the stated rate. The VPS measured
 about half this machine's speed (CLAUDE.md), so the VPS line doubles it.
 """
@@ -63,7 +69,7 @@ def build_second(syms, weights, n_t, n_q, t0_ms, px, rng):
                       "x": 4, "z": 1, "c": [12]}))
     for _ in range(n_q):
         s = rng.choices(syms, weights)[0]
-        half = max(0.005, px[s] * 0.0004)
+        half = max(0.005, px[s] * 0.0004) * rng.choice((1, 1, 1, 2, 4))
         msgs.append((t0_ms + rng.random() * 1000.0,
                      {"ev": "Q", "sym": s, "bp": round(px[s] - half, 2),
                       "ap": round(px[s] + half, 2), "bs": 1, "as": 1,
@@ -96,7 +102,7 @@ def main() -> int:
     px = {s: rng.uniform(15, 400) for s in syms}
     n_t = 0                                 # the wall takes no trades
     n_q = int(TRADES_PER_S * QUOTES_PER_TRADE * a.scale)
-    ticks = max(1, round(1.0 / config.WALL_TICK_S))
+    tick_ms = config.WALL_TICK_S * 1000.0
 
     config.WALL_MAX_SYMBOLS = max(config.WALL_MAX_SYMBOLS, a.symbols)
     hub = Hub()
@@ -107,20 +113,27 @@ def main() -> int:
 
     t0 = time.time() * 1000.0 - a.seconds * 1000.0
     ingest_s, frame_s, frame_kb, n_msgs = [], [], [], 0
+    per_sym, n_sent, next_tick = [], [], t0 + tick_ms
     for sec in range(a.seconds):
         frames = build_second(syms, weights, n_t, n_q, t0 + sec * 1000.0, px, rng)
         c0 = time.perf_counter()
         for f in frames:
             hub._ingest(f)
         ingest_s.append(time.perf_counter() - c0)
-        # The second's feed is ingested whole and then framed `ticks` times;
-        # only the first carries changes, so this is the frame cost at the
-        # ingest rate plus the empty ticks -- the same total work.
+        # The second's feed is ingested whole, then every tick that falls in
+        # it computes the windows and builds the page's delta.
         c0 = time.perf_counter()
         kb = 0.0
-        for k in range(ticks):
-            now = (t0 + sec * 1000.0 + (k + 1) * 1000.0 / ticks) / 1000.0
-            kb += len(json.dumps(runner.frame(st, now))) / 1024.0
+        end = t0 + (sec + 1) * 1000.0
+        while next_tick <= end:
+            f = runner.frame(st, next_tick / 1000.0)
+            body = json.dumps(f, separators=(",", ":"))   # as Starlette sends it
+            kb += len(body) / 1024.0
+            if f["syms"]:
+                per_sym.append((len(json.dumps(f["syms"], separators=(",", ":"))) - 2)
+                               / len(f["syms"]))
+            n_sent.append(len(f["syms"]))
+            next_tick += tick_ms
         frame_s.append(time.perf_counter() - c0)
         frame_kb.append(kb)
         n_msgs = n_t + n_q
@@ -139,10 +152,15 @@ def main() -> int:
           f"({a.scale:g}x the measured upper bound), {a.seconds} s simulated")
     print(f"  ingest  median {med(ing) * 1000:7.1f} ms per second of feed  "
           f"(worst {worst(ing) * 1000:.1f}; {med(ing) / n_msgs * 1e6:.2f} us/msg)")
+    sent_steady = sorted(n_sent[len(n_sent) // 2:])
     print(f"  frames  median {med(frm) * 1000:7.1f} ms per page per second    "
-          f"(worst {worst(frm) * 1000:.1f}; {ticks} a second), "
+          f"(worst {worst(frm) * 1000:.1f}; one every {config.WALL_TICK_S:g} s), "
           f"{med(kb):.1f} KB a second (worst {worst(kb):.1f} KB)")
-    print(f"  held    one quote a symbol; {ws['quotes_seen']:,} taken, "
+    print(f"  wire    {sum(per_sym) / max(1, len(per_sym)):.1f} bytes a symbol "
+          f"sent; {med(sent_steady)} of {a.symbols} symbols changed a tick "
+          f"(median, steady state)")
+    print(f"  held    a {config.WALL_WINDOW_S} s window a symbol "
+          f"({config.WALL_BUCKETS} buckets); {ws['quotes_seen']:,} taken, "
           f"{ws['crossed']} crossed")
     print(f"  share of one core: {core_here * 100:.0f}% here, "
           f"~{core_vps * 100:.0f}% on the VPS (x{VPS_SLOWDOWN:g}), one page open")

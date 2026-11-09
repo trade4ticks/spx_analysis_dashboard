@@ -388,8 +388,8 @@ COVERS = {
     "check_strategy_signal_ui":  [(r"(\d+) assertions, failures", 100)],            # 137
     "check_strategy_signal_sql": [("ok", 16)],                                      # 21
     "check_live_hub":            [(r"hub cases: (\d+)", 20)],                       # 32
-    "check_wall":                [(r"wall cases: (\d+)", 16)],                      # 21
-    "check_wall_ui":             [(r"wall ui: (\d+) assertions", 58)],              # 77
+    "check_wall":                [(r"wall cases: (\d+)", 20)],                      # 26 (the 30 s window)
+    "check_wall_ui":             [(r"wall ui: (\d+) assertions", 71)],              # 95 (range bars)
     "check_live_axis":           [(r"band positions checked: (\d+) flat", 300)],    # 400
     "check_broker":              [(r"broker cases: (\d+)", 13)],                    # 18
     "check_das":                 [(r"DAS cases: (\d+)", 22)],                       # 29

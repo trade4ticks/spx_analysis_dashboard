@@ -1,7 +1,9 @@
 """The wall tier, its watchlist, its frames and its page, on a fabricated feed.
 
 NO MARKET NEEDED. The wall is a rotation list (2026-11-06): one row per
-symbol, ticker | spread bar | spread in cents, on the QUOTE channel only.
+symbol, ticker | range bar | p90 in cents, on the QUOTE channel only. Since
+2026-11-09 each symbol is a 30 s window of 100 ms buckets, and the page is
+driven by its p90.
 
 WHAT IS BEING PROTECTED, in order of how bad it would be:
 
@@ -12,7 +14,11 @@ WHAT IS BEING PROTECTED, in order of how bad it would be:
     closing must drop `T.` and NOT `Q.` (or the wall row freezes) -- and the
     same for every pair of tiers. Every one of these failures looks like a
     market that went quiet.
-  * THE FRAME IS A DELTA OF SPREADS, and the frame still goes out when empty.
+  * THE WINDOW IS THE STEP FUNCTION, SAMPLED: every bucket holds the spread
+    standing at its end, carried forward through silence (a quiet name must
+    not vanish), time-weighted (a furious tight requoter must not bury a
+    still wide stretch) -- held to a brute-force reference on random feeds.
+  * THE FRAME IS A DELTA OF WINDOWS, and the frame still goes out when empty.
   * THE WATCHLIST SURVIVES A RESTART, with both thresholds.
   * THE THRESHOLDS ARE PRESENTATION: they never reach the hub.
   * THE PAGE: columns flow top to bottom, colours and bar length follow the
@@ -35,6 +41,7 @@ sys.path.insert(0, str(ROOT))
 
 from live import config                                   # noqa: E402
 from live.hub import Hub                                  # noqa: E402
+from live.wall import WallSym                             # noqa: E402
 from live.wall_runner import WallRunner                   # noqa: E402
 from live.wall_store import WallStore                     # noqa: E402
 
@@ -245,33 +252,51 @@ async def case_first_frame_is_every_symbol(tmp: Path):
     h._ingest(json.dumps([quote("FDX", time.time() * 1000, 334.37, 334.44)]))
     st = r.subscribe(FakeSock())
     f = r.frame(st)
-    check(f["ev"] == "tick" and f["syms"] == {"FDX": 7.0, "KO": None},
+    check(f["ev"] == "tick" and f["syms"] == {"FDX": [7, 7, 7], "KO": None},
           f"the first frame was {f['syms']}")
 
 
-async def case_frame_is_a_delta_of_spreads(tmp: Path):
-    """Only a changed spread is sent; a quote that moves both sides is not."""
+async def case_frame_is_a_delta_of_windows(tmp: Path):
+    """Only a changed window is sent; a quote that moves both sides is not."""
     h = recording_hub()
     r = runner(h, tmp)
     await r.apply([{"symbol": "FDX"}, {"symbol": "KO"}])
-    now = time.time() * 1000
-    h._ingest(json.dumps([quote("FDX", now, 334.37, 334.44),
-                          quote("KO", now, 60.00, 60.01)]))
+    t0 = bucket_aligned(-60_000)
+    h._ingest(json.dumps([quote("FDX", t0, 334.37, 334.44),
+                          quote("KO", t0, 60.00, 60.01)]))
     st = r.subscribe(FakeSock())
-    r.frame(st)
-    # Both sides up a cent: spread unchanged, nothing to send.
-    h._ingest(json.dumps([quote("FDX", now + 5, 334.38, 334.45)]))
-    f = r.frame(st)
+    r.frame(st, (t0 + 1_000) / 1000)
+    # Both sides up a cent: spread unchanged, window unchanged, nothing sent.
+    h._ingest(json.dumps([quote("FDX", t0 + 5_000, 334.38, 334.45)]))
+    f = r.frame(st, (t0 + 6_000) / 1000)
     check(f["syms"] == {},
-          f"a quote that did not change the spread was sent: {f['syms']}")
+          f"a quote that did not change the window was sent: {f['syms']}")
     check("at" in f, "an empty frame must still go out, stamped")
-    h._ingest(json.dumps([quote("KO", now + 9, 60.00, 60.03)]))
-    f = r.frame(st)
-    check(f["syms"] == {"KO": 3.0}, f"the changed spread came as {f['syms']}")
+    # KO widens to 3c for a second: p90 moves, the rest does not yet.
+    h._ingest(json.dumps([quote("KO", t0 + 9_000, 60.00, 60.03)]))
+    f = r.frame(st, (t0 + 10_000) / 1000)
+    check(f["syms"] == {"KO": [1, 1, 3]},
+          f"KO's changed window came as {f['syms']}")
     # Two sockets keep their own record of what each was sent.
     st2 = r.subscribe(FakeSock())
-    check(r.frame(st2)["syms"] == {"FDX": 7.0, "KO": 3.0},
+    check(r.frame(st2, (t0 + 10_000) / 1000)["syms"]
+          == {"FDX": [7, 7, 7], "KO": [1, 1, 3]},
           "a second page did not get every row on its first frame")
+    # The windows are computed ONCE per tick, whatever the page count.
+    calls = [0]
+    real = WallSym.window
+
+    def counted(self, now_ms):
+        calls[0] += 1
+        return real(self, now_ms)
+    WallSym.window = counted
+    try:
+        r.subscribe(FakeSock())
+        await r._tick()
+    finally:
+        WallSym.window = real
+    check(calls[0] == 2,
+          f"one tick over 2 symbols and 3 pages computed {calls[0]} windows")
 
 
 async def case_one_socket_carries_300_rows(tmp: Path):
@@ -280,23 +305,188 @@ async def case_one_socket_carries_300_rows(tmp: Path):
     r = runner(h, tmp)
     syms = [f"S{i:03d}" for i in range(config.WALL_MAX_SYMBOLS)]
     await r.apply([{"symbol": s} for s in syms])
-    now = time.time() * 1000
-    h._ingest(json.dumps([quote(s, now, 10.0, 10.0 + (i % 90) / 100)
-                          for i, s in enumerate(syms)]))
+    # Thirty seconds of a busy feed: every symbol requotes every 50 ms, so
+    # every bucket of every window holds a value, and they differ.
+    t_feed = time.time() * 1000 - 31_000
+    for k in range(0, 31_000, 50):
+        h._ingest(json.dumps([quote(s, t_feed + k, 10.0,
+                                    10.0 + ((i + k // 50) % 90) / 100)
+                              for i, s in enumerate(syms)]))
+    check(all(w.filled == config.WALL_BUCKETS for w in h.wall.values()),
+          "thirty seconds of quotes did not fill every window")
     sock = FakeSock()
     st = r.subscribe(sock)
     t0 = time.perf_counter()
+    for _ in range(20):
+        wins = r.windows()
+    per_win = (time.perf_counter() - t0) / 20 * 1000
+    t0 = time.perf_counter()
     for _ in range(40):
-        r.frame(st)
+        r.frame(st, None, wins)
     per = (time.perf_counter() - t0) / 40 * 1000
     await r._tick()
     check(len(sock.frames) == 1, f"one tick sent {len(sock.frames)} frames")
-    check(per < 5, f"a 300-row frame took {per:.2f} ms to build")
-    check(config.WALL_TICK_S <= 0.5,
-          f"the tick is {config.WALL_TICK_S}s; a spread up to that stale "
-          f"is the number being traded on")
-    print(f"  frame build at 300 symbols: {per:.3f} ms, tick "
-          f"{config.WALL_TICK_S}s")
+    check(per_win < 100 and per < 5,
+          f"300 windows took {per_win:.2f} ms, a frame {per:.2f} ms")
+    check(config.WALL_TICK_S <= 2.0,
+          f"the tick is {config.WALL_TICK_S}s; slower than 2 s and a name "
+          f"that has just opened up is late")
+    one = json.dumps({"S000": wins["S000"]}, separators=(",", ":"))[1:-1]
+    print(f"  at 300 full windows: windows {per_win:.2f} ms a tick, a frame "
+          f"{per:.3f} ms a page; one symbol on the wire {len(one)} bytes "
+          f"({one}); tick {config.WALL_TICK_S}s")
+
+
+# ── the window ─────────────────────────────────────────────────────────────
+def bucket_aligned(offset_ms: float) -> float:
+    """A time `offset_ms` from now, on a bucket boundary (in the past for a
+    negative offset -- push_quote clamps a quote to its arrival time)."""
+    b = config.WALL_BUCKET_MS
+    return ((time.time() * 1000 + offset_ms) // b) * b
+
+
+def reference_window(quotes, now_ms):
+    """Brute force: the step function sampled at the END of every bucket of
+    the window, nearest-rank percentiles. `quotes` is [(t_ms, cents)] in
+    arrival order, each arriving at its own timestamp. A quote never lands in
+    a bucket before one already written."""
+    import math
+    B, N = config.WALL_BUCKET_MS, config.WALL_BUCKETS
+    if not quotes:
+        return None
+    placed, last_b = [], None
+    for t, sp in quotes:
+        qb = int(t // B)
+        qb = qb if last_b is None else max(qb, last_b)
+        last_b = qb
+        placed.append((qb, sp))
+    now_b = max(int(now_ms // B), last_b)
+    vals = []
+    for k in range(max(placed[0][0], now_b - N + 1), now_b + 1):
+        standing = None
+        for qb, sp in placed:
+            if qb <= k:
+                standing = sp
+        vals.append(standing)
+    vals.sort()
+
+    def rank(p):
+        return vals[max(1, math.ceil(p / 100 * len(vals) - 1e-9)) - 1]
+    return [rank(config.WALL_PCT_LO), rank(50.0), rank(config.WALL_PCT_HI)]
+
+
+def fed(quotes, now_ms) -> list | None:
+    w = WallSym()
+    for t, sp in quotes:
+        w.push_quote(t, 100.0, 100.0 + sp / 100.0, now_ms=t)
+    out = w.window(now_ms)
+    return list(out) if out is not None else None
+
+
+async def case_window_constants():
+    """30 s of 100 ms buckets, p10/p90, a 2 s tick -- single-sourced, sent."""
+    check((config.WALL_WINDOW_S, config.WALL_BUCKET_MS, config.WALL_BUCKETS,
+           config.WALL_PCT_LO, config.WALL_PCT_HI, config.WALL_TICK_S)
+          == (30, 100, 300, 10, 90, 2.0),
+          "the window is not 30 s of 100 ms buckets, p10/p90, a 2 s tick")
+    caps = WallRunner(recording_hub(), WallStore(Path("_unused.json"))).state()["caps"]
+    check(caps.get("window_s") == 30 and caps.get("pct_lo") == 10
+          and caps.get("pct_hi") == 90 and caps.get("tick_s") == 2.0,
+          f"the page is not told the window: {caps}")
+    js = JS.read_text(encoding="utf-8")
+    check("WL_RESORT_MS" not in js and "sortedAt" not in js,
+          "widest first still keeps a timer of its own")
+
+
+async def case_window_carries_forward():
+    """One quote, then twenty seconds of silence: every bucket holds it."""
+    t0 = bucket_aligned(-600_000)
+    w = WallSym()
+    w.push_quote(t0, 10.00, 10.55, now_ms=t0)
+    win = w.window(t0 + 20_000)
+    check(list(win) == [55, 55, 55] and w.filled == 201,
+          f"a name quoting once and sitting still read {win} over "
+          f"{w.filled} buckets; it is at 55c for every one of them")
+    win = w.window(t0 + 120_000)
+    check(list(win) == [55, 55, 55] and w.filled == config.WALL_BUCKETS,
+          f"two minutes later it read {win}: a standing quote never ages out")
+    check(len(w.ring) == config.WALL_BUCKETS, f"the ring grew to {len(w.ring)}")
+    check(WallSym().window(t0) is None, "a symbol with no quote has a window")
+
+
+async def case_window_is_time_weighted():
+    """The user's case: 20c most of the time, gapping to 65c a few seconds in
+    every thirty. Tight requotes furiously; wide stands still."""
+    t0 = bucket_aligned(-600_000)
+    quotes = [(t0 + k, 20) for k in range(0, 26_000, 20)]   # 1,300 at 20c
+    quotes.append((t0 + 26_000, 65))                         # ONE, 4 s at 65c
+    now = t0 + 29_999
+    got = fed(quotes, now)
+    check(got == [20, 20, 65],
+          f"20c requoting while tight, 65c standing for 4 s of 30, read "
+          f"{got}; p90 must see the 65c stretch at its full length (counted "
+          f"per quote it would read 20)")
+    # A flat 55 and an oscillating 20/57 are told apart by the bar.
+    flat = fed([(t0, 55)], now)
+    osc = fed([(t0 + k, 57 if (k // 1000) % 3 == 0 else 20)
+               for k in range(0, 30_000, 1000)], now)
+    check(flat == [55, 55, 55] and osc[0] == 20 and osc[1] == 20
+          and osc[2] == 57,
+          f"flat 55 read {flat}, 20c gapping to 57c read {osc}")
+    # The wide stretch leaves the window thirty seconds later.
+    later = fed(quotes + [(t0 + 30_000, 20)], t0 + 61_000)
+    check(later == [20, 20, 20],
+          f"31 s after the gap closed the window still read {later}")
+
+
+async def case_window_clock_is_clamped():
+    """A quote stamped ahead of this box goes in now's bucket; an older one
+    updates the newest bucket -- buckets never go backwards."""
+    B = config.WALL_BUCKET_MS
+    t0 = bucket_aligned(-600_000)
+    w = WallSym()
+    w.push_quote(t0, 10.00, 10.20, now_ms=t0)
+    w.push_quote(t0 + 5_000, 10.00, 10.80, now_ms=t0 + 1_000)   # skewed ahead
+    check(w.b_last == int((t0 + 1_000) // B),
+          "a quote stamped in the future was placed in the future")
+    w.push_quote(t0 + 200, 10.00, 10.40, now_ms=t0 + 1_050)     # arrives late
+    check(w.b_last == int((t0 + 1_000) // B) and w.cur == 40
+          and w.ring[w.b_last % config.WALL_BUCKETS] == 40,
+          "a late quote did not become the newest bucket's standing spread")
+    win = w.window(t0 + 1_999)
+    check(list(win) == [20, 20, 40] and w.filled == 20,
+          f"the window read {win} over {w.filled} buckets")
+
+
+async def case_window_matches_reference():
+    """Random feeds -- bursts inside one bucket, silences, gaps longer than
+    the window -- held to the brute-force sampler at random read times."""
+    import random
+    rng = random.Random(11)
+    bad, reads = [], 0
+    for trial in range(150):
+        t = bucket_aligned(-3_600_000) + rng.randrange(100)
+        quotes, w = [], WallSym()
+        for _ in range(rng.randrange(1, 120)):
+            t += rng.choice((1, 7, 40, 99, 100, 101, 350, 2_000, 9_000, 45_000))
+            sp = rng.choice((1, 2, 3, 5, 8, 13, 20, 35, 57, 80, 120, 0.5))
+            w.push_quote(t, 50.0, 50.0 + sp / 100.0, now_ms=t)
+            quotes.append((t, sp))
+            if rng.random() < 0.2:
+                now = t + rng.randrange(0, 40_000)
+                got, want = list(w.window(now)), reference_window(quotes, now)
+                reads += 1
+                if got != want:
+                    bad.append((trial, got, want))
+                t = max(t, now)
+        now = t + rng.randrange(0, 5_000)
+        got, want = list(w.window(now)), reference_window(quotes, now)
+        reads += 1
+        if got != want:
+            bad.append((trial, got, want))
+    check(reads > 300, f"only {reads} windows were compared")
+    check(not bad, f"{len(bad)} of {reads} windows differ from the reference, "
+                   f"e.g. {bad[:3]}")
 
 
 # ── the watchlist ───────────────────────────────────────────────────────────
@@ -527,7 +717,11 @@ const tail = `
                wlTier(100, 150, 120)];
   out.bars = [wlBarPct(60, 120), wlBarPct(120, 120), wlBarPct(300, 120),
               wlBarPct(null, 120), wlBarPct(60, 200)];
-  const sp = {MMM: 70, AAPL: 12, ZTS: 130, KO: null, BA: 70};
+  out.hi = [wlHi([20, 35, 57]), wlHi(null), wlHi([1, 2])];
+  out.range = [wlRange([30, 45, 60], 120), wlRange([55, 55, 55], 110),
+               wlRange([100, 200, 300], 120), wlRange(null, 120)];
+  const sp = {MMM: [10, 20, 70], AAPL: [12, 12, 12], ZTS: [5, 6, 130], KO: null,
+              BA: [60, 65, 70]};
   out.alpha = wlOrder(['ZTS', 'MMM', 'AAPL', 'KO', 'BA'], sp, false);
   out.widest = wlOrder(['ZTS', 'MMM', 'AAPL', 'KO', 'BA'], sp, true);
   out.shown = [wlShown('below', false, false), wlShown('below', true, false),
@@ -535,7 +729,6 @@ const tail = `
                wlShown('mid', true, false), wlShown('wide', true, false)];
   out.parse = wlParseSymbols('fdx, lly\\nNVDA fdx  BRK.B');
   out.fmt = [wlFmtSpread(7), wlFmtSpread(59.6), wlFmtSpread(null)];
-  out.resort = WL_RESORT_MS;
   globalThis.__out = out;
 `;
 eval(src + tail);
@@ -567,7 +760,13 @@ async def case_js_rows():
           f"hide-below-floor gives {o['shown']}; a marked row always shows")
     check(o["parse"] == ["FDX", "LLY", "NVDA"], f"parsed {o['parse']}")
     check(o["fmt"] == ["7.0", "60", "—"], f"formatted {o['fmt']}")
-    check(o["resort"] >= 1000, f"widest-first re-sorts every {o['resort']} ms")
+    check(o["hi"] == [57, None, None], f"p90 read as {o['hi']}")
+    r0, r1, r2, r3 = o["range"]
+    check(r0 == {"lo": 25, "width": 25, "mid": 37.5}
+          and r1 == {"lo": 50, "width": 0, "mid": 50}
+          and abs(r2["lo"] - 100 / 1.2) < 1e-9 and abs(r2["width"] - (100 - 100 / 1.2)) < 1e-9
+          and r2["mid"] == 100 and r3 is None,
+          f"range bars {o['range']}: p10..p90 on the wide scale, median between")
 
 
 async def case_the_page_markup():
@@ -589,8 +788,10 @@ async def case_the_page_markup():
     check(tmpl is not None, "the list does not iterate `order`")
     if tmpl:
         spans = re.findall(r'class="(wl-[a-z]+)"', tmpl.group(0))
-        check(spans == ["wl-row", "wl-tk", "wl-track", "wl-fill", "wl-cents"],
-              f"a row holds {spans}; ticker, bar and cents, nothing else")
+        check(spans == ["wl-row", "wl-tk", "wl-track", "wl-fill", "wl-med",
+                        "wl-cents"],
+              f"a row holds {spans}; ticker, range bar with its median "
+              f"tick, and cents, nothing else")
         check('@click="toggleMark(sym)"' in tmpl.group(0),
               "a row click does not toggle the mark")
     check("<canvas" not in html and "getContext" not in js,
@@ -631,7 +832,12 @@ CASES = [
     ("every quote taken",         case_every_quote_is_taken),
     ("crossed quotes dropped",    case_a_crossed_quote_is_dropped_and_counted),
     ("first frame is all",        case_first_frame_is_every_symbol),
-    ("frame is a delta",          case_frame_is_a_delta_of_spreads),
+    ("window constants",          case_window_constants),
+    ("window carries forward",    case_window_carries_forward),
+    ("window time-weighted",      case_window_is_time_weighted),
+    ("window clock clamped",      case_window_clock_is_clamped),
+    ("window = reference",        case_window_matches_reference),
+    ("frame is a delta",          case_frame_is_a_delta_of_windows),
     ("one socket, 300 rows",      case_one_socket_carries_300_rows),
     ("watchlist round-trips",     case_watchlist_round_trips),
     ("thresholds clamp",          case_thresholds_clamp_and_default),

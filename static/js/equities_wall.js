@@ -1,11 +1,21 @@
 /* Equities Wall — the whole watchlist as a rotation list.
  *
  * WHAT IT IS FOR (2026-11-06). The watchlist is swept in alphabetical order
- * and whatever currently clears a minimum spread gets worked. So each symbol
- * is ONE ROW — ticker | spread bar | spread in cents — and nothing else: no
- * price, no prints, no volume. It used to be a grid of small tapes, a hundred
- * to a page; nobody was reading the prints, so they went, and the server tier
- * now subscribes quotes only.
+ * and whatever gets wide enough, often enough, gets worked. So each symbol is
+ * ONE ROW — ticker | range bar | p90 in cents — and nothing else: no price,
+ * no prints, no volume. It used to be a grid of small tapes, a hundred to a
+ * page; nobody was reading the prints, so they went, and the server tier now
+ * subscribes quotes only.
+ *
+ * A WINDOW, NOT THE LATEST QUOTE (2026-11-09). The server keeps each symbol's
+ * spread over the last 30 s (time-weighted, live/wall.py) and sends
+ * [p10, median, p90]. The bar floats from p10 to p90 with a tick at the
+ * median; the number is p90; and EVERYTHING ELSE — the floor, the wide
+ * colour, hide below floor, widest first — compares p90, so the number read
+ * is the number that lit the row. The trader rests orders inside the spread
+ * and is filled when it gaps, so "how wide does it get" is the question, not
+ * "where does it sit". The window length and the percentiles live in
+ * live/config.py and arrive in the hello's caps; nothing here copies them.
  *
  * TOP TO BOTTOM, THEN THE NEXT COLUMN. The list is read beside the DAS
  * watchlist, which runs down. CSS multi-column (`column-width`) does that and
@@ -22,15 +32,17 @@
  * hidden.
  *
  * COST. One browser connection for the page (the service caps browsers at
- * 8). The server sends, four times a second, only the symbols whose spread
- * changed, and only those rows' bindings re-run.
+ * 8). The server sends, every two seconds, only the symbols whose window
+ * changed, and only those rows' bindings re-run. Widest first re-sorts on
+ * that same frame — no timer of its own.
  */
 'use strict';
 
-// Widest-first re-sorts this often, not on every frame. Four re-orders a
-// second is a list that never holds still long enough to read; two seconds
-// is still fresh for a sweep. Alphabetical never moves.
-const WL_RESORT_MS = 2000;
+
+/* The number every comparison uses: the window's p90 (its third value). */
+function wlHi(w) {
+  return (w && w.length === 3 && isFinite(w[2])) ? w[2] : null;
+}
 
 
 /* Which colour a spread gets. Below the floor wins over wide, so a floor set
@@ -44,23 +56,33 @@ function wlTier(sp, floor, wide) {
 }
 
 
-/* Bar length as a percentage of its track, scaled to the WIDE threshold:
- * at `wide` and above the bar is full. */
+/* A spread as a percentage of the track, scaled to the WIDE threshold: at
+ * `wide` and above it is the right-hand end. */
 function wlBarPct(sp, wide) {
   if (sp == null || !isFinite(sp) || !(wide > 0)) return 0;
   return Math.max(0, Math.min(100, (sp / wide) * 100));
 }
 
 
-/* The display order. Alphabetical, or widest spread first with the names
+/* The floating bar: from p10 to p90 on the common scale, the median's
+ * place, all in percent of the track. A flat name has lo == hi; the CSS
+ * gives the bar a minimum width so it shows as a stub there. */
+function wlRange(w, wide) {
+  if (wlHi(w) == null) return null;
+  const lo = wlBarPct(w[0], wide), hi = wlBarPct(w[2], wide);
+  return { lo, width: Math.max(0, hi - lo), mid: wlBarPct(w[1], wide) };
+}
+
+
+/* The display order. Alphabetical, or widest p90 first with the names
  * that have not quoted last; ties alphabetical, so equal spreads do not
  * trade places from one re-sort to the next. */
-function wlOrder(symbols, spreads, widest) {
+function wlOrder(symbols, windows, widest) {
   const alpha = symbols.slice().sort();
   if (!widest) return alpha;
   const v = (s) => {
-    const x = spreads[s];
-    return (x == null || !isFinite(x)) ? -Infinity : x;
+    const x = wlHi(windows[s]);
+    return x == null ? -Infinity : x;
   };
   return alpha.sort((a, b) => (v(b) - v(a)) || (a < b ? -1 : a > b ? 1 : 0));
 }
@@ -99,14 +121,14 @@ document.addEventListener('alpine:init', () => {
     // ── state ───────────────────────────────────────────────────────────
     entries: [],              // [{symbol, scale}] — the server's list, as held
     settings: { min_spread_cents: 59, wide_cents: 120 },
-    caps: { symbols: 300, tick_s: 0.25, floor_min: 10, floor_max: 120,
-            wide_min: 40, wide_max: 300, wide_step: 5 },
-    sp: {},                   // sym -> spread in cents, or null
+    caps: { symbols: 300, tick_s: 2, window_s: 30, pct_lo: 10, pct_hi: 90,
+            floor_min: 10, floor_max: 120, wide_min: 40, wide_max: 300,
+            wide_step: 5 },
+    sp: {},                   // sym -> [p10, median, p90] in cents, or null
     marks: {},                // sym -> true; this page session only
     order: [],                // symbols in display order
     widest: false,            // the sort toggle; alphabetical on load
     hideBelow: false,         // off on load: rows hold their place
-    sortedAt: 0,
 
     connected: false,
     warning: '',
@@ -162,7 +184,8 @@ document.addEventListener('alpine:init', () => {
     onTick(m) {
       this.lastTick = Date.now();
       for (const [sym, v] of Object.entries(m.syms || {})) this.sp[sym] = v;
-      if (this.widest && Date.now() - this.sortedAt >= WL_RESORT_MS) this.resort();
+      // On the frame itself: the frame is the two-second clock.
+      if (this.widest) this.resort();
     },
 
     resort() {
@@ -172,12 +195,11 @@ document.addEventListener('alpine:init', () => {
       if (next.length !== this.order.length || next.some((s, i) => s !== this.order[i])) {
         this.order = next;
       }
-      this.sortedAt = Date.now();
     },
 
     // ── rows ────────────────────────────────────────────────────────────
     tierOf(sym) {
-      return wlTier(this.sp[sym], this.settings.min_spread_cents,
+      return wlTier(wlHi(this.sp[sym]), this.settings.min_spread_cents,
                     this.settings.wide_cents);
     },
 
@@ -188,11 +210,40 @@ document.addEventListener('alpine:init', () => {
         + (wlShown(tier, this.hideBelow, marked) ? '' : ' gone');
     },
 
+    // Plain percentages: these re-run for every changed row on every frame,
+    // and a calc() in each string measurably slowed a full 300-row frame.
+    // Only a stub at the very end (p10 at or past `wide`) is pulled back
+    // inside the track.
     barStyle(sym) {
-      return 'width:' + wlBarPct(this.sp[sym], this.settings.wide_cents).toFixed(1) + '%';
+      const r = wlRange(this.sp[sym], this.settings.wide_cents);
+      if (!r) return 'display:none';
+      if (r.lo >= 97) return 'left:calc(100% - 3px);width:0';
+      return 'left:' + r.lo.toFixed(1) + '%;width:' + r.width.toFixed(1) + '%';
     },
 
-    spText(sym) { return wlFmtSpread(this.sp[sym]); },
+    tickStyle(sym) {
+      const r = wlRange(this.sp[sym], this.settings.wide_cents);
+      if (!r) return 'display:none';
+      if (r.mid >= 98) return 'left:calc(100% - 2px)';
+      return 'left:' + r.mid.toFixed(1) + '%';
+    },
+
+    spText(sym) { return wlFmtSpread(wlHi(this.sp[sym])); },
+
+    rowTitle(sym) {
+      const w = this.sp[sym];
+      const c = this.caps;
+      if (wlHi(w) == null) return sym + ': no quote yet';
+      return sym + ' over the last ' + c.window_s + ' s: p' + c.pct_lo + ' '
+        + wlFmtSpread(w[0]) + '¢ · median ' + wlFmtSpread(w[1]) + '¢ · p'
+        + c.pct_hi + ' ' + wlFmtSpread(w[2]) + '¢';
+    },
+
+    legend() {
+      const c = this.caps;
+      return 'bar p' + c.pct_lo + '–p' + c.pct_hi + ' of the last ' + c.window_s
+        + ' s · tick median · number p' + c.pct_hi;
+    },
 
     toggleMark(sym) {
       if (this.marks[sym]) delete this.marks[sym];
@@ -263,7 +314,7 @@ document.addEventListener('alpine:init', () => {
       const fl = this.settings.min_spread_cents, wd = this.settings.wide_cents;
       let ok = 0, wide = 0;
       for (const e of this.entries) {
-        const t = wlTier(this.sp[e.symbol], fl, wd);
+        const t = wlTier(wlHi(this.sp[e.symbol]), fl, wd);
         if (t === 'mid' || t === 'wide') ok++;
         if (t === 'wide') wide++;
       }
@@ -275,7 +326,9 @@ document.addEventListener('alpine:init', () => {
       void this.clock;
       const age = this.lastTick ? (Date.now() - this.lastTick) / 1000 : null;
       const c = this.counts();
-      const stale = (age != null && age > 4) ? ` · last frame ${age.toFixed(0)}s ago` : '';
+      // Two missed frames before it says so.
+      const late = Math.max(4, 2.5 * (this.caps.tick_s || 2));
+      const stale = (age != null && age > late) ? ` · last frame ${age.toFixed(0)}s ago` : '';
       return `${this.entries.length} symbols · ${c.ok} ≥ floor · ${c.wide} wide`
              + (c.marked ? ` · ${c.marked} marked` : '') + ' · one connection' + stale;
     },

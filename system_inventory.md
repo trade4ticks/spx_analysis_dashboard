@@ -579,7 +579,7 @@ and a second evicts the first, so all three pages share it as tiers:
 |---|---|---|
 | pane | every field of every trade and quote, 15 min | `MAX_SYMBOLS` 8 |
 | scan | trades as three float64 arrays, 6 min, + a spread accumulator | `SCAN_MAX_SYMBOLS` 600 |
-| wall | QUOTES ONLY (Q channel); the last quote a symbol | `WALL_MAX_SYMBOLS` 300 |
+| wall | QUOTES ONLY (Q channel); a 30 s spread window a symbol (300 × 100 ms buckets) | `WALL_MAX_SYMBOLS` 300 |
 
 `Hub._wants(sym)` is the single place answering "which channels does this
 symbol still need" (pane/scan → T+Q, wall only → Q), and every add and drop
@@ -603,7 +603,7 @@ wall carries **all** its rows over the single `/wall/ws`.
 | WS | `/scan/ws` | |
 | GET | `/wall` | Equities Wall — watching only; `check_wall` refuses any broker reference from the wall's modules or endpoints |
 | GET/POST | `/wall/watchlist` | R/W `data/wall_watchlist.json` |
-| WS | `/wall/ws` | **One connection for the whole page**; a frame every 250 ms carrying only the symbols whose spread changed |
+| WS | `/wall/ws` | **One connection for the whole page**; a frame every 2 s carrying only the symbols whose [p10, median, p90] over the last 30 s changed |
 | WS | `/ws` | The pane's tape |
 
 Brokers sit behind an interface: **`live/broker.py` is the façade** and owns

@@ -1589,7 +1589,7 @@ when the endpoint's 600-row `limit` cut the table short it asks again with
 ## Equities Wall (`/wall`) — a rotation list (2026-11-06)
 
 The whole watchlist (up to `WALL_MAX_SYMBOLS` 300) on ONE page, one row per
-symbol: **ticker | spread bar | spread in cents**, nothing else — no price,
+symbol: **ticker | range bar | p90 in cents**, nothing else — no price,
 prints, volume, sparkline or stale-quote marker. It replaced the grid of
 small tapes (100 a page): the user sweeps the list alphabetically and works
 whatever clears a minimum spread, and nobody was reading the prints. **It is
@@ -1605,17 +1605,38 @@ for watching** — no broker reference anywhere (gated).
   reads as 59) and `wide_cents` (40–300 step 5, default 120). Below floor →
   dimmed 0.3 IN PLACE (`--dim` bar); floor..wide → tape blue; ≥ wide → tape
   pink (`TAPE_BLUE`/`TAPE_PINK` from `tape_theme.js`, set as CSS vars). Below
-  the floor wins when floor > wide. Bar length = spread / wide, full at wide.
-  The slider ranges must equal `WALL_FLOOR_*` / `WALL_WIDE_*` (check_wall).
-- **Colour is from the CURRENT spread**, no median and no dim hold (the tape
-  wall's 10-second hold went with it). Ask before adding smoothing back.
+  the floor wins when floor > wide. The slider ranges must equal
+  `WALL_FLOOR_*` / `WALL_WIDE_*` (check_wall).
+- **A 30-SECOND WINDOW, DRIVEN BY ITS p90 (2026-11-09, the user's spec).**
+  The latest quote made rows flash (20c, 57c, 35c, four repaints a second).
+  The user rests limit orders inside the spread and is filled when it GAPS,
+  so the question is "how wide does it get, often enough to catch" — a
+  name at 20c that gaps to 57c a few seconds in thirty is a good one, and a
+  mean or median (~35c) would dim it under a 59c floor. So: per symbol, a
+  ring of `WALL_BUCKETS` (300) buckets of `WALL_BUCKET_MS` (100 ms), each
+  the spread STANDING AT ITS END, CARRIED FORWARD through silence (a quote is
+  a step function; empty buckets would make quiet names vanish) — so it is
+  TIME-weighted, not quote-weighted. p10 / median / p90 are nearest-rank (a
+  spread that actually stood). The row: a bar FLOATING from p10 to p90 on
+  the common scale (wide = right-hand end; a flat name is a 3 px stub), a
+  2 px `--text` tick at the median, the number p90. **The floor, the wide
+  colour, hide below floor and widest first all compare p90** — the number
+  read is the number that lit the row. `WALL_WINDOW_S` 30, `WALL_PCT_LO/HI`
+  10/90 are the user's STARTING values, single-sourced in live/config.py and
+  sent in the hello's caps (the page copies nothing); no UI control, by
+  decision. **No dim delay or hysteresis**: the window is the smoothing, one
+  mechanism. The tape wall's one-minute median (removed in d56f7b9) is the
+  wrong statistic and stays gone. A dead feed carries its last spread
+  forward — correct, that quote still stands. Clock: a quote is bucketed by
+  its own timestamp clamped to [newest bucket, arrival]; the ring is rolled
+  to the wall clock when read.
 - **Marks**: a click toggles green (`--success`); "made money today". Memory
   only — no table, endpoint or browser storage (gated); a marked row is never
   dimmed or hidden.
 - **Hide below floor**: off on load; drops dim rows (not marked ones), the
-  rest reflow. **Sort**: A→Z on load; widest first re-sorts every
-  `WL_RESORT_MS` (2 s), ties alphabetical, unquoted last — re-ordering on
-  every frame never holds still long enough to read.
+  rest reflow. **Sort**: A→Z on load; widest first (by p90) re-sorts on
+  every frame — the frame IS the 2 s clock, no timer of its own — ties
+  alphabetical, unquoted last.
 - **Removed**: pages and `WALL_PER_PAGE`, pane width, window, spread share,
   the per-pane scale override and its controls, the tape rings and sampling.
   An entry's old `scale` is CARRIED unused in the file (`clean_scale`) so the
@@ -1630,16 +1651,31 @@ sends `T.` alone and closing drops `T.` alone (Q stays for the wall); the scan
 likewise. Before this every tier took both channels and a pane on a wall
 symbol sent nothing. `tier_in["wall"]` trades stay 0.
 
-**Server**: `WallSym` holds the last two-sided quote only (crossed/one-sided
-dropped and counted); every quote taken, nothing sampled. `WallRunner` ticks
-every `WALL_TICK_S` 0.25 s; a frame is `{ev:"tick", at, syms:{sym: cents|null}}`
-with only the symbols whose spread (cents, 2 dp) differs from what THAT socket
-was last sent; a new socket gets all; the frame goes out even when empty. 250 ms
-because a busy name requotes ~50/s and faster is flicker; it is not a CPU
-limit. Measured (`measure_wall_capacity.py`, 300 symbols, ~8,100 quotes/s —
-the 300 busiest names): ingest ~18 ms/s, frames ~0.6 ms/s, ~2% of a core here,
-~4% on the VPS. Browser (`check_wall_ui`): a tick changing all 300 rows ~31 ms
-through Alpine's flush, a 40-row tick under 1 ms.
+**Server**: `WallSym` holds the window and the last two-sided quote
+(crossed/one-sided dropped and counted — the previous spread goes on
+standing); every quote taken, nothing sampled. `WallRunner` ticks every
+`WALL_TICK_S` **2 s** (was 0.25 s; not slower, the user's call — a name just
+opening up must show); it computes every window ONCE a tick (`windows()`)
+and each socket's frame is `{ev:"tick", at, syms:{sym: [p10, median, p90] |
+null}}` with only the symbols whose window differs from what THAT socket was
+last sent; a new socket gets all, immediately on connect; the frame goes out
+even when empty. Whole cents go as ints. **Wire, as Starlette sends it
+(compact JSON): 17 bytes a symbol (`"AAPL":[20,35,57]`) against 11
+(`"AAPL":57.0`)**; all 300 changing is ~5.4 KB a frame every 2 s, against
+~3.6 KB four times a second before. Measured (`measure_wall_capacity.py`,
+300 symbols, ~8,100 quotes/s — the 300 busiest names — spreads jumping 1–4×
+so the windows move): ingest ~27 ms/s (was ~18: the ring write), windows +
+frame ~3.5 ms/s, ~3% of a core here, ~6% on the VPS. Browser
+(`check_wall_ui`): a tick changing all 300 rows ~46–59 ms through Alpine's
+flush (was ~29–44: the tick element and two style strings a row; the row's
+hover text is set on mouseenter, not bound, which saved ~20 ms), but one
+every 2 s instead of four a second. Gates: `check_wall` holds the window
+to a brute-force step-function sampler on random feeds (bursts, silences,
+gaps longer than the window), plus the carry-forward, time-weighting and
+clock cases; planted quote-weighting and empty buckets each fail it.
+`check_wall_ui` measures the floating bar, the tick and the number from the
+rendered rows, and holds the user's two cases: 20c gapping to 65c is lit
+and kept by hide-below-floor, a flat 55c is a dimmed stub.
 
 The watchlist is server-side (`data/wall_watchlist.json`, written whole via a
 temp file and rename); `WallRunner.apply()` is the one path that sets the hub

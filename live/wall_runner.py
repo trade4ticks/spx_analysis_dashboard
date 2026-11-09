@@ -1,12 +1,13 @@
-"""The wall's clock and fan-out: four frames a second, one socket a page.
+"""The wall's clock and fan-out: a frame every two seconds, one socket a page.
 
 ONE SOCKET A PAGE. The service caps browser connections at MAX_CLIENTS, so
 the page opens one connection and this pushes every row down it.
 
-WHAT GOES DOWN THE WIRE IS A DELTA, per socket: the symbols whose spread, in
-cents, differs from what THAT socket was last sent. A quote that moves the
-bid and the ask together changes nothing on the page and is not sent. A new
-socket is sent every symbol once, a null for one that has not quoted yet.
+WHAT GOES DOWN THE WIRE IS A DELTA, per socket: the symbols whose window --
+[p10, median, p90] in cents over the last WALL_WINDOW_S -- differs from what
+THAT socket was last sent. A new socket is sent every symbol once, a null for
+one that has not quoted yet. The windows are computed ONCE per tick (a sort
+of 300 buckets a symbol) and every socket's delta is taken from them.
 
 THE FRAME STILL GOES OUT EVERY TICK, empty if it has to, because a page that
 cannot tell "nothing changed" from "the feed stopped" is the failure this
@@ -80,6 +81,9 @@ class WallRunner:
         st["held"] = sorted(self.hub.wall)
         st["caps"] = {"symbols": config.WALL_MAX_SYMBOLS,
                       "tick_s": config.WALL_TICK_S,
+                      "window_s": config.WALL_WINDOW_S,
+                      "pct_lo": config.WALL_PCT_LO,
+                      "pct_hi": config.WALL_PCT_HI,
                       "floor_min": config.WALL_FLOOR_MIN,
                       "floor_max": config.WALL_FLOOR_MAX,
                       "wide_min": config.WALL_WIDE_MIN,
@@ -107,28 +111,39 @@ class WallRunner:
         now = time.time()
         self.ticks += 1
         self.last_at = now
+        wins = self.windows(now)
         dead = []
         for ws, st in list(self._subs.items()):
             try:
-                await ws.send_json(self.frame(st, now))
+                await ws.send_json(self.frame(st, now, wins))
                 self.frames += 1
             except Exception:                             # noqa: BLE001
                 dead.append(ws)
         for d in dead:
             self._subs.pop(d, None)
 
-    def frame(self, st: dict, now: float | None = None) -> dict:
-        """One socket's delta: {sym: spread in cents, or null}.
+    def windows(self, now: float | None = None) -> dict:
+        """{sym: [p10, median, p90] in cents, or None}, every held symbol."""
+        now_ms = (time.time() if now is None else now) * 1000.0
+        out = {}
+        for sym, w in list(self.hub.wall.items()):
+            win = w.window(now_ms)
+            out[sym] = list(win) if win is not None else None
+        return out
+
+    def frame(self, st: dict, now: float | None = None,
+              wins: dict | None = None) -> dict:
+        """One socket's delta: {sym: [p10, median, p90], or null}.
 
         `sent` is advanced HERE, as the frame is built. There is no
         acknowledgement to wait for, and advancing it later would drop
         whatever changed in between.
         """
         now = time.time() if now is None else now
+        wins = self.windows(now) if wins is None else wins
         sent = st["sent"]
         out = {}
-        for sym, w in list(self.hub.wall.items()):
-            sp = w.spread_cents()
+        for sym, sp in wins.items():
             if sent.get(sym, _UNSENT) == sp:
                 continue
             sent[sym] = sp
