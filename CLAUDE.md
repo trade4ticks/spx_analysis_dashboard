@@ -1589,7 +1589,7 @@ when the endpoint's 600-row `limit` cut the table short it asks again with
 ## Equities Wall (`/wall`) — a rotation list (2026-11-06)
 
 The whole watchlist (up to `WALL_MAX_SYMBOLS` 300) on ONE page, one row per
-symbol: **ticker | range bar | p90 in cents**, nothing else — no price,
+symbol: **ticker | spread bar | p90 in cents**, nothing else — no price,
 prints, volume, sparkline or stale-quote marker. It replaced the grid of
 small tapes (100 a page): the user sweeps the list alphabetically and works
 whatever clears a minimum spread, and nobody was reading the prints. **It is
@@ -1617,9 +1617,20 @@ for watching** — no broker reference anywhere (gated).
   the spread STANDING AT ITS END, CARRIED FORWARD through silence (a quote is
   a step function; empty buckets would make quiet names vanish) — so it is
   TIME-weighted, not quote-weighted. p10 / median / p90 are nearest-rank (a
-  spread that actually stood). The row: a bar FLOATING from p10 to p90 on
-  the common scale (wide = right-hand end; a flat name is a 3 px stub), a
-  2 px `--text` tick at the median, the number p90. **The floor, the wide
+  spread that actually stood). The row: a bar ANCHORED AT ZERO running to
+  p90 on the common scale (wide = right-hand end), the row's colour at 34%
+  up to p10 and full strength from p10 to p90 (22% below the floor, unless
+  marked — a marked row is never dimmed), a 2 px `--text` tick at the
+  median, the number p90. Long = wide, mostly dim = steady, mostly bright =
+  jumpy. The bright part is never under 0.6% of the track
+  (`WL_MIN_BRIGHT_PCT`), so a flat name keeps a sliver. **It first shipped
+  FLOATING from p10 to p90 (425dbf0) and was reversed the same day, by the
+  user**: length encoded variability, so a name steady at a dollar was a
+  hairline and a jumpy 20–57c name a fat bar — the eye went to the wrong
+  rows. Both segments are ONE element's `linear-gradient` (`--c` the tier
+  colour, `--a` the dim strength, `--p` the p10 boundary as a share of the
+  fill), not two elements: a second element is a third binding on every
+  row, every frame. **The floor, the wide
   colour, hide below floor and widest first all compare p90** — the number
   read is the number that lit the row. `WALL_WINDOW_S` 30, `WALL_PCT_LO/HI`
   10/90 are the user's STARTING values, single-sourced in live/config.py and
@@ -1669,13 +1680,23 @@ frame ~3.5 ms/s, ~3% of a core here, ~6% on the VPS. Browser
 (`check_wall_ui`): a tick changing all 300 rows ~46–59 ms through Alpine's
 flush (was ~29–44: the tick element and two style strings a row; the row's
 hover text is set on mouseenter, not bound, which saved ~20 ms), but one
-every 2 s instead of four a second. Gates: `check_wall` holds the window
+every 2 s instead of four a second. **Its render limits are budgets, not
+measurements** (the user's rule: a gate that fails at random stops being
+trusted): a full 300-row repaint under 20% of the 2 s frame (400 ms) at the
+MEDIAN, a 40-row tick under 50 ms at the median; the worst sample is
+printed, never asserted. Under the parallel suite the full repaint ran
+90–110 ms median with single runs past 300 ms, and the old limits (100 ms
+median, 50 ms WORST) failed now and then. Gates: `check_wall` holds the window
 to a brute-force step-function sampler on random feeds (bursts, silences,
 gaps longer than the window), plus the carry-forward, time-weighting and
 clock cases; planted quote-weighting and empty buckets each fail it.
-`check_wall_ui` measures the floating bar, the tick and the number from the
-rendered rows, and holds the user's two cases: 20c gapping to 65c is lit
-and kept by hide-below-floor, a flat 55c is a dimmed stub.
+`check_wall_ui` measures the bar (starts at 0, ends at p90, boundary at
+p10 from the computed gradient, both segments' colour and dim strength),
+the tick and the number from the rendered rows, and holds the user's cases:
+20c gapping to 65c is lit and kept by hide-below-floor; a name steady at $1
+draws longer than it and mostly dim; a flat 55c keeps its 0.6% sliver.
+Planted: a floating bar, no 22% below the floor, no minimum sliver — each
+fails it.
 
 The watchlist is server-side (`data/wall_watchlist.json`, written whole via a
 temp file and rename); `WallRunner.apply()` is the one path that sets the hub

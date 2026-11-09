@@ -71,21 +71,28 @@
     }
     .wl-row:hover { background:rgba(255,255,255,0.05); }
     .wl-tk { color:var(--text); font-weight:700; overflow:hidden; }
-    /* THE RANGE BAR (2026-11-09): it FLOATS from p10 to p90 of the last
-       30 s on the common scale (wide = the right-hand end), with a tick at
-       the median. A flat name is a stub (min-width), not nothing; left is
-       capped so a stub past `wide` stays inside the track. */
+    /* THE BAR (2026-11-09), ANCHORED AT ZERO: the fill runs 0 -> p90 of the
+       last 30 s on the common scale (wide = the right-hand end). 0 -> p10 is
+       the row's colour at --a (34%), p10 -> p90 at full strength; the
+       boundary is --p, set per row. Long = wide, mostly dim = steady, mostly
+       bright = jumpy. The median tick sits over it. --c is the tier colour. */
     .wl-track { position:relative; height:8px; background:rgba(255,255,255,0.05);
                 border-radius:2px; overflow:hidden; }
-    .wl-fill { position:absolute; top:0; bottom:0; min-width:3px;
-               border-radius:2px; background:var(--dim); }
+    .wl-fill { --c:var(--dim); --a:34%; --p:0%;
+               position:absolute; top:0; bottom:0; left:0; border-radius:2px;
+               background:linear-gradient(to right,
+                 color-mix(in srgb, var(--c) var(--a), transparent) var(--p),
+                 var(--c) var(--p)); }
     .wl-med { position:absolute; top:0; bottom:0; width:2px;
               background:var(--text); }
     .wl-cents { text-align:right; color:var(--text); }
     /* The bar colours are the TAPE's blue and pink (tape_theme.js, set as
        --wl-mid / --wl-wide in init), not copies of them. */
-    .wl-row.mid  .wl-fill { background:var(--wl-mid); }
-    .wl-row.wide .wl-fill { background:var(--wl-wide); }
+    .wl-row.mid  .wl-fill { --c:var(--wl-mid); }
+    .wl-row.wide .wl-fill { --c:var(--wl-wide); }
+    /* Below the floor the steady part recedes further, so the whole row
+       still drops back (a marked row is never dimmed, so it keeps 34%). */
+    .wl-row.below:not(.marked) .wl-fill { --a:22%; }
     /* BELOW THE FLOOR: dimmed in place. A marked row is never dimmed. */
     .wl-row.below:not(.marked), .wl-row.none:not(.marked) { opacity:0.3; }
     .wl-row.marked { background:rgba(46,204,113,0.22); }
@@ -162,7 +169,7 @@
         <div class="wl-empty" x-text="emptyMessage()"></div>
       </template>
       <!-- Click a row to mark it green; click it again to clear. A row is
-           ticker | p10–p90 bar with a median tick | p90 in cents. -->
+           ticker | 0–p90 bar, bright from p10, median tick | p90 in cents. -->
       <div class="wl-list" x-ref="list">
         <template x-for="sym in order" :key="sym">
           <div class="wl-row" :class="rowClass(sym)" :data-sym="sym"

@@ -9,8 +9,11 @@
  *
  * A WINDOW, NOT THE LATEST QUOTE (2026-11-09). The server keeps each symbol's
  * spread over the last 30 s (time-weighted, live/wall.py) and sends
- * [p10, median, p90]. The bar floats from p10 to p90 with a tick at the
- * median; the number is p90; and EVERYTHING ELSE — the floor, the wide
+ * [p10, median, p90]. The bar runs from ZERO to p90, dim up to p10 and
+ * full colour from p10 to p90, with a tick at the median (2026-11-09: a
+ * floating p10..p90 bar drew a name steady at a dollar wide as a hairline
+ * and a jumpy 20-57c name as a fat bar). Long = wide, mostly dim = steady,
+ * mostly bright = jumpy. The number is p90; and EVERYTHING ELSE — the floor, the wide
  * colour, hide below floor, widest first — compares p90, so the number read
  * is the number that lit the row. The trader rests orders inside the spread
  * and is filled when it gaps, so "how wide does it get" is the question, not
@@ -64,13 +67,19 @@ function wlBarPct(sp, wide) {
 }
 
 
-/* The floating bar: from p10 to p90 on the common scale, the median's
- * place, all in percent of the track. A flat name has lo == hi; the CSS
- * gives the bar a minimum width so it shows as a stub there. */
+/* The bright segment is never narrower than this, in percent of the track,
+ * so a perfectly flat name (p10 == p90) still shows a sliver at p90. */
+const WL_MIN_BRIGHT_PCT = 0.6;
+
+
+/* The anchored bar, in percent of the track: the fill runs 0 -> hi (p90);
+ * dim 0 -> split, full colour split -> hi, where split is p10 pulled left
+ * far enough to leave the minimum bright sliver; the median tick at mid. */
 function wlRange(w, wide) {
   if (wlHi(w) == null) return null;
   const lo = wlBarPct(w[0], wide), hi = wlBarPct(w[2], wide);
-  return { lo, width: Math.max(0, hi - lo), mid: wlBarPct(w[1], wide) };
+  const split = Math.max(0, Math.min(lo, hi - WL_MIN_BRIGHT_PCT));
+  return { hi, split, mid: wlBarPct(w[1], wide) };
 }
 
 
@@ -210,15 +219,16 @@ document.addEventListener('alpine:init', () => {
         + (wlShown(tier, this.hideBelow, marked) ? '' : ' gone');
     },
 
-    // Plain percentages: these re-run for every changed row on every frame,
-    // and a calc() in each string measurably slowed a full 300-row frame.
-    // Only a stub at the very end (p10 at or past `wide`) is pulled back
-    // inside the track.
+    // ONE element for both segments: the fill's width is p90, and --p (the
+    // p10 boundary as a share of the FILL) is where its gradient turns from
+    // dim to full colour. A second element would be a third binding on
+    // every row, re-run on every frame. Plain percentages: a calc() in each
+    // string measurably slowed a full 300-row frame.
     barStyle(sym) {
       const r = wlRange(this.sp[sym], this.settings.wide_cents);
       if (!r) return 'display:none';
-      if (r.lo >= 97) return 'left:calc(100% - 3px);width:0';
-      return 'left:' + r.lo.toFixed(1) + '%;width:' + r.width.toFixed(1) + '%';
+      const p = r.hi > 0 ? r.split / r.hi * 100 : 0;
+      return 'width:' + r.hi.toFixed(2) + '%;--p:' + p.toFixed(2) + '%';
     },
 
     tickStyle(sym) {
@@ -241,8 +251,8 @@ document.addEventListener('alpine:init', () => {
 
     legend() {
       const c = this.caps;
-      return 'bar p' + c.pct_lo + '–p' + c.pct_hi + ' of the last ' + c.window_s
-        + ' s · tick median · number p' + c.pct_hi;
+      return 'bar to p' + c.pct_hi + ' of the last ' + c.window_s + ' s, bright from p'
+        + c.pct_lo + ' · tick median · number p' + c.pct_hi;
     },
 
     toggleMark(sym) {

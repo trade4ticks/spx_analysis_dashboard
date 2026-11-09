@@ -762,11 +762,12 @@ async def case_js_rows():
     check(o["fmt"] == ["7.0", "60", "—"], f"formatted {o['fmt']}")
     check(o["hi"] == [57, None, None], f"p90 read as {o['hi']}")
     r0, r1, r2, r3 = o["range"]
-    check(r0 == {"lo": 25, "width": 25, "mid": 37.5}
-          and r1 == {"lo": 50, "width": 0, "mid": 50}
-          and abs(r2["lo"] - 100 / 1.2) < 1e-9 and abs(r2["width"] - (100 - 100 / 1.2)) < 1e-9
+    check(r0 == {"hi": 50, "split": 25, "mid": 37.5}
+          and r1["hi"] == 50 and abs(r1["split"] - 49.4) < 1e-9 and r1["mid"] == 50
+          and r2["hi"] == 100 and abs(r2["split"] - 100 / 1.2) < 1e-9
           and r2["mid"] == 100 and r3 is None,
-          f"range bars {o['range']}: p10..p90 on the wide scale, median between")
+          f"bars {o['range']}: 0 -> p90 on the wide scale, bright from p10 "
+          f"(a flat name keeps a 0.6% sliver), median between")
 
 
 async def case_the_page_markup():
