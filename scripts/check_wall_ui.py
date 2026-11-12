@@ -257,6 +257,40 @@ DRIVER = r"""
     await Alpine.nextTick(); await frameDone();
     out.backToAlpha = rows().map(r => r.dataset.sym).join() === syms.join();
 
+    // ── export (CLICKED) ───────────────────────────────────────────────
+    // The download is caught at the blob and the anchor's click. Taken A-Z
+    // with hide off, then widest-first with hide ON and an above-floor row
+    // marked: symBelow stays marked throughout and must never appear.
+    mark('export');
+    const got = [];
+    let lastBlob = null;
+    const realURL = URL.createObjectURL, realClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = (b) => { lastBlob = b; return 'blob:gate'; };
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.download) got.push({name: this.download, blob: lastBlob}); else realClick.call(this);
+    };
+    const exportBtn = () => document.querySelector('.wl-export');
+    out.exportDisabled = exportBtn().disabled;
+    exportBtn().click();
+    document.querySelector('input[type=checkbox]').click();
+    document.querySelector('.wl-sort').click();
+    row(out.symMid).click();
+    await Alpine.nextTick(); await frameDone();
+    out.exportShownWide = rows().map(r => r.dataset.sym);
+    exportBtn().click();
+    URL.createObjectURL = realURL; HTMLAnchorElement.prototype.click = realClick;
+    out.exports = [];
+    for (const g of got) {
+      const buf = new Uint8Array(await g.blob.arrayBuffer());
+      out.exports.push({name: g.name, type: g.blob.type, text: await g.blob.text(),
+                        head: [...buf.slice(0, 3)]});
+    }
+    out.anchorsLeft = document.querySelectorAll('a[download]').length;
+    row(out.symMid).click();
+    document.querySelector('.wl-sort').click();
+    document.querySelector('input[type=checkbox]').click();
+    await Alpine.nextTick(); await frameDone();
+
     // ── live updates: one row's number changes in place ────────────────
     mark('update');
     paused = false;
@@ -457,6 +491,32 @@ def main() -> int:
               f"{tag} widest first is not descending down the columns: "
               f"{o['wideOrder'][:5]} / {o['sortLabel2']}")
         check(o["backToAlpha"], f"{tag} the second click did not restore A-Z")
+        # EXPORT: the rows at or above the 59c floor, in the order shown,
+        # marks and hide-below-floor irrelevant; one ticker a line, no
+        # header, no BOM; named on the Eastern clock.
+        ex = o.get("exports") or []
+        above = [s for s in syms if p90_of(s) is not None and p90_of(s) >= 59]
+        widest = sorted(above, key=lambda s: (-p90_of(s), s))
+        shown_wide = [s for s in o.get("exportShownWide", []) if s in set(above)]
+        check(len(ex) == 2 and not o["exportDisabled"],
+              f"{tag} two clicks gave {len(ex)} downloads (disabled "
+              f"{o.get('exportDisabled')})")
+        if len(ex) == 2:
+            a_rows, w_rows = (e["text"].split("\r\n") for e in ex)
+            check(a_rows[-1] == "" and a_rows[:-1] == above,
+                  f"{tag} the A-Z export is {a_rows[:4]}... ({len(a_rows) - 1}); "
+                  f"want the {len(above)} at or above 59c, alphabetical")
+            check(w_rows[-1] == "" and w_rows[:-1] == widest == shown_wide,
+                  f"{tag} the widest-first export is {w_rows[:4]}...; want "
+                  f"{widest[:4]}... as shown on screen")
+            check(o["symBelow"] not in a_rows + w_rows and o["symMid"] in w_rows,
+                  f"{tag} a mark changed what was exported")
+            for e in ex:
+                check(re.fullmatch(r"wall_\d{4}-\d\d-\d\d_\d{4}\.csv", e["name"])
+                      and e["head"] != [0xEF, 0xBB, 0xBF] and e["type"] == "text/csv"
+                      and "," not in e["text"] and '"' not in e["text"],
+                      f"{tag} export file {e['name']!r} {e['type']} head {e['head']}")
+        check(o.get("anchorsLeft") == 0, f"{tag} the download link was left in the page")
         check(o["updated"] == "99", f"{tag} a tick did not update the row: {o['updated']}")
         check(not o["sends"], f"{tag} the page sent {o['sends']} on its socket")
         # RENDER BUDGETS, set from what the page must do, not from a

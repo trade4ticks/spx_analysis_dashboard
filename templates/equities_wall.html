@@ -148,6 +148,13 @@
                 x-text="widest ? 'widest first' : 'A → Z'"
                 title="Alphabetical, or widest p90 first (re-sorted on every frame)"></button>
       </div>
+      <div class="wl-grp sep">
+        <!-- The rows clearing the floor, in the order shown, one ticker a
+             line: pasted straight into a DAS watchlist. -->
+        <button class="wl-btn wl-export" @click="exportCsv()"
+                :disabled="!counts().ok"
+                :title="counts().ok ? 'Download the ' + counts().ok + ' symbols at or above the floor, in the order shown' : 'Nothing is at or above the floor'">Export CSV</button>
+      </div>
 
       <span class="wl-spacer"></span>
       <span class="wl-note" x-text="legend()"></span>

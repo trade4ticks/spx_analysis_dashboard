@@ -729,6 +729,17 @@ const tail = `
                wlShown('mid', true, false), wlShown('wide', true, false)];
   out.parse = wlParseSymbols('fdx, lly\\nNVDA fdx  BRK.B');
   out.fmt = [wlFmtSpread(7), wlFmtSpread(59.6), wlFmtSpread(null)];
+  // Export: displayed order kept, floor inclusive, unquoted out, the floor
+  // test winning over wide when set above it.
+  const esp = {ZTS: [5, 6, 130], MMM: [10, 20, 59], AAPL: [12, 12, 58.9], KO: null,
+               BA: [60, 65, 70]};
+  out.exp = [wlExportSymbols(['ZTS', 'BA', 'MMM', 'AAPL', 'KO'], esp, 59, 120),
+             wlExportSymbols(['AAPL', 'BA', 'KO', 'MMM', 'ZTS'], esp, 59, 120),
+             wlExportSymbols(['AAPL', 'BA', 'KO', 'MMM', 'ZTS'], esp, 100, 60)];
+  out.expText = [wlExportText(['ZTS', 'BA']), wlExportText([])];
+  out.expName = [wlExportName(new Date('2026-11-12T15:05:00Z')),
+                 wlExportName(new Date('2026-07-01T13:30:00Z')),
+                 wlExportName(new Date('2026-11-13T04:59:00Z'))];
   globalThis.__out = out;
 `;
 eval(src + tail);
@@ -761,6 +772,14 @@ async def case_js_rows():
     check(o["parse"] == ["FDX", "LLY", "NVDA"], f"parsed {o['parse']}")
     check(o["fmt"] == ["7.0", "60", "—"], f"formatted {o['fmt']}")
     check(o["hi"] == [57, None, None], f"p90 read as {o['hi']}")
+    check(o["exp"] == [["ZTS", "BA", "MMM"], ["BA", "MMM", "ZTS"], ["ZTS"]],
+          f"export {o['exp']}: the rows at or above the floor (59 in, 58.9 "
+          f"out, unquoted out) in the order given; floor over wide wins")
+    check(o["expText"] == ["ZTS\r\nBA\r\n", ""],
+          f"export text {o['expText']!r}: one symbol a line, no header")
+    check(o["expName"] == ["wall_2026-11-12_1005.csv", "wall_2026-07-01_0930.csv",
+                           "wall_2026-11-12_2359.csv"],
+          f"export names {o['expName']}: US Eastern, EST and EDT, date rolls in ET")
     r0, r1, r2, r3 = o["range"]
     check(r0 == {"hi": 50, "split": 25, "mid": 37.5}
           and r1["hi"] == 50 and abs(r1["split"] - 49.4) < 1e-9 and r1["mid"] == 50
@@ -797,6 +816,8 @@ async def case_the_page_markup():
               "a row click does not toggle the mark")
     check("<canvas" not in html and "getContext" not in js,
           "the canvases are still on the page")
+    check(re.search(r'<button[^>]*wl-export[^>]*@click="exportCsv\(\)"', html)
+          is not None, "no Export CSV button calls exportCsv()")
     check("widest: false" in js and "hideBelow: false" in js,
           "the page does not open alphabetical with hide-below off")
     # MARKS ARE MEMORY ONLY.

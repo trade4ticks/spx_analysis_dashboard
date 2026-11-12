@@ -105,6 +105,38 @@ function wlShown(tier, hideBelow, marked) {
 }
 
 
+/* EXPORT (2026-11-12): the symbols clearing the floor, for pasting into a
+ * DAS watchlist. Membership is wlTier's test — the one that lights a row —
+ * so marks and "hide below floor" change nothing here. The ORDER is the
+ * list as displayed (`order`), so a widest-first wall exports widest first. */
+function wlExportSymbols(order, windows, floor, wide) {
+  return order.filter((s) => {
+    const t = wlTier(wlHi(windows[s]), floor, wide);
+    return t === 'mid' || t === 'wide';
+  });
+}
+
+
+/* The DAS watchlist format: one symbol per line, no header, no quoting, no
+ * BOM. CRLF, as a Windows tool expects. */
+function wlExportText(syms) {
+  return syms.length ? syms.join('\r\n') + '\r\n' : '';
+}
+
+
+/* wall_YYYY-MM-DD_HHMM.csv on the US Eastern clock, whatever the browser's
+ * own zone. */
+function wlExportName(when) {
+  const parts = {};
+  new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(when).forEach((p) => { parts[p.type] = p.value; });
+  return 'wall_' + parts.year + '-' + parts.month + '-' + parts.day + '_'
+    + parts.hour + parts.minute + '.csv';
+}
+
+
 function wlParseSymbols(text) {
   const out = [];
   const seen = {};
@@ -263,6 +295,27 @@ document.addEventListener('alpine:init', () => {
     toggleSort() {
       this.widest = !this.widest;
       this.resort();
+    },
+
+    // ── export ──────────────────────────────────────────────────────────
+    exportSymbols() {
+      return wlExportSymbols(this.order, this.sp, this.settings.min_spread_cents,
+                             this.settings.wide_cents);
+    },
+
+    // One click, no dialog: a browser download, nothing written server-side.
+    exportCsv() {
+      const syms = this.exportSymbols();
+      if (!syms.length) return;
+      const blob = new Blob([wlExportText(syms)], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = wlExportName(new Date());
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     },
 
     // ── the watchlist ───────────────────────────────────────────────────

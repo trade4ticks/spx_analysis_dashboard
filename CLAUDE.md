@@ -1648,6 +1648,15 @@ for watching** — no broker reference anywhere (gated).
   rest reflow. **Sort**: A→Z on load; widest first (by p90) re-sorts on
   every frame — the frame IS the 2 s clock, no timer of its own — ties
   alphabetical, unquoted last.
+- **Export CSV** (2026-11-12): one click, no dialog, a browser download
+  (`wall_YYYY-MM-DD_HHMM.csv`, US Eastern via `Intl`, whatever the browser's
+  zone) for pasting into a DAS watchlist. Rows whose p90 clears the floor —
+  `wlTier`'s test, the one that lights a row — in the DISPLAYED `order`, so
+  widest-first exports widest-first. Marks and hide-below-floor change
+  nothing. One ticker a line, CRLF, no header, no quoting, no BOM. Disabled
+  when nothing clears the floor. `check_wall_ui` clicks it A-Z and
+  widest-first with hide on and marks set; an export that ignores the
+  display order fails it.
 - **Removed**: pages and `WALL_PER_PAGE`, pane width, window, spread share,
   the per-pane scale override and its controls, the tape rings and sampling.
   An entry's old `scale` is CARRIED unused in the file (`clean_scale`) so the
