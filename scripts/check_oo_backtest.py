@@ -943,7 +943,11 @@ def auto_bins_reference(values: list, auto: dict) -> dict | None:
     if steps == "nice":
         span = p_hi - p_lo if p_hi - p_lo > 0 else (abs(p_hi) or 1.0)
         e = math.floor(math.log10(span / auto["targetBins"]))
-        steps = [clean(m * 10.0 ** k) for k in range(e - 1, e + 2) for m in (1, 2, 2.5, 5)]
+        if auto.get("integer"):
+            # Integer data: whole-number steps only (1, 2, 5 x 10^k, k >= 0).
+            steps = [m * 10 ** k for k in range(max(e - 1, 0), max(e + 1, 0) + 1) for m in (1, 2, 5)]
+        else:
+            steps = [clean(m * 10.0 ** k) for k in range(e - 1, e + 2) for m in (1, 2, 2.5, 5)]
     best = None
     for step in steps:
         lo = clean(math.floor(p_lo / step) * step)
@@ -1003,6 +1007,24 @@ def check_auto_bins() -> None:
     for k, v in nice_cases.items():
         cases[k] = v
         job[k] = {"values": v, "auto": nice, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]}
+    # Integer metrics (units 'int', UNIT_FORMATS["int"]["integer"]): whole-
+    # number steps. "int_0_60" is the trap's data: 0..60 over ~24 bins is a
+    # 2.5 step by the ordinary rule, so the same values WITHOUT the flag
+    # ("int_0_60_planted") must come out staggered -- proving the uniformity
+    # check below would catch an integer metric given a 2.5 step.
+    int_auto = {**nice, "integer": True}
+    int_cases = {
+        "int_0_60": [rng.randint(0, 60) for _ in range(900)],
+        "int_small": [rng.randint(0, 7) for _ in range(300)],
+        "int_large": [rng.randint(100, 4000) for _ in range(800)],
+        "int_constant": [12] * 40,
+    }
+    for k, v in int_cases.items():
+        cases[k] = v
+        job[k] = {"values": v, "auto": int_auto, "pnl": [round(rng.gauss(20, 300), 2) for _ in v]}
+    cases["int_0_60_planted"] = int_cases["int_0_60"]
+    job["int_0_60_planted"] = {"values": int_cases["int_0_60"], "auto": nice,
+                               "pnl": job["int_0_60"]["pnl"]}
     p = subprocess.run(["node", "-e", AUTO_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
                        capture_output=True, text=True, encoding="utf-8")
     if p.returncode:
@@ -1036,6 +1058,28 @@ def check_auto_bins() -> None:
             for a, (_, r) in zip(filled, bs.iterrows()))
         check(ok and len(g["rows"]) == len(b["labels"]),
               f"{key}: filled bins equal calculate_bin_stats; empty bins kept ({len(filled)} of {len(g['rows'])} filled)")
+
+    def integers_per_bin(bins: dict) -> set:
+        """How many integers each interior bin [e_k, e_k+1) can hold. One
+        number for every bin = the counts are comparable bar to bar."""
+        e = bins["edges"]
+        return {len(range(math.ceil(a), math.ceil(b))) for a, b in zip(e, e[1:])}
+
+    for k in int_cases:
+        b = got[k]["bins"]
+        check(float(b["step"]).is_integer() and b["step"] >= 1 and str(b["step"]).lstrip("0")[0] in "125"
+              and len(integers_per_bin(b)) == 1,
+              f"{k}: an integer metric gets a whole-number step ({b['step']}) and every bin holds the same number "
+              f"of integers ({sorted(integers_per_bin(b))})")
+    planted = got["int_0_60_planted"]["bins"]
+    check(planted["step"] == 2.5 and len(integers_per_bin(planted)) > 1,
+          f"trap: the same integers WITHOUT the integer rule get a {planted['step']} step and staggered bins "
+          f"({sorted(integers_per_bin(planted))} integers per bin) -- so the check above fails if the flag is lost")
+    check(got["int_0_60"]["bins"]["step"] == 2,
+          f"0..60 integers: step 2 (30 bins) rather than 2.5 ({got['int_0_60']['bins']['step']})")
+    uf = _surface.UNIT_FORMATS
+    check(uf["int"].get("integer") is True and not any(f.get("integer") for u, f in uf.items() if u != "int"),
+          "only the 'int' unit carries the integer rule")
 
     nv = got["nice_vol_pts"]["bins"]
     check(18 <= len(nv["labels"]) - 2 <= 32 and nv["step"] in (0.5, 1, 2, 2.5)
@@ -1468,6 +1512,227 @@ def check_surface_rows() -> None:
     check(ranked_units <= set(surface.UNIT_FORMATS),
           f"every unit in the real ranked catalog has a display format ({sorted(ranked_units)}; "
           f"missing {sorted(ranked_units - set(surface.UNIT_FORMATS))})")
+
+
+SPX_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8') + ';globalThis.OBD = OB_DATA;');
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = { calls: [] };
+global.console.error = () => {};
+global.fetch = async (url, init) => {
+  const j = (b, ok = true, status = 200) => ({ ok, status: ok ? 200 : status, json: async () => b });
+  if (url.endsWith('/surface/catalog')) return j(job.ivCatalog);
+  if (url.endsWith('/spx-metrics/catalog')) {
+    out.calls.push('catalog');
+    return job.down ? j({ detail: 'OI, volume and price metrics unavailable: OI_DATABASE_URL is not configured.' }, false, 503)
+                    : j(job.catalog);
+  }
+  if (url.endsWith('/spx-metrics/values')) {
+    const body = JSON.parse(init.body);
+    out.calls.push({ id: body.id, n: body.bars.length, first: body.bars[0], keys: Object.keys(body) });
+    const f = job.values[body.id];
+    // One bar per trade in this fixture, so per-trade values serve as per-bar.
+    return j({ id: body.id, values: f.values.slice(0, body.bars.length), present: f.present.slice(0, body.bars.length),
+               bar_times: null, report: {}, join: f.join });
+  }
+  if (url.endsWith('/surface/values')) throw new Error('an OI metric went to the surface endpoint');
+  throw new Error('unexpected ' + url);
+};
+(async () => {
+  const c = factory();
+  c.$nextTick = f => f && f();
+  c.registry = job.registry;
+  c.setTrades(job.payload);
+  await new Promise(r => setTimeout(r, 0));
+  out.error = c.spx.error;
+  out.groups = c.surfOptionGroups().map(g => g.label + ':' + g.options.map(o => o.value).join(','));
+  if (job.down) {
+    await c.addSurfRow('oi_5min.pct_oi_atm');
+    out.downRows = c.surfRows.length;
+    out.surfError = c.surf.error;
+    process.stdout.write(JSON.stringify(out));
+    return;
+  }
+  const R = id => c.surfRows.find(r => r.surfColumn === id);
+  // The bins' rows exactly as renderSections builds them, over the page's filtered trades.
+  const binRows = m => obSectionData(OBD.columns, OBD.idx, { ...m, bins: c.binsFor(m) }, m.column).rows.map(r => [r.label, r.count]);
+
+  await c.addSurfRow('oi_5min.pct_oi_atm');
+  const p = R('oi_5min.pct_oi_atm');
+  out.pct = { key: p.key, canvas: c.canvasId(p, 'avg'), format: p.format, scale: p.scale, state: c.sectionState(p),
+              sub: c.sectionSub(p), col: OBD.columns['surface__oi_5min.pct_oi_atm'], step: c.stepText(p),
+              labels: c.binsFor(p).labels, auto: p.auto, joinKind: p.joinKind, report: p.report,
+              rows: binRows(p), valued: c.sections[p.key].valued };
+  // Whole-page scope: the three reasons, in words.
+  c.setRowScope(p, 'page');
+  out.pctPageUntouched = c.rowScopeText(p);
+  c.setRowHi(p, 30);
+  out.pctPage = { text: c.rowScopeText(p), count: c.filteredCount };
+  c.setRowScope(p, 'row'); c.resetRowFilter(p);
+
+  await c.addSurfRow('oi_daily.n_strikes');
+  const n = R('oi_daily.n_strikes');
+  out.int = { auto: n.auto, step: c.autoSteps[n.key], bins: c.binsFor(n), sub: c.sectionSub(n), joinKind: n.joinKind,
+              format: n.format, rows: binRows(n) };
+  // The same values given a 2.5 step: the planted fault the integer rule prevents.
+  out.intPlanted = obAutoBins(OBD.columns['surface__oi_daily.n_strikes'], { ...n.auto, integer: false }, n.format);
+
+  await c.addSurfRow('price_daily.empty_metric');
+  out.empty = { state: c.sectionState(R('price_daily.empty_metric')), skipped: c.skippedText(R('price_daily.empty_metric')) };
+
+  out.groupsAfter = c.surfOptionGroups().filter(g => !g.label.startsWith('IV'))
+    .map(g => g.label + ':' + g.options.map(o => (o.added ? '+' : '') + o.value).join(','));
+
+  c.removeSurfRow(p);
+  out.removed = { col: 'surface__oi_5min.pct_oi_atm' in OBD.columns, pres: 'surfpresent__oi_5min.pct_oi_atm' in OBD.columns,
+                  presentCols: c.presentColumns.filter(x => x.includes('pct_oi_atm')) };
+  const before = out.calls.length;
+  c.setTrades(job.payload2);
+  await new Promise(r => setTimeout(r, 0));
+  out.newLog = out.calls.slice(before).filter(x => typeof x === 'object').map(x => x.id + ':' + x.n);
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stderr.write(e.stack); process.exit(1); });
+"""
+
+
+def check_spx_rows() -> None:
+    """The OI / volume / price metrics (spx_metrics.py, /spx-metrics/*) as
+    added rows, in node with the shipped JS against a stubbed server: the
+    value request names the metric's ID, never the surface endpoint; a pct
+    share is shown as a percentage (0.2473 -> 24.73 %); an int metric gets
+    whole-number bins; trades without a value are counted under THREE
+    reasons (before its data starts / no bar or row / a bar or row but no
+    value) that add up; the date-joined table says "row for the entry date";
+    a cross metric is listed under OI and Volume; the presence column goes
+    with the row; a new log refetches; an unconfigured database says so and
+    leaves the surface metrics alone."""
+    print("added OI / volume / price rows (shipped JS)")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("OI / volume / price rows (node not installed)")
+        return
+    from app.oo_backtest import spx_metrics, surface
+    rng = random.Random(53)
+    n = 60
+    dates = [f"2021-{1 + i // 6:02d}-{1 + i % 6 * 4:02d}" for i in range(n)]
+    cols = {"date_opened": dates, "date_closed": dates, "time_opened": ["15:30:00"] * n,
+            "pnl": [round(rng.gauss(10, 200), 2) for _ in range(n)], "days_in_trade": [1] * n,
+            "day_of_week": [i % 5 for i in range(n)]}
+    payload = {"n": n, "columns": cols, "date_min": dates[0], "date_max": dates[-1], "notes": {},
+               "suggested_name": "t", "market": {"joined": True, "spx_sessions": []}}
+    payload2 = {**payload, "n": 40, "columns": {k: v[:40] for k, v in cols.items()}}
+    # pct_oi_atm: trades 0-2 before its data starts (2021-01-10; their rows
+    # exist, values null), 3-4 no bar, 5-7 a bar with no value (the spot
+    # guard / a z still warming up), the rest a 0-1 share.
+    pct_vals = [None if i < 8 else round(rng.uniform(0.15, 0.35), 4) for i in range(n)]
+    pct_pres = [i not in (3, 4) for i in range(n)]
+    int_vals = [None if i == 10 else rng.randint(0, 60) for i in range(n)]
+    int_pres = [i != 10 for i in range(n)]
+    values = {"oi_5min.pct_oi_atm": {"values": pct_vals, "present": pct_pres, "join": "bar"},
+              "oi_daily.n_strikes": {"values": int_vals, "present": int_pres, "join": "date"},
+              "price_daily.empty_metric": {"values": [None] * n, "present": [True] * n, "join": "date"}}
+
+    def row(src, metric, family, units, min_date, form="level"):
+        return {"id": f"{src}.{metric}", "metric": metric, "table_name": spx_metrics.SOURCES[src]["table"],
+                "source": src, "join": spx_metrics.SOURCES[src]["join"], "family": family, "form": form,
+                "units": units, "description": f"{metric} described", "formula": "", "base_column": None,
+                "min_date": min_date,
+                "sections": [s["key"] for s in spx_metrics.SECTIONS if family in s["families"]]}
+
+    metrics = [row("oi_5min", "pct_oi_atm", "oi_spot", "pct", "2021-01-10"),
+               row("oi_daily", "n_strikes", "oi", "int", "2020-01-02"),
+               row("oi_daily", "vol_oi_ratio_front", "cross", "ratio", "2020-01-02"),
+               row("price_daily", "empty_metric", "price_trend", "index_0_100", "2021-03-01")]
+    catalog = {"metrics": metrics, "sections": spx_metrics.SECTIONS, "family_groups": spx_metrics.FAMILY_GROUPS,
+               "sources": spx_metrics.SOURCES, "unit_formats": surface.UNIT_FORMATS,
+               "default_unit_format": surface.DEFAULT_UNIT_FORMAT, "row_auto_bins": surface.ROW_AUTO_BINS}
+    iv_catalog = {"metrics": [{"column_name": "iv_30d_atm", "family": "iv", "form": "level", "units": "vol_decimal",
+                               "description": "", "formula": "", "min_date": "2021-01-10"}],
+                  "family_groups": surface.FAMILY_GROUPS, "other_group": surface.OTHER_GROUP,
+                  "form_labels": surface.FORM_LABELS, "unit_formats": surface.UNIT_FORMATS,
+                  "default_unit_format": surface.DEFAULT_UNIT_FORMAT, "row_auto_bins": surface.ROW_AUTO_BINS}
+    reg = json.loads(json.dumps(REGISTRY))
+    base = {"registry": reg, "payload": payload, "payload2": payload2, "values": values, "catalog": catalog,
+            "ivCatalog": iv_catalog}
+
+    def run(job):
+        p = subprocess.run(["node", "-e", SPX_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
+                           capture_output=True, text=True, encoding="utf-8")
+        if p.returncode:
+            check(False, f"spx rows driver ran ({p.stderr.strip()[:400]})")
+            return None
+        return json.loads(p.stdout)
+
+    o = run(base)
+    if o is None:
+        return
+    vc = [x for x in o["calls"] if isinstance(x, dict)]
+    check(o["error"] == "" and vc and vc[0]["id"] == "oi_5min.pct_oi_atm" and vc[0]["n"] == n
+          and vc[0]["first"] == [dates[0], "15:30:00"] and sorted(vc[0]["keys"]) == ["bars", "id"],
+          f"adding an OI metric asks /spx-metrics/values for that ID over every trade's entry bar ({vc[:1]})")
+    pc = o["pct"]
+    want = [None if v is None else v * 100 for v in pct_vals]
+    check(all((a is None and b is None) or (a is not None and b is not None and abs(a - b) < 1e-9)
+              for a, b in zip(pc["col"], want)) and pc["scale"] == 100
+          and pc["format"] == {"decimals": 2, "suffix": "%"},
+          "a pct share is shown as a percentage: 0.2473 arrives as 24.73, formatted 2 decimals with %")
+    check(pc["state"] == "ready" and pc["valued"] == 52 and pc["step"].endswith("%")
+          and pc["labels"][0].startswith("<") and pc["labels"][-1].startswith("≥"),
+          f"the row is a ready section with auto bins in percent ({pc['step']} bins, {len(pc['labels'])} labels)")
+    check(sum(c for _, c in pc["rows"]) == 52,
+          f"the bars' trade counts add up to the trades with a value (52 of {n})")
+    check(pc["report"]["before"] == 3 and pc["report"]["noBar"] == 2 and pc["report"]["noValue"] == 3
+          and pc["report"]["withValue"] == 52 and pc["report"]["trades"] == n,
+          f"missing values counted under three reasons that add up: 3 before + 2 no bar + 3 bar-without-value + 52 = {n} "
+          f"({pc['report']})")
+    check(pc["sub"].endswith("· no value: 3 entered before its data starts (2021-01-10), 2 with no bar at the entry time, "
+                             "3 with a bar at the entry time but no value in it")
+          and "52 of 60 trades with a value" in pc["sub"],
+          f"the row's subtitle names the three reasons ({pc['sub'][-140:]})")
+    check(pc["joinKind"] == "bar" and "." not in pc["key"] and "." not in pc["canvas"],
+          f"the row's key and canvas ids carry no '.' from the id ({pc['key']}, {pc['canvas']})")
+    check(o["pctPageUntouched"].startswith("Whole page: moving the slider will drop 8 of 60")
+          and o["pctPage"]["text"] == "Whole page: dropping 8 of 60 filtered trades with no value — 3 entered before its "
+          "data starts (2021-01-10), 2 with no bar at the entry time, 3 with a bar at the entry time but no value in it",
+          f"whole-page scope states the cost under the three reasons ({o['pctPage']['text']})")
+    it = o["int"]
+    b = it["bins"]
+    per_bin = {len(range(math.ceil(a), math.ceil(z))) for a, z in zip(b["edges"], b["edges"][1:])}
+    check(it["auto"].get("integer") is True and float(it["step"]).is_integer() and it["step"] >= 1
+          and len(per_bin) == 1 and it["format"] == {"decimals": 0, "suffix": ""},
+          f"an int metric's row bins in whole numbers (step {it['step']}, {sorted(per_bin)} integers per bin)")
+    pl = o["intPlanted"]
+    pl_bin = {len(range(math.ceil(a), math.ceil(z))) for a, z in zip(pl["edges"], pl["edges"][1:])}
+    check(not float(pl["step"]).is_integer() and len(pl_bin) > 1,
+          f"trap: the same values without the integer rule get a {pl['step']} step and staggered bins {sorted(pl_bin)}")
+    check(it["joinKind"] == "date" and it["sub"].endswith("· no value: 1 with no row for the entry date"),
+          f"a daily table's missing trade is 'no row for the entry date' ({it['sub'][-60:]})")
+    check(o["empty"]["state"] == "skipped"
+          and o["empty"]["skipped"].endswith("— 12 entered before its data starts (2021-03-01), "
+                                             "48 with a row for the entry date but no value in it"),
+          f"a metric with no value for any trade says why, in the three reasons ({o['empty']['skipped']})")
+    check(o["groupsAfter"] == ["OI · oi:+oi_daily.n_strikes", "OI · oi_spot:+oi_5min.pct_oi_atm",
+                               "OI · cross:oi_daily.vol_oi_ratio_front", "Volume · cross:oi_daily.vol_oi_ratio_front",
+                               "Price · price_trend:+price_daily.empty_metric"],
+          f"the dropdown lists them by section and family after IV, a cross metric under OI AND Volume, "
+          f"added ones marked ({o['groupsAfter']})")
+    check(o["removed"] == {"col": False, "pres": False, "presentCols": []},
+          "remove drops the row's value column and its presence column")
+    check(o["newLog"] == ["oi_daily.n_strikes:40", "price_daily.empty_metric:40"],
+          f"a new log refetches each OI row for its own trades ({o['newLog']})")
+
+    d = run({**base, "down": True})
+    if d is None:
+        return
+    check(d["error"].startswith("OI, volume and price metrics unavailable") and d["downRows"] == 0
+          and d["groups"] == ["IV · iv:iv_30d_atm"] and "Unknown metric" in d["surfError"],
+          f"with the OI database unavailable the page says so, adds nothing, and the IV list is intact ({d['error']})")
 
 
 DEPLOY_DRIVER = r"""
@@ -1930,7 +2195,7 @@ def check_export_csv() -> None:
 CHECKS = [
     "check_registry", "check_against_source", "check_binning", "check_stats_parity", "check_section_parity",
     "check_auto_bins", "check_component_filters", "check_export_csv", "check_deployment_and_extra_stats",
-    "check_surface_ranking_ui", "check_surface_rows", "check_dropped_scope", "check_parsers",
+    "check_surface_ranking_ui", "check_surface_rows", "check_spx_rows", "check_dropped_scope", "check_parsers",
     "check_real_mesosim", "check_surface_stats",
 ]
 # Files the checks read. Missing, they are a FAIL naming the file -- never an

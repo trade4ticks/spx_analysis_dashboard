@@ -639,10 +639,18 @@ function obPercentile(sorted, p) {
 /* Candidate "nice" steps for a span: 1, 2, 2.5, 5 x 10^k for the decade of
  * span/target and the one either side, ascending. A zero span (every value in
  * p1..p99 equal) takes its decade from the value itself. */
-function obNiceSteps(pLo, pHi, target) {
+function obNiceSteps(pLo, pHi, target, integer) {
   const span = pHi - pLo > 0 ? pHi - pLo : (Math.abs(pHi) || 1);
   const e = Math.floor(Math.log10(span / target));
   const out = [];
+  if (integer) {
+    // INTEGER data (units 'int'): whole-number steps only, 1/2/5 x 10^k with
+    // k >= 0. A 2.5 or 0.5 step puts two integers in some bins and three (or
+    // none) in others, which staggers the counts -- a run of bars that looks
+    // like a pattern and is only the step.
+    for (let k = Math.max(e - 1, 0); k <= Math.max(e + 1, 0); k++) for (const m of [1, 2, 5]) out.push(m * Math.pow(10, k));
+    return out;
+  }
   for (let k = e - 1; k <= e + 1; k++) for (const m of [1, 2, 2.5, 5]) out.push(obClean(m * Math.pow(10, k)));
   return out;
 }
@@ -671,7 +679,7 @@ function obAutoBins(values, auto, fmt) {
   if (!v.length) return null;
   const pLo = obPercentile(v, auto.pLo), pHi = obPercentile(v, auto.pHi);
   let best = null;
-  const steps = auto.steps === 'nice' ? obNiceSteps(pLo, pHi, auto.targetBins) : auto.steps;
+  const steps = auto.steps === 'nice' ? obNiceSteps(pLo, pHi, auto.targetBins, !!auto.integer) : auto.steps;
   for (const step of steps) {
     const lo = obClean(Math.floor(pLo / step) * step);
     let hi = obClean(Math.ceil(pHi / step) * step);
@@ -900,6 +908,11 @@ document.addEventListener('alpine:init', () => {
             groups: [], other: null, formLabels: {}, unitFormats: {}, defaultUnitFormat: null, rowAutoBins: null,
             method: 'spearman', form: 'all', hidden: {}, common: false,
             busy: false, error: '', result: null },
+    /* The OI / volume / price metrics (open_interest database,
+     * /spx-metrics/*): their own catalog, loaded beside the surface one. A
+     * metric's id is "<source>.<metric>"; the surface ids stay bare. */
+    spx: { catalog: null, busy: false, error: '', sections: [], groups: [], sources: {},
+           unitFormats: {}, defaultUnitFormat: null, rowAutoBins: null },
     // Bumped on every recompute. The filtered rows live outside the proxy
     // (OB_DATA.idx), so anything derived from them reads this to re-render
     // when they change -- without it the coverage headline stayed blank.
@@ -1034,6 +1047,7 @@ document.addEventListener('alpine:init', () => {
       this.surf.result = null;
       this.loaded = true;
       this.loadSurfaceCatalog();
+      this.loadSpxCatalog();
       for (const row of this.surfRows) this.fetchSurfRow(row.key);
       this.initFilters();
       this.$nextTick(() => this.recompute());
@@ -1944,6 +1958,36 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* The OI / volume / price catalog. Its failure (no OI_DATABASE_URL, the
+     * database down) says so beside the dropdown and leaves the surface
+     * metrics working. A refusal from the server is a STATE the page shows,
+     * not an error it logs: an unconfigured database is a supported setup.
+     * Only a failure to reach the server at all, or a bug, logs. */
+    async loadSpxCatalog() {
+      if (this.spx.catalog || this.spx.busy) return;
+      this.spx.busy = true;
+      this.spx.error = '';
+      const unavailable = msg => (String(msg).startsWith('OI, volume') ? String(msg)
+        : `OI, volume and price metrics unavailable: ${msg}`);
+      try {
+        const r = await fetch('/api/oo-backtest/spx-metrics/catalog');
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) { this.spx.error = unavailable(body.detail || `HTTP ${r.status}`); return; }
+        this.spx.catalog = body.metrics;
+        this.spx.sections = body.sections || [];
+        this.spx.groups = body.family_groups || [];
+        this.spx.sources = body.sources || {};
+        this.spx.unitFormats = body.unit_formats || {};
+        this.spx.defaultUnitFormat = body.default_unit_format || null;
+        this.spx.rowAutoBins = body.row_auto_bins || null;
+      } catch (e) {
+        console.error('oo-backtest spx metrics catalog', e);
+        this.spx.error = unavailable(e.message || e);
+      } finally {
+        this.spx.busy = false;
+      }
+    },
+
     /* Metrics the view shows (form + families), from the catalog -- the set
      * common coverage is computed over, available before any ranking. */
     surfViewMetrics() {
@@ -2302,6 +2346,27 @@ document.addEventListener('alpine:init', () => {
             label: `${m.column_name}${m.description ? ' — ' + String(m.description).slice(0, 70) : ''}` })) });
         }
       }
+      return out.concat(this.spxOptionGroups());
+    },
+
+    /* The OI / Volume / Price metrics for the same dropdown, one optgroup per
+     * section and family; a `cross` metric is listed under both OI and
+     * Volume (the same id either way). A family in no section: "Other". */
+    spxOptionGroups() {
+      const cat = this.spx.catalog || [];
+      if (!cat.length) return [];
+      const out = [];
+      const opt = m => ({ value: m.id, added: !!this.surfRowFor(m.id),
+                          label: `${m.metric}${m.description ? ' — ' + String(m.description).slice(0, 70) : ''}` });
+      const byName = (a, b) => (a.metric < b.metric ? -1 : a.metric > b.metric ? 1 : (a.id < b.id ? -1 : 1));
+      for (const sec of this.spx.sections) {
+        for (const f of sec.families) {
+          const ms = cat.filter(m => m.family === f).sort(byName);
+          if (ms.length) out.push({ label: `${sec.label} · ${f}`, options: ms.map(opt) });
+        }
+      }
+      const rest = cat.filter(m => !(m.sections || []).length).sort(byName);
+      if (rest.length) out.push({ label: 'Other', options: rest.map(opt) });
       return out;
     },
 
@@ -2316,7 +2381,7 @@ document.addEventListener('alpine:init', () => {
       const existing = this.surfRowFor(column);
       if (existing) { this.scrollToRow(existing); return; }
       const meta = (this.surf.catalog || []).find(m => m.column_name === column);
-      if (!meta) { this.surf.error = `Unknown surface metric ${column}`; return; }
+      if (!meta) { await this.addSpxRow(column); return; }
       const u = this.surfUnitFormat(meta.units);
       const row = {
         key: `surf_${column}`, label: column, description: meta.description || '', surfColumn: column,
@@ -2333,9 +2398,42 @@ document.addEventListener('alpine:init', () => {
       if (added) this.$nextTick(() => this.scrollToRow(added));
     },
 
+    /* An OI / volume / price metric as an added row: the same registry-shaped
+     * section as a surface row, read through /spx-metrics/values. `joinKind`
+     * says what a trade is matched to (the entry DATE's row, or the entry
+     * BAR), and `presentColumn` holds, per trade, whether that row/bar was
+     * found -- these tables have values missing AFTER their data starts (a
+     * missing spot, a z-score still warming up at that bar of day), which
+     * is neither "before its data starts" nor "no bar". */
+    async addSpxRow(id) {
+      await this.loadSpxCatalog();
+      const meta = (this.spx.catalog || []).find(m => m.id === id);
+      if (!meta) { this.surf.error = `Unknown metric ${id}`; return; }
+      const u = (this.spx.unitFormats || {})[meta.units] || this.spx.defaultUnitFormat || { scale: 1, decimals: 4, suffix: '' };
+      const src = (this.spx.sources || {})[meta.source] || {};
+      const auto = { ...(this.spx.rowAutoBins || { steps: 'nice', targetBins: 24, pLo: 1, pHi: 99 }) };
+      if (u.integer) auto.integer = true;
+      const safe = id.replace(/[^A-Za-z0-9_-]/g, '__');
+      const row = {
+        key: `spx_${safe}`, label: meta.metric,
+        description: [src.label ? `${src.label} table` : '', meta.description || ''].filter(Boolean).join(' — '),
+        surfColumn: id, column: `surface__${id}`, presentColumn: `surfpresent__${id}`, spx: true,
+        joinKind: meta.join, units: meta.units, type: 'range', binning: 'auto', auto,
+        bins: { edges: null, labels: null, closed: 'left', labelEdge: 'both' }, categories: null,
+        hasScatter: true, section: true, filter: false, winRate: false, pane: null, basis: null, series: [],
+        format: { decimals: u.decimals, suffix: u.suffix }, scale: u.scale, minDate: meta.min_date,
+        family: meta.family, form: meta.form, removable: true, loading: true, error: '', report: null, rowFilter: null,
+      };
+      this.surfRows = [...this.surfRows, row];
+      await this.fetchSurfRow(row.key);
+      const added = this.surfRows.find(r => r.key === row.key);
+      if (added) this.$nextTick(() => this.scrollToRow(added));
+    },
+
     async fetchSurfRow(key) {
       const row = this.surfRows.find(r => r.key === key);
       if (!row || !OB_DATA.columns) return;
+      if (row.spx) return this.fetchSpxRow(row);
       const token = OB_DATA.logToken;
       row.loading = true;
       row.error = '';
@@ -2376,6 +2474,72 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    async fetchSpxRow(row) {
+      const token = OB_DATA.logToken;
+      row.loading = true;
+      row.error = '';
+      // Every trade of the LOAD, every variant: the view is re-sliced from it.
+      const cols = (OB_DATA.full || { columns: OB_DATA.columns }).columns;
+      const eb = obEntryBars(cols, cols.date_opened.map((_, i) => i));
+      try {
+        const r = await fetch('/api/oo-backtest/spx-metrics/values', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: row.surfColumn, bars: eb.bars }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        if (token !== OB_DATA.logToken || !this.surfRows.includes(row)) return;   // another log, or removed meanwhile
+        if (body.values.length !== eb.bars.length || (body.present || []).length !== eb.bars.length) {
+          throw new Error(`server returned ${body.values.length} values for ${eb.bars.length} entry bars`);
+        }
+        const perBar = body.values.map(v => (v === null || v === undefined ? null : v * row.scale));
+        cols[row.column] = eb.barOf.map(b => perBar[b]);
+        cols[row.presentColumn] = eb.barOf.map(b => !!body.present[b]);
+        this.applyView();
+        const inView = OB_DATA.columns[row.column];
+        row.report = { withValue: inView.filter(v => v !== null).length, trades: inView.length, bars: eb.bars.length,
+                       ...this.missingCounts(row, Array.from({ length: OB_DATA.n }, (_, i) => i)) };
+        this.computeAutoBins();
+        this.initRowFilter(row);
+      } catch (e) {
+        console.error('oo-backtest spx metric values', e);
+        if (token === OB_DATA.logToken) row.error = `Could not fetch ${row.label}: ${e.message}`;
+      } finally {
+        if (token === OB_DATA.logToken) {
+          row.loading = false;
+          this.$nextTick(() => this.recompute());
+        }
+      }
+    },
+
+    /* Why the trades in idx have no value for an added row: entered before
+     * its data starts, no row/bar matched, or matched with no value in it.
+     * Only a row with a presence column (an OI / volume / price row) can tell
+     * the last two apart; a surface row keeps its two reasons exactly. */
+    missingCounts(m, idx) {
+      const cols = OB_DATA.columns || {};
+      const vals = cols[m.column], dates = cols.date_opened;
+      const pres = m.presentColumn ? cols[m.presentColumn] : null;
+      let before = 0, noBar = 0, noValue = 0;
+      if (!vals) return { before, noBar, noValue };
+      for (const i of idx) {
+        if (vals[i] !== null && vals[i] !== undefined) continue;
+        if (m.minDate && dates[i] && dates[i] < m.minDate) before++;
+        else if (pres && pres[i]) noValue++;
+        else noBar++;
+      }
+      return { before, noBar, noValue };
+    },
+
+    /* The three reasons in words. A date-joined table's "no bar" is "no row
+     * for the entry date". */
+    missingWords(m, c) {
+      const date = m.joinKind === 'date';
+      return [c.before ? `${c.before.toLocaleString()} entered before its data starts (${m.minDate})` : '',
+              c.noBar ? `${c.noBar.toLocaleString()} with no ${date ? 'row for the entry date' : 'bar at the entry time'}` : '',
+              c.noValue ? `${c.noValue.toLocaleString()} with ${date ? 'a row for the entry date' : 'a bar at the entry time'} but no value in it`
+                        : ''].filter(Boolean).join(', ');
+    },
+
     removeSurfRow(m) {
       const wasOnPage = this.rowFilterOnPage(m);
       for (const which of ['avg', 'total', 'win', 'scatter']) {
@@ -2384,7 +2548,11 @@ document.addEventListener('alpine:init', () => {
       }
       if (OB_DATA.columns) delete OB_DATA.columns[m.column];
       if (OB_DATA.full) delete OB_DATA.full.columns[m.column];
-      this.presentColumns = this.presentColumns.filter(c => c !== m.column);
+      if (m.presentColumn) {
+        if (OB_DATA.columns) delete OB_DATA.columns[m.presentColumn];
+        if (OB_DATA.full) delete OB_DATA.full.columns[m.presentColumn];
+      }
+      this.presentColumns = this.presentColumns.filter(c => c !== m.column && c !== m.presentColumn);
       this.surfRows = this.surfRows.filter(r => r.key !== m.key);
       delete OB_DATA.autoBins[m.key];
       const { [m.key]: _gone, ...rest } = this.sections;
@@ -2400,6 +2568,16 @@ document.addEventListener('alpine:init', () => {
     /* What the skipped placeholder says: an added row has no column in the
      * log, only a coverage start the log's trades may all predate. */
     skippedText(m) {
+      if (m.removable && m.presentColumn && OB_DATA.columns) {
+        // Counted live over the view -- in Train view over the TRAIN trades
+        // only (a count over the whole view would show test figures), and
+        // after a variant switch over that variant.
+        void this.idxTick;
+        const all = Array.from({ length: OB_DATA.n }, (_, i) => i);
+        const idx = this.viewTrain() ? obInPeriod(OB_DATA.columns, all, this.split.cutoff, 'train') : all;
+        const why = this.missingWords(m, this.missingCounts(m, idx));
+        return `No ${this.viewTrain() ? 'train trade' : 'trade in this log'} has a value for ${m.label}` + (why ? ` — ${why}` : '');
+      }
       if (m.removable) {
         return `No trade in this log has a value for ${m.label}` + (m.minDate ? ` — its data starts ${m.minDate}` : '');
       }
@@ -2453,6 +2631,10 @@ document.addEventListener('alpine:init', () => {
       if (!m.rowFilter || !OB_DATA.columns || !OB_DATA.columns[m.column]) return null;
       const vals = OB_DATA.columns[m.column], dates = OB_DATA.columns.date_opened;
       const base = this.idxWithout(m);
+      if (m.presentColumn) {
+        const c = this.missingCounts(m, base);
+        return { base: base.length, dropped: c.before + c.noBar + c.noValue, ...c };
+      }
       let before = 0, noBar = 0;
       for (const i of base) {
         if (vals[i] !== null && vals[i] !== undefined) continue;
@@ -2464,8 +2646,9 @@ document.addEventListener('alpine:init', () => {
     rowScopeText(m) {
       const c = this.rowScopeCost(m);
       if (!c || m.rowFilter.scope !== 'page') return '';
-      const why = [c.before ? `${c.before.toLocaleString()} entered before its data starts (${m.minDate})` : '',
-                   c.noBar ? `${c.noBar.toLocaleString()} with no bar at the entry time` : ''].filter(Boolean).join(', ');
+      const why = m.presentColumn ? this.missingWords(m, c)
+        : [c.before ? `${c.before.toLocaleString()} entered before its data starts (${m.minDate})` : '',
+           c.noBar ? `${c.noBar.toLocaleString()} with no bar at the entry time` : ''].filter(Boolean).join(', ');
       if (!c.dropped) return 'Whole page: every filtered trade has a value — no coverage cost';
       const verb = this.rowFilterActive(m) ? 'dropping' : 'moving the slider will drop';
       return `Whole page: ${verb} ${c.dropped.toLocaleString()} of ${c.base.toLocaleString()} filtered trades with no value — ${why}`;
@@ -2866,8 +3049,18 @@ document.addEventListener('alpine:init', () => {
       const auto = m.binning === 'auto' && this.autoSteps[m.key] !== undefined
         ? ` · ${this.stepText(m)} bins (auto)` : '';
       const cover = (m.removable && m.minDate ? ` · data from ${m.minDate}` : '') +
-        (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m) ? ' · row filter applied' : '');
+        (m.rowFilter && m.rowFilter.scope === 'row' && this.rowFilterActive(m) ? ' · row filter applied' : '') +
+        this.spxMissingSub(m);
       return this.withPeriod(`${col} · ${s.valued.toLocaleString()}${of} trades with a value · ${m.type === 'range' ? `${s.bins} of ${this.binCount(m)} bins filled` : `${s.bins} values`}${auto}${cover}`);
+    },
+
+    /* An OI / volume / price row says why the filtered trades without a
+     * value have none, so the bar counts add up to something stated. */
+    spxMissingSub(m) {
+      if (!m.presentColumn || !OB_DATA.idx) return '';
+      void this.idxTick;
+      const why = this.missingWords(m, this.missingCounts(m, OB_DATA.idx));
+      return why ? ` · no value: ${why}` : '';
     },
 
     stepText(m) {

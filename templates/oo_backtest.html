@@ -841,8 +841,9 @@
               <span>Common coverage only</span>
               <span class="ob-dim" x-text="surfCommonText()"></span>
             </label>
-            <!-- The alternative to clicking a bar: any ranked metric, by family. -->
-            <select class="ob-sel ob-rank-add" x-show="surf.catalog" aria-label="Add a surface metric section"
+            <!-- The alternative to clicking a bar: any ranked metric, by family,
+                 then the OI / Volume / Price metrics by section and family. -->
+            <select class="ob-sel ob-rank-add" x-show="surf.catalog || spx.catalog" aria-label="Add a metric section"
                     @change="addSurfRow($event.target.value); $event.target.value = ''">
               <option value="">Add a metric section…</option>
               <template x-for="g in surfOptionGroups()" :key="g.label">
@@ -857,6 +858,7 @@
 
           <div class="ob-err" x-show="surf.catalogError" x-text="surf.catalogError"></div>
           <div class="ob-err" x-show="surf.error" x-text="surf.error"></div>
+          <div class="ob-err" x-show="spx.error" x-text="spx.error"></div>
 
           <div class="ob-rank-legend" x-show="surf.catalog">
             <template x-for="g in surfaceGroups()" :key="g.label">

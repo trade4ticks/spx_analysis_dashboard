@@ -83,6 +83,18 @@ UNIT_FORMATS = {
     "ratio": {"scale": 1, "decimals": 3, "suffix": ""},
     "log_return": {"scale": 100, "decimals": 2, "suffix": "%"},
     "corr": {"scale": 1, "decimals": 3, "suffix": ""},
+    # The OI / volume / price metrics' units (spx_metrics.py, 2026-11-17).
+    # Additive: no ranked surface metric carries any of these (the surface
+    # catalog's price and int columns are all in excluded families), so the
+    # IV rows format exactly as before. pct is a 0-1 share shown as a
+    # percentage; `integer` makes an added row's auto bins whole-number
+    # steps (1, 2, 5 x 10^k) -- a 2.5 step on integer data puts two values
+    # in some bins and three in others, which staggers the counts.
+    "pct": {"scale": 100, "decimals": 2, "suffix": "%"},
+    "days": {"scale": 1, "decimals": 1, "suffix": "days"},
+    "index_0_100": {"scale": 1, "decimals": 1, "suffix": ""},
+    "price": {"scale": 1, "decimals": 2, "suffix": ""},
+    "int": {"scale": 1, "decimals": 0, "suffix": "", "integer": True},
 }
 DEFAULT_UNIT_FORMAT = {"scale": 1, "decimals": 4, "suffix": ""}
 

@@ -1201,6 +1201,14 @@ as a footnote). Code: `app/strategy_signal/` (`library.py`, `evaluate.py`,
   allocation. Manual requirements are shown on every state but the last and
   never change it. The decision uses the latest intraday value within 5
   sessions; `stale` flags data older than the session that should be latest.
+- **Not yet a reader of the OI / volume / price tables, and when it becomes
+  one, mind the rebuild** (noted 2026-11-17): the 5-minute `spx_oi_5min` /
+  `spx_price_5min` rows for TODAY are rewritten every 5 minutes in session
+  (all 78 written on the first cycle, unprinted bars blank). A live read can
+  land mid-rewrite. The OO page cannot hit this (a vendor backtest never
+  contains today); this page, which reads today live, can. Ask the
+  Open_Interest side whether the rewrite is one transaction before relying
+  on it.
 - **`/board` is the one call**: each source fetched once for the deepest
   lookback any strategy asks of it; a failing metric is reported on that
   metric, never the page. Intraday charts are capped at 3 months.
@@ -1836,6 +1844,94 @@ split "entered before its data starts" / "no bar at the entry time" — before n
 filters (keeps scope); removing a page-scoped row re-filters the page.
 
 The **Market-data checks** pane is collapsed by default (header toggles it).
+
+### OI / volume / price metrics (in progress, 2026-11-17)
+
+155 metrics from four tables in the **open_interest** database, beside the
+452 surface (IV) metrics: `spx_oi_daily`, `spx_price_daily` (one row per
+trade_date), `spx_oi_5min`, `spx_price_5min` (per (trade_date, quote_time),
+09:30-15:55), described by `spx_metric_catalog` (PK (table_name, metric)).
+Built by the user's Open_Interest project. Phases (agreed 2026-11-17):
+**P1** server, read-only — done; **P2** values into added-row histograms on
+the analyzer page — done (the main step); **P4** ranking per section on the
+server; **P5** four ranking sections (IV, OI, Volume, Price), ONE button;
+**P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
+Price, "add a metric"); **P6** checks and docs. **What the user does with
+it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
+edge with a lower average and enough trades — p-values are not read, so
+histogram correctness (units, binning, counts) beats statistical polish.
+- **Code:** `app/oo_backtest/spx_metrics.py`, `GET /spx-metrics/catalog`,
+  `POST /spx-metrics/values` `{id, bars}`. The EXISTING open_interest pool
+  (`get_oi_pool`, `OI_DATABASE_URL` — confirmed on the VPS). No pool or a
+  failing database: 503, and the page says "OI, volume and price metrics
+  unavailable" beside the dropdown — a STATE, not logged as an error; the
+  surface metrics are untouched. The surface code (`surface.py`, its
+  endpoints, its catalog response) is unchanged except UNIT_FORMATS.
+- **Ids are `<source>.<metric>`** (`oi_daily`, `oi_5min`, `price_daily`,
+  `price_5min`); surface ids stay bare column names, so nothing saved before
+  moves. The composite key is structural: `spot` is in two tables (both
+  unsurfaced). No served name collides with the 452 (user, 2026-11-17).
+  Row keys and canvas ids replace the `.` (`spx_oi_5min__pct_x`).
+- **Catalog read LIVE** (the user's decision): served = `surfaced` true PER
+  ROW (9 drifting raw levels are hidden inside surfaced families; 16
+  `ingredient` rows), table one of the four, column present and numeric.
+  Unsurfaced = not computed, not counted. Refusals are reported by name.
+  Cache key: each table's first/last date and row count + an md5 of the
+  catalog's rows (built_at included). The 5-minute job writes all 78 of
+  today's rows on its first cycle (unprinted bars blank), so the count moves
+  once a session. **The surface cache's key still has no catalog term** — an
+  edit to `surface_metrics_catalog` waits for a new bar or a restart.
+- **Sections** (`spx_metrics.SECTIONS`): OI = oi + oi_spot + cross (70),
+  Volume = volume + volume_spot + cross (53), Price = price_trend +
+  price_range + price_momentum + price_vol (45). `cross` is in BOTH (155
+  unique, 168 displayed); its BH p will differ per section (P4) — say so where
+  shown. Family colours are the eight validated hues, distinct within a
+  section (`spx_metrics.FAMILY_GROUPS`, served with this catalog, not with
+  the surface one).
+- **Joins, taken on trust from the build (it asserts both every run):**
+  daily = the row dated the ENTRY DATE, whatever the time — row T is already
+  shifted (OI as of T-1's close, volume from T-1's session), so T-1 would be
+  staler, not safer; 5-minute = last row at or before the entry time on the
+  entry date (point-in-time at quote_time: that bar's spx_open, yesterday's
+  OI and volume). Grid mismatch, documented not fixed: a 09:30 entry has
+  these and no surface value; a 16:00 entry reads the 15:55 row here.
+- **Nulls AFTER coverage exist here** (unlike surface_metrics_core): the
+  spot guard (spx_open NULL/NaN/<=0 nulls the 12 spot-relative levels —
+  index_ohlc writes NaN, so it recurs) and per-bar-of-day z warm-up. So
+  `/values` returns `present` per bar and the page counts THREE reasons —
+  before its data starts / no bar (daily: "no row for the entry date") / a
+  bar or row but no value in it — in the row's subtitle, the whole-page
+  scope cost and the skipped text (`missingCounts`, `missingWords`, a
+  per-trade `surfpresent__<id>` column). Surface rows have no presence
+  column and keep their two reasons word for word. Coverage is ONE date per
+  metric (the first value at any bar); trades after it that a late-warming
+  bar misses are the third reason, never "no bar".
+- **Units** (`surface.UNIT_FORMATS`, additive — no RANKED surface metric has
+  any of them; the surface catalog's price/int columns are all in excluded
+  families): `pct` ×100 "%", `days` 1 dp, `index_0_100` 1 dp, `price` 2 dp,
+  `int` 0 dp **with `integer: true`**: an int row's nice steps are 1/2/5 ×
+  10^k, k >= 0 (`obNiceSteps(…, integer)`) — a 2.5 step on integers puts two
+  values in some bins and three in others, a staggered run of bars that is
+  only the step (the user acts on exactly that shape). Axis labels carry no
+  unit, by decision (the user reads values off the sliders; obFmt untouched).
+- **The dropdown** in the ranking card lists IV first, then OI · family,
+  Volume · family, Price · family (a cross metric under OI and Volume, one
+  id). Both catalogs load on each new log.
+- **Gates:** `check_oo_backtest` → `check_auto_bins` (integer cases; TRAP:
+  the same integers without the flag get 2.5 and staggered bins) and
+  `check_spx_rows` (node, stubbed server: id request, pct ×100, int whole
+  steps, three reasons adding up, date wording, cross in both, presence
+  column removed, new log, database down). `check_spx_metrics_sql` (temp
+  cluster: per-row surfaced, refusals, coverage with NaN and a later gap,
+  bar/date joins with `present`, 400/503, cache on catalog edit and new row;
+  `--live` read-only on the VPS: the agreed counts, every coverage date
+  against its table, sampled real entries vs a per-key lookup). **Neither
+  SQL mode has run on the dev box that wrote it (no initdb)**; the first
+  `--live` run on the VPS is its test.
+- **The off-state recording differs by design** after P2: a new request
+  (`/spx-metrics/catalog`, stubbed 404 there), the dropdown's aria-label,
+  and a new (hidden) error line. Re-record under reason 2 only after the
+  user has seen P2 in the browser.
 
 ### What `main.index_ohlc` actually looks like
 

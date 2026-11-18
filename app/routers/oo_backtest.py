@@ -45,6 +45,14 @@ Endpoints:
                                that metric at each bar, in order ("trades" is
                                accepted as the same list). Caps: distinct bars,
                                and trades for rank -- see surface.MAX_*
+  GET    /spx-metrics/catalog  the OI / volume / price metrics of the
+                               open_interest database (spx_metrics.py): served
+                               rows with id "<source>.<metric>" + min_date,
+                               the sections, family colours; 503 when
+                               OI_DATABASE_URL is not configured
+  POST   /spx-metrics/values   {"id": "<source>.<metric>", "bars": [[date, time],
+                               ...]} -> per bar: values, present (a row/bar was
+                               found), bar_times (5-minute tables only)
 
 A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
 today's market data; see app/oo_backtest/store.py.
@@ -67,8 +75,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 
-from app.db import get_pool
-from app.oo_backtest import (data_loader, market, parsed_cache, store, surface,
+from app.db import get_oi_pool, get_pool
+from app.oo_backtest import (data_loader, market, parsed_cache, spx_metrics, store, surface,
                              surface_stats, sweep)
 from app.oo_backtest.payload import assert_no_dropped_columns, trades_to_payload
 from app.oo_backtest.registry import registry_with_coverage
@@ -626,3 +634,37 @@ async def surface_values(body: dict = Body(...), pool=Depends(get_pool)):
             "bar_times": [r["bar_time"].strftime("%H:%M:%S") if r["bar_time"] else None for r in rows],
             "report": {**parse_report, **join_report}, "bar_rule": surface.BAR_RULE,
             "lookahead_confirmed": surface.LOOKAHEAD_CONFIRMED}
+
+
+# ── OI / volume / price metrics (open_interest database) ────────────────────
+
+async def _spx_catalog(pool) -> dict:
+    if pool is None:
+        raise HTTPException(503, "OI, volume and price metrics unavailable: OI_DATABASE_URL is not configured.")
+    try:
+        return await spx_metrics.get_catalog(pool)
+    except Exception as exc:  # noqa: BLE001 — logged with traceback, surfaced by name
+        log.exception("oo-backtest spx metrics catalog failed")
+        raise HTTPException(503, f"OI, volume and price metrics unavailable: {type(exc).__name__}: {exc}")
+
+
+@router.get("/spx-metrics/catalog")
+async def spx_metrics_catalog(pool=Depends(get_oi_pool)):
+    return await _spx_catalog(pool)
+
+
+@router.post("/spx-metrics/values")
+async def spx_metrics_values(body: dict = Body(...), pool=Depends(get_oi_pool)):
+    cat = await _spx_catalog(pool)
+    mid = body.get("id")
+    metric = next((m for m in cat["metrics"] if m["id"] == mid), None)
+    if metric is None:
+        raise HTTPException(400, f"Unknown or unsurfaced metric: {mid!r}.")
+    try:
+        bars, parse_report = surface.parse_bars(body.get("bars"), surface.MAX_VALUE_BARS)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    values, present, bar_times, join_report = await spx_metrics.entry_values(pool, metric, bars)
+    return {"id": mid, "values": values, "present": present,
+            "bar_times": bar_times if metric["join"] == "bar" else None,
+            "report": {**parse_report, **join_report}, "join": metric["join"], "bar_rule": surface.BAR_RULE}

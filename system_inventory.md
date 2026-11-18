@@ -85,6 +85,9 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 
 | Table | Category | Grain / PK | Populated by | Read by | UI pane / label | Safe to clear? |
 |---|---|---|---|---|---|---|
+| `spx_metric_catalog` | catalog | (table_name, metric) | Open_Interest project (`build_spx_catalog.py`, by hand) | `app/oo_backtest/spx_metrics.py` (live, cached; `surfaced` honoured per row) | OO Backtest: Add a metric section (OI / Volume / Price) | N |
+| `spx_oi_daily`, `spx_price_daily` | source | (trade_date) | Open_Interest project (07:30 before the open) | `spx_metrics.py` (date join: row T is already lookahead-free -- the build asserts it) | OO Backtest added rows | N |
+| `spx_oi_5min`, `spx_price_5min` | source | (trade_date, quote_time), 09:30-15:55 | Open_Interest project (every 5 min in session; all 78 rows of today on the first cycle) | `spx_metrics.py` (last bar at or before entry; point-in-time at quote_time) | OO Backtest added rows | N |
 | `daily_features` | source | (ticker, trade_date) | External pipeline (NOT in repo) | Every OI router; all `scripts/*.py`; AI Explorer & Research SQL agents | Every OI Analysis chart + OI Signals + Portfolio Builder + AI Explorer | N |
 | `underlying_ohlc` | source | (ticker, trade_date) | External pipeline | AI Explorer agent context; `research/{orchestrator,engine,agent}.py` | OHLC joins in Research/AI Explorer — not directly rendered | N |
 | `option_oi_surface` | source | (ticker, trade_date, expiration, strike, option_type) | External pipeline | AI Explorer SQL agent (schema prompt); Research routing | AI Explorer / Research only — not rendered as a dashboard pane | N |
@@ -527,6 +530,8 @@ filter, bin and statistic after that is computed in the browser** from
 | GET | `/surface/catalog` | R: `surface_metrics_catalog` | P6 surface metrics |
 | POST | `/surface/rank` | R: `surface_metrics_core` | Ranks 452 metrics against the filtered trades |
 | POST | `/surface/values` | R: `surface_metrics_core` | One metric for every trade, for an added row |
+| GET | `/spx-metrics/catalog` | R (OI pool): `spx_metric_catalog` + the four `spx_*` tables | OI / volume / price metrics; ids `<source>.<metric>`; 503 without `OI_DATABASE_URL` |
+| POST | `/spx-metrics/values` | R (OI pool): `spx_oi_daily`, `spx_oi_5min`, `spx_price_daily`, `spx_price_5min` | One metric for every trade's entry date (daily) or entry bar (5-minute), with `present` per bar |
 
 ### 3m. Backtest Portfolio (`/api/backtest-portfolio`) — 7 routes
 
