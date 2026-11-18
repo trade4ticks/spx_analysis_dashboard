@@ -1735,6 +1735,221 @@ def check_spx_rows() -> None:
           f"with the OI database unavailable the page says so, adds nothing, and the IV list is intact ({d['error']})")
 
 
+def check_filter_gain() -> None:
+    """Filter gain (surface_stats.filter_gain / filter_gains, the user's spec
+    2026-11-18) against a literal per-trade reference
+    (scripts/filter_gain_reference.py): the user's worked example, the
+    sign-flip rule, ties cut at value boundaries, the 40 % cap, few values,
+    the gathered (per distinct bar) path equal to the per-trade one, and the
+    cost beside the correlations it ships with."""
+    print("filter gain: surface_stats vs a per-trade reference")
+    import time as _t
+
+    import numpy as np
+
+    from app.oo_backtest import surface_stats as ss
+    from filter_gain_reference import reference, same
+
+    def fast(values, pnls):
+        v = np.array([np.nan if x is None else x for x in values], dtype=float)
+        p = np.array([np.nan if x is None else x for x in pnls], dtype=float)
+        ok = np.isfinite(v) & np.isfinite(p)
+        return ss.filter_gain(v[ok], np.ones(int(ok.sum()), dtype=int), p[ok])
+
+    # The user's example: flat for 70 % of the range, bad above it.
+    v = list(range(1000))
+    pn = [25.0 if x >= 700 else 275.0 for x in v]
+    f = fast(v, pn)
+    check(f["filter_gain"] == 75.0 and f["fg_side"] == "right" and f["fg_n_removed"] == 300
+          and f["fg_removed_mean"] == 25.0 and f["fg_kept_mean"] == 275.0 and f["fg_removed_pct"] == 30.0
+          and f["fg_hi"] == 700.0 and f["fg_lo"] is None,
+          f"the worked example: +$75/trade, right 30 %, removed 300 @ $25, kept 700 @ $275 ({f})")
+
+    # Sign flip: the outermost 5 % is GOOD, the next 25 % bad. A 30 % cut
+    # averages the good bin away and would look attractive; it must not count.
+    pn = [600.0 if x < 50 else (-200.0 if x < 300 else 100.0) for x in v]
+    f = fast(v, pn)
+    check(f["filter_gain"] == 0.0 and f["fg_side"] is None,
+          f"sign flip: a good outermost 5 % in front of bad trades is not a cut on that side -- scores 0 ({f['filter_gain']})")
+    pn_rev = list(reversed(pn))
+    f = fast(v, pn_rev)
+    check(f["filter_gain"] == 0.0, "the same shape at the right end: 0")
+    # ... but the walk stops only at a gap >= 0: the same bad block AT the edge scores.
+    pn2 = [-200.0 if x < 250 else 100.0 for x in v]
+    f = fast(v, pn2)
+    check(f["fg_side"] == "left" and f["fg_n_removed"] == 250 and abs(f["filter_gain"] - 250 * 300 / 1000) < 1e-9,
+          f"the bad block at the edge is found at its own depth, 25 % ({f['fg_side']} {f['fg_removed_pct']} %)")
+
+    # Both ends bad: the both-sided family wins, at most 20 % from each end.
+    pn3 = [-300.0 if (x < 150 or x >= 850) else 120.0 for x in v]
+    f = fast(v, pn3)
+    check(f["fg_side"] == "both" and f["fg_n_removed"] == 300 and f["fg_lo"] == 150.0 and f["fg_hi"] == 850.0,
+          f"bad at both ends: a both-sided cut, 15 % from each end ({f['fg_side']}, {f['fg_n_removed']} removed)")
+
+    # The cap: a metric bad over its lowest 70 % still removes at most 40 %.
+    pn4 = [-50.0 if x < 700 else 400.0 for x in v]
+    f = fast(v, pn4)
+    check(f["fg_removed_pct"] <= 40.0 and f["fg_n_removed"] == 400,
+          f"the 40 % cap holds: bad over 70 % of the range, the cut stops at 40 % ({f['fg_removed_pct']} %)")
+
+    # Ties: a daily metric -- 2,000 trades on 160 dates share 160 values.
+    rng = random.Random(61)
+    dates = [rng.randrange(160) for _ in range(2000)]
+    dval = [round(rng.gauss(0, 1), 3) for _ in range(160)]
+    vt = [dval[d] for d in dates]
+    pt = [round(rng.gauss(40 if dval[d] > -0.8 else -60, 150), 2) for d in dates]
+    f, ref = fast(vt, pt), reference(vt, pt)
+    nominal = {5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0}
+    check(same(f, ref) and f["fg_side"] is not None,
+          f"tied values (2,000 trades, 160 values): equal to the reference ({f['fg_side']}, actual "
+          f"{f['fg_removed_pct']:.2f} % -- not a nominal step)")
+    check(round(f["fg_removed_pct"], 9) not in nominal and f["fg_removed_pct"] <= 40.0,
+          f"with ties the cut is at a value boundary: the ACTUAL share is reported ({f['fg_removed_pct']:.2f} %), "
+          f"never more than the nominal step")
+    two = fast([1] * 50 + [2] * 50, [-10.0] * 50 + [10.0] * 50)
+    check(two["filter_gain"] == 0.0,
+          f"two values of 50 trades each: every one-sided cut would remove 50 %, past the cap -- score 0 ({two['filter_gain']})")
+    few = fast([1] * 10 + [2] * 80 + [3] * 10, [-50.0] * 10 + [30.0] * 80 + [-40.0] * 10)
+    check(few["fg_side"] == "both" and few["fg_n_removed"] == 20,
+          f"three values: the only cuts are the 10 % tails; both together win ({few['fg_side']}, {few['fg_n_removed']})")
+    check(fast([5] * 30, [1.0] * 30)["filter_gain"] == 0.0 and fast([1, 2], [1.0, 2.0])["filter_gain"] is None
+          and fast([1, None, 3], [1.0, 2.0, None])["filter_gain"] is None,
+          "a constant metric scores 0; fewer than MIN_N trades with a value AND a P/L has no score (None)")
+
+    # Random fuzz, every field equal to the reference.
+    bad = []
+    for case in range(250):
+        n = rng.choice([4, 9, 30, 120, 400])
+        k = rng.choice([2, 3, 6, 25, n])
+        vals = [rng.randrange(k) * 0.5 for _ in range(n)]
+        shape = rng.random()
+        pn = [round(rng.gauss(30 - (80 if (shape < 0.5 and x < 1) or (shape >= 0.5 and x > k * 0.4) else 0), 60), 2)
+              for x in vals]
+        for i in rng.sample(range(n), n // 10):
+            vals[i] = None
+        if not same(fast(vals, pn), reference(vals, pn)):
+            bad.append(case)
+    check(not bad, f"250 random metrics (ties, few values, missing values): every field equals the reference ({bad[:5]})")
+
+    # Per distinct bar (a sweep) = per trade.
+    d = np.array([[rng.gauss(0, 1) if rng.random() > 0.1 else np.nan for _ in range(5)] for _ in range(300)])
+    gather = np.array([rng.randrange(300) for _ in range(3000)])
+    pnl = np.array([rng.gauss(10, 100) if rng.random() > 0.02 else np.nan for _ in range(3000)])
+    gathered = ss.filter_gains(d, gather, pnl)
+    per_trade = ss.filter_gains(d[gather], np.arange(3000), pnl)
+    check(all(same(a, {"score": b["filter_gain"], "side": b["fg_side"], "n_removed": b["fg_n_removed"],
+                       "removed_mean": b["fg_removed_mean"], "n_kept": b["fg_n_kept"], "kept_mean": b["fg_kept_mean"],
+                       "lo": b["fg_lo"], "hi": b["fg_hi"]} if b["filter_gain"] else
+                      (None if b["filter_gain"] is None else {"score": 0.0, "side": None}), 1e-9)
+              for a, b in zip(gathered, per_trade)),
+          "computed per distinct bar (each bar's trade count and P/L sum) = computed per trade")
+
+    # Cost, beside the correlations (one log; a sweep's bars).
+    for label, n_bars, n_trades in (("one log, 2,100 trades", 2100, 2100), ("sweep, 3,400 bars / 300,000 trades", 3400, 300_000)):
+        nr = np.random.default_rng(5)
+        X = nr.normal(size=(n_bars + 1, 452))
+        X[0] = np.nan
+        X[1:200, :116] = np.nan                       # later-starting forms
+        g = nr.integers(1, n_bars + 1, size=n_trades)
+        pl = nr.normal(10, 150, size=n_trades)
+        t0 = _t.perf_counter()
+        ss.correlations_gathered(X, g, pl, g)
+        t1 = _t.perf_counter()
+        ss.filter_gains(X, g, pl)
+        t2 = _t.perf_counter()
+        print(f"  info  {label} x 452 metrics: correlations {t1 - t0:.3f} s, filter gain {t2 - t1:.3f} s")
+
+def check_spx_rank_sections() -> None:
+    """spx_metrics.rank_sections (P4), pure -- no database: each section is
+    its own BH family; a cross metric has identical r, p and filter gain in
+    OI and Volume and each section's own adjusted p; a section's coverage
+    start restricts THAT section only; a daily metric's distinct entries
+    are dates, a 5-minute one's are bars; rows equal stat_rows on the
+    column."""
+    print("OI / volume / price ranking per section (pure)")
+    from datetime import date as _d, time as _tm, timedelta as _td
+
+    import numpy as np
+
+    from app.oo_backtest import spx_metrics as sm
+    from app.oo_backtest import surface_stats as ss
+
+    def m(src, metric, fam):
+        return {"id": f"{src}.{metric}", "metric": metric, "source": src, "family": fam, "form": "level",
+                "units": "ratio", "join": sm.SOURCES[src]["join"]}
+    metrics = [m("oi_daily", "a", "oi"), m("oi_5min", "b", "oi_spot"), m("oi_daily", "x1", "cross"),
+               m("oi_5min", "x2", "cross"), m("oi_daily", "v", "volume"), m("oi_5min", "w", "volume_spot"),
+               m("price_daily", "r", "price_trend"), m("price_5min", "q", "price_vol"), m("oi_5min", "c", "oi")]
+    # OI has 5 metrics and Volume 4, as the real sections differ (70 / 53): BH multiplies by a different m.
+    rng = np.random.default_rng(7)
+    days = [_d(2023, 1, 2) + _td(days=i) for i in range(120)]
+    keys = sorted({(d, _tm(10 + h, 0)) for d in days for h in range(2)})
+    n_t = 900
+    pick = rng.integers(0, len(keys), size=n_t)
+    trades = [(keys[i][0], keys[i][1], float(rng.normal(20, 150))) for i in pick]
+    gather = pick + 1
+    X = rng.normal(size=(len(keys) + 1, len(metrics)))
+    X[0] = np.nan
+    # Daily columns hold one value per DATE, and some values are missing.
+    for j, mm in enumerate(metrics):
+        if mm["source"].endswith("daily"):
+            per_day = {d: rng.normal() for d in days}
+            X[1:, j] = [per_day[k[0]] for k in keys]
+        X[1:, j][rng.random(len(keys)) < 0.08] = np.nan
+    # Make the P/L lean on x1 and v so their p are small and BH has work.
+    for t, g in enumerate(gather):
+        trades[t] = (trades[t][0], trades[t][1], trades[t][2] + 60 * np.nan_to_num(X[g, 2]) + 40 * np.nan_to_num(X[g, 4]))
+    present = {src: np.ones(len(keys) + 1, dtype=bool) for src in sm.SOURCES}
+    bar_time = {src: [None] + [k[1] for k in keys] for src in sm.SOURCES}
+    for src in present:
+        present[src][0] = False
+    out = sm.rank_sections(metrics, X, trades, gather, present, bar_time, {})
+    ids = {k: [r["id"] for r in v] for k, v in out.items()}
+    check(ids == {"oi": ["oi_daily.a", "oi_5min.b", "oi_daily.x1", "oi_5min.x2", "oi_5min.c"],
+                  "volume": ["oi_daily.x1", "oi_5min.x2", "oi_daily.v", "oi_5min.w"],
+                  "price": ["price_daily.r", "price_5min.q"]},
+          f"sections hold their families' metrics, the cross ones in OI AND Volume ({ids})")
+    pnl = [t[2] for t in trades]
+    same_stats = True
+    for sec, rows in out.items():
+        for r in rows:
+            j = next(i for i, mm in enumerate(metrics) if mm["id"] == r["id"])
+            src = metrics[j]["source"]
+            seen: dict = {}
+            bid = np.array([seen.setdefault(t[0] if src.endswith("daily") else (t[0], bar_time[src][g]), len(seen))
+                            for t, g in zip(trades, gather.tolist())])
+            ref = ss.stat_rows(X[:, [j]], pnl, bid, gather)[0]
+            if any(r[k] != ref[k] for k in ref):
+                same_stats = False
+    check(same_stats, "every row's n, bars, r, p and filter gain equal stat_rows on that column alone")
+    x_oi = {r["id"]: r for r in out["oi"]}
+    x_vol = {r["id"]: r for r in out["volume"]}
+    keys_same = ("n", "bars", "pearson", "pearson_p", "spearman", "spearman_p", "filter_gain", "fg_side")
+    check(all(x_oi[c][k] == x_vol[c][k] for c in ("oi_daily.x1", "oi_5min.x2") for k in keys_same),
+          "a cross metric's r, p and filter gain are the same in both sections")
+    for sec, rows in out.items():
+        want = ss.benjamini_hochberg([r["spearman_p"] for r in rows])
+        check([r["spearman_p_bh"] for r in rows] == want,
+              f"{sec}: BH over that section's {len(rows)} metrics only")
+    check(x_oi["oi_daily.x1"]["spearman_p_bh"] != x_vol["oi_daily.x1"]["spearman_p_bh"],
+          f"so a cross metric's adjusted p differs between the two ({x_oi['oi_daily.x1']['spearman_p_bh']:.3g} in OI, "
+          f"{x_vol['oi_daily.x1']['spearman_p_bh']:.3g} in Volume)")
+    d_rows = out["oi"][0]
+    n_dates = len({t[0] for t, g in zip(trades, gather.tolist()) if np.isfinite(X[g, 0])})
+    check(d_rows["bars"] == n_dates, f"a daily metric's distinct entries are its DATES ({d_rows['bars']} = {n_dates})")
+
+    start = _d(2023, 3, 1)
+    late = sm.rank_sections(metrics, X, trades, gather, present, bar_time, {"price": start})
+    check(late["oi"] == out["oi"] and late["volume"] == out["volume"],
+          "a coverage start on Price leaves OI and Volume exactly as they were")
+    pl = [p if t[0] >= start else None for t, p in zip(trades, pnl)]
+    dlist = sorted({t[0] for t in trades})
+    ref = ss.stat_rows(X[:, [6]], pl, np.array([dlist.index(t[0]) for t in trades]), gather)[0]
+    check(late["price"][0]["n"] == ref["n"] and late["price"][0]["spearman"] == ref["spearman"]
+          and late["price"][0]["n"] < out["price"][0]["n"],
+          f"Price with a start ranks only trades entered on/after it ({late['price'][0]['n']} of {out['price'][0]['n']})")
+
+
 DEPLOY_DRIVER = r"""
 const fs = require('fs');
 global.document = { addEventListener: () => {} };
@@ -2195,7 +2410,7 @@ def check_export_csv() -> None:
 CHECKS = [
     "check_registry", "check_against_source", "check_binning", "check_stats_parity", "check_section_parity",
     "check_auto_bins", "check_component_filters", "check_export_csv", "check_deployment_and_extra_stats",
-    "check_surface_ranking_ui", "check_surface_rows", "check_spx_rows", "check_dropped_scope", "check_parsers",
+    "check_surface_ranking_ui", "check_surface_rows", "check_spx_rows", "check_filter_gain", "check_spx_rank_sections", "check_dropped_scope", "check_parsers",
     "check_real_mesosim", "check_surface_stats",
 ]
 # Files the checks read. Missing, they are a FAIL naming the file -- never an

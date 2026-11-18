@@ -384,7 +384,7 @@ COVERS = {
     "check_ft_population":       [("ok", 90)],                                      # 119
     "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 24)],             # 32 (+ min strike, export values; 2026-11-07)
     "check_ft_values_sql":       [("ok", 11)],                                      # 15
-    "check_spx_metrics_sql":     [("ok", 15)],                                      # 20 (new, 2026-11-17; not yet run here -- no initdb)
+    "check_spx_metrics_sql":     [("ok", 22)],                                      # 29 (+ rank, 2026-11-18; temp mode not yet run here -- no initdb)
     "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 82)],             # 109 (+ cap provenance, exit avg_ret; 2026-11-07)
     "check_ft_sectors_ui":       [(r"(\d+) assertions, failures", 53)],             # 71 (+ exit pane layout; 2026-11-07)
     "check_strategy_signal":     [("ok", 85)],                                      # 112

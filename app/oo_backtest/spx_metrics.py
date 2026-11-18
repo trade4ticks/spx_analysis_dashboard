@@ -319,3 +319,124 @@ async def entry_values(pool, metric: dict, bars: list[tuple]) -> tuple[list, lis
     return values, present, bar_times, {"distinct_entries": len(keys), "not_present": no_row,
                                         "present_no_value": no_value, "with_value": len(bars) - no_row - no_value,
                                         "query_s": round(_time.monotonic() - t0, 3), "join": s["join"]}
+
+
+# ── ranking (P4): every served metric against the trades' P/L ───────────────
+#
+# One request ranks the three sections (OI, Volume, Price). Each section is
+# its OWN Benjamini-Hochberg family (the user's decision: adding these must
+# not make the 452 surface metrics' adjusted p more conservative, and the
+# sections are read apart), so a `cross` metric gets one adjusted p in OI and
+# another in Volume; its r, p and filter gain are the same in both. Each
+# section may carry its own coverage start (`from`, the page's "common
+# coverage only"): only trades entered on or after it are in that section's
+# sample. Sections sharing a start share one computation.
+#
+# "bars" (distinct entries behind a correlation) is per source: a daily
+# table's metric holds one value per DATE, a 5-minute table's one per bar.
+
+def matrix_sql(table: str, join: str, columns: list[str]) -> str:
+    """values_sql for many columns at once: $1 date[], $2 time[] -> per
+    element bar_time (bar joins), present, then every column (NULL for NULL
+    or NaN), in `columns` order."""
+    t = quote_ident(table)
+    if join == "bar":
+        inner = ", ".join(f"{_valid(c)} AS {quote_ident(c)}" for c in columns)
+        outer = ", ".join(f"b.{quote_ident(c)}" for c in columns)
+        return f"""
+SELECT t.d AS entry_date, t.tm AS entry_time, b.quote_time AS bar_time,
+       (b.quote_time IS NOT NULL) AS present, {outer}
+FROM unnest($1::date[], $2::time[]) AS t(d, tm)
+LEFT JOIN LATERAL (
+    SELECT quote_time, {inner}
+    FROM {t}
+    WHERE trade_date = t.d AND quote_time <= t.tm
+    ORDER BY quote_time DESC
+    LIMIT 1
+) b ON true"""
+    outer = ", ".join(f"{_valid(c, 'b')} AS {quote_ident(c)}" for c in columns)
+    return f"""
+SELECT t.d AS entry_date, t.tm AS entry_time, NULL::time AS bar_time,
+       (b.trade_date IS NOT NULL) AS present, {outer}
+FROM unnest($1::date[], $2::time[]) AS t(d, tm)
+LEFT JOIN {t} b ON b.trade_date = t.d"""
+
+
+async def bars_matrix(pool, keys: list[tuple], metrics: list[dict]):
+    """For DISTINCT (date, time) keys: (matrix, present, bar_time, query_s).
+    matrix is (len(keys)+1) x len(metrics), row 0 all NaN (trades with no
+    key point there), row i+1 = keys[i]; present[source] and
+    bar_time[source] are per row. One query per source, chunked."""
+    import numpy as np
+    from app.oo_backtest.surface import QUERY_CHUNK_BARS as CHUNK
+    X = np.full((len(keys) + 1, len(metrics)), np.nan)
+    present = {src: np.zeros(len(keys) + 1, dtype=bool) for src in SOURCES}
+    bar_time = {src: [None] * (len(keys) + 1) for src in SOURCES}
+    pos = {k: i for i, k in enumerate(keys, start=1)}
+    t0 = _time.monotonic()
+    if keys:
+        async with pool.acquire() as conn:
+            for src, s in SOURCES.items():
+                cols = [j for j, m in enumerate(metrics) if m["source"] == src]
+                if not cols:
+                    continue
+                sql = matrix_sql(s["table"], s["join"], [metrics[j]["metric"] for j in cols])
+                for a in range(0, len(keys), CHUNK):
+                    chunk = keys[a:a + CHUNK]
+                    rows = await conn.fetch(sql, [k[0] for k in chunk], [k[1] for k in chunk])
+                    idx, vals = [], []
+                    for r in rows:
+                        i = pos[(r["entry_date"], r["entry_time"])]
+                        present[src][i] = bool(r["present"])
+                        bar_time[src][i] = r["bar_time"]
+                        if r["present"]:
+                            idx.append(i)
+                            vals.append(tuple(r)[4:])
+                    if idx:
+                        v = np.array(vals, dtype=object)
+                        v[v == None] = np.nan                       # noqa: E711 -- elementwise, on an object array
+                        X[np.ix_(idx, cols)] = v.astype(float)
+                    del rows, vals
+    return X, present, bar_time, round(_time.monotonic() - t0, 3)
+
+
+def rank_sections(metrics: list[dict], X, trades: list[tuple], gather, present, bar_time,
+                  starts: dict | None = None) -> dict:
+    """{section key: rows} for SECTIONS. trades = [(date, time, pnl)],
+    gather[t] -> row of X; starts = {section key: date | None}. Each row:
+    id, metric, source, family, form, units + n, bars, r/p, BH p WITHIN
+    ITS SECTION, filter gain fields."""
+    import numpy as np
+    from app.oo_backtest import surface_stats as ss
+    starts = starts or {}
+    gather = np.asarray(gather)
+    pnl = np.array([np.nan if t[2] is None else t[2] for t in trades], dtype=float)
+    dates = [t[0] for t in trades]
+    # distinct-entry ids per source: a date for a daily table, (date, bar) for a 5-minute one
+    bar_ids = {}
+    for src, s in SOURCES.items():
+        ids: dict = {}
+        if s["join"] == "date":
+            bar_ids[src] = np.array([ids.setdefault(d, len(ids)) for d in dates])
+        else:
+            bar_ids[src] = np.array([ids.setdefault((d, bar_time[src][g]), len(ids)) for d, g in zip(dates, gather.tolist())])
+    by_start: dict = {}
+    for sec in SECTIONS:
+        by_start.setdefault(starts.get(sec["key"]), []).append(sec)
+    out: dict = {}
+    for start, secs in by_start.items():
+        fams = {f for sec in secs for f in sec["families"]}
+        p = pnl if start is None else np.where([d is not None and d >= start for d in dates], pnl, np.nan)
+        stats: dict = {}
+        for src in SOURCES:
+            cols = [j for j, m in enumerate(metrics) if m["source"] == src and m["family"] in fams]
+            if not cols:
+                continue
+            for j, st in zip(cols, ss.stat_rows(X[:, cols], list(p), bar_ids[src], gather)):
+                stats[j] = st
+        for sec in secs:
+            rows = [{"id": m["id"], "metric": m["metric"], "source": m["source"], "family": m["family"],
+                     "form": m["form"], "units": m["units"], **stats[j]}
+                    for j, m in enumerate(metrics) if m["family"] in sec["families"]]
+            out[sec["key"]] = ss.with_bh(rows)
+    return out

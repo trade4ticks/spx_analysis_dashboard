@@ -532,6 +532,7 @@ filter, bin and statistic after that is computed in the browser** from
 | POST | `/surface/values` | R: `surface_metrics_core` | One metric for every trade, for an added row |
 | GET | `/spx-metrics/catalog` | R (OI pool): `spx_metric_catalog` + the four `spx_*` tables | OI / volume / price metrics; ids `<source>.<metric>`; 503 without `OI_DATABASE_URL` |
 | POST | `/spx-metrics/values` | R (OI pool): `spx_oi_daily`, `spx_oi_5min`, `spx_price_daily`, `spx_price_5min` | One metric for every trade's entry date (daily) or entry bar (5-minute), with `present` per bar |
+| POST | `/spx-metrics/rank` | R (OI pool): the four `spx_*` tables | Ranks the 155 per section (OI / Volume / Price), BH within each section, filter gain; optional per-section `from` |
 
 ### 3m. Backtest Portfolio (`/api/backtest-portfolio`) — 7 routes
 

@@ -24,7 +24,8 @@ nothing touches the real database. What it pins:
 open_interest database (OI_DATABASE_URL, or --dsn), READ-ONLY --
 default_transaction_read_only=on, a write proven refused first. It also
 holds the catalog to the counts agreed on 2026-11-17 (155 served, 168
-displayed: OI 70, Volume 53, Price 45; 25 not surfaced), checks every
+displayed: OI 70, Volume 53, Price 45; 26 not surfaced -- 16
+ingredients, total_oi and the nine drifting levels), checks every
 metric's coverage date against the table (a value on it, none before), and
 compares sampled real entries with a plain per-key lookup.
   .venv/bin/python scripts/check_spx_metrics_sql.py --live
@@ -103,6 +104,52 @@ INSERT INTO spx_oi_5min VALUES
 INSERT INTO spx_price_daily VALUES ('{D2}', 55.5), ('{D3}', 61.25);
 INSERT INTO spx_price_5min VALUES ('{D2}', '09:30', 4710, 0.001, 1), ('{D2}', '10:00', 4720, -0.002, 2);
 """
+
+
+async def check_rank(rank_fn, values_fn, bars: list, pnl: list, label: str, per_section: int | None = None) -> None:
+    """/spx-metrics/rank against its parts: for each metric checked, the
+    values endpoint's per-bar values (themselves held to a direct lookup)
+    gathered to the trades, then scipy's pearsonr / spearmanr, the per-trade
+    filter-gain reference, and BH over each section's own p-values."""
+    import math
+
+    from scipy import stats as st
+
+    from app.oo_backtest import surface_stats as ss
+    from filter_gain_reference import reference, same
+
+    distinct = sorted({tuple(b) for b in bars})
+    bar_of = [distinct.index(tuple(b)) for b in bars]
+    res = await rank_fn({"bars": [list(b) for b in distinct], "bar_of": bar_of, "pnl": pnl})
+    secs = res["sections"]
+    check(sorted(secs) == ["oi", "price", "volume"], f"{label}: one result per section ({sorted(secs)})")
+    for key, rows in secs.items():
+        check([r["spearman_p_bh"] for r in rows] == ss.benjamini_hochberg([r["spearman_p"] for r in rows])
+              and [r["pearson_p_bh"] for r in rows] == ss.benjamini_hochberg([r["pearson_p"] for r in rows]),
+              f"{label}: {key} -- BH over its own {len(rows)} metrics")
+    checked, bad = 0, []
+    for key, rows in secs.items():
+        for r in (rows if per_section is None else rows[:per_section] + rows[-1:]):
+            v = await values_fn(r["id"], [list(b) for b in distinct])
+            per_trade = [v["values"][i] for i in bar_of]
+            pairs = [(x, p) for x, p in zip(per_trade, pnl) if x is not None and p is not None]
+            fast_fg = {k: r[k] for k in ("filter_gain", "fg_side", "fg_removed_pct", "fg_n_removed", "fg_removed_mean",
+                                          "fg_n_kept", "fg_kept_mean", "fg_lo", "fg_hi")}
+            ok = r["n"] == len(pairs) and same(fast_fg, reference(per_trade, pnl), 1e-6)
+            if len(pairs) >= 3 and len({x for x, _ in pairs}) > 1 and len({p for _, p in pairs}) > 1:
+                xs, ps = [x for x, _ in pairs], [p for _, p in pairs]
+                pr, sp = st.pearsonr(xs, ps), st.spearmanr(xs, ps)
+                ok = ok and math.isclose(r["pearson"], pr[0], rel_tol=1e-9, abs_tol=1e-12) \
+                    and math.isclose(r["spearman"], sp[0], rel_tol=1e-9, abs_tol=1e-12)
+            checked += 1
+            if not ok:
+                bad.append(r["id"])
+    check(not bad and checked > 0,
+          f"{label}: {checked} metrics -- n, Pearson, Spearman and filter gain equal the values endpoint + scipy + "
+          f"the per-trade reference ({bad[:5]})")
+    print(f"  info  {label}: query {res['report']['query_s']} s, stats {res['report']['compute_s']} s, "
+          f"{res['report']['distinct_entries']} distinct entries")
+    return res
 
 
 async def run(dsn: str) -> None:
@@ -185,6 +232,30 @@ async def run(dsn: str) -> None:
               and await status(r.spx_metrics_values(body={"id": "oi_daily.pct_front", "bars": bars}, pool=None)) == 503,
               "no open_interest pool configured: 503 from both endpoints, never a crash")
 
+        print("ranking")
+        tbars = [[D2.isoformat(), t] for t in ("09:30:00", "09:31", "09:36", "09:41", "15:59", "09:29")] + \
+                [[D1.isoformat(), "09:31"], [D1.isoformat(), "09:36"], [D3.isoformat(), "10:00"], [D4.isoformat(), "11:00"],
+                 [D5.isoformat(), "12:00"], [SAT.isoformat(), "10:00"]] * 2
+        tpnl = [round(17.0 * ((i * 7) % 11) - 60, 2) for i in range(len(tbars))]
+        res = await check_rank(lambda b: r.spx_metrics_rank(body=b, pool=pool),
+                               lambda mid, bs: values(mid, bs), tbars, tpnl, "temp cluster")
+        cross = [{x["id"]: x for x in res["sections"][k]}["oi_daily.ratio_x"] for k in ("oi", "volume")]
+        check(cross[0]["spearman"] == cross[1]["spearman"] and cross[0]["filter_gain"] == cross[1]["filter_gain"],
+              "the cross metric is ranked once: the same figures in OI and Volume")
+        late = await r.spx_metrics_rank(body={"bars": tbars, "bar_of": list(range(len(tbars))), "pnl": tpnl,
+                                              "from": {"oi": D3.isoformat()}}, pool=pool)
+        base = await r.spx_metrics_rank(body={"bars": tbars, "bar_of": list(range(len(tbars))), "pnl": tpnl}, pool=pool)
+        check(late["sections"]["price"] == base["sections"]["price"]
+              and {x["id"]: x["n"] for x in late["sections"]["oi"]}["oi_daily.n_strikes"]
+              < {x["id"]: x["n"] for x in base["sections"]["oi"]}["oi_daily.n_strikes"],
+              "a coverage start for OI narrows OI and leaves Price as it was")
+        check(await status(r.spx_metrics_rank(body={"bars": tbars, "bar_of": list(range(len(tbars))), "pnl": tpnl,
+                                                     "from": {"iv": None}}, pool=pool)) == 400
+              and await status(r.spx_metrics_rank(body={"bars": tbars, "bar_of": [0], "pnl": tpnl}, pool=pool)) == 400,
+              "an unknown section in from, or bar_of / pnl of different lengths, is a 400")
+        check(await status(r.spx_metrics_rank(body={"bars": tbars, "bar_of": [0], "pnl": [1.0]}, pool=None)) == 503,
+              "no pool: 503")
+
         print("cache")
         built = cat["built_at"]
         again = await sm.get_catalog(pool)
@@ -212,7 +283,7 @@ async def run(dsn: str) -> None:
 
 # Agreed with the user, 2026-11-17. A rebuilt catalog that changes them fails
 # here on purpose: say so, and move them.
-LIVE_EXPECT = {"served": 155, "displayed": 168, "not_surfaced": 25, "sections": {"oi": 70, "volume": 53, "price": 45}}
+LIVE_EXPECT = {"served": 155, "displayed": 168, "not_surfaced": 26, "sections": {"oi": 70, "volume": 53, "price": 45}}
 LIVE_SAMPLE = 40
 
 
@@ -309,6 +380,20 @@ async def run_live(dsn: str) -> None:
                     check(not mismatches, f"{m['id']}: {len(keys)} entries equal a plain per-key lookup "
                                           f"({sum(present)} present, {sum(1 for x in vals if x is not None)} with a value)"
                                           + (f" -- first mismatch {mismatches[0]}" if mismatches else ""))
+
+        print("ranking, sampled real entries")
+        from app.routers import oo_backtest as r
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT trade_date, quote_time FROM spx_oi_5min ORDER BY random() LIMIT 1500")
+        rbars = [[x["trade_date"].isoformat(), x["quote_time"].strftime("%H:%M:%S")] for x in rows]
+        rbars = rbars + rbars[:500]                 # trades sharing a bar, as a sweep's do
+        rr = random.Random(23)
+        rpnl = [round(rr.gauss(15, 180), 2) for _ in rbars]
+
+        async def vals(mid, bs):
+            return await r.spx_metrics_values(body={"id": mid, "bars": bs}, pool=pool)
+        await check_rank(lambda b: r.spx_metrics_rank(body=b, pool=pool), vals, rbars, rpnl, "live, 2,000 trades",
+                         per_section=3)
     finally:
         await pool.close()
 

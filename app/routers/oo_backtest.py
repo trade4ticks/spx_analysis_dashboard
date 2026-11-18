@@ -53,6 +53,10 @@ Endpoints:
   POST   /spx-metrics/values   {"id": "<source>.<metric>", "bars": [[date, time],
                                ...]} -> per bar: values, present (a row/bar was
                                found), bar_times (5-minute tables only)
+  POST   /spx-metrics/rank     /surface/rank's body + optional "from": {section:
+                               date|null} -> per section (OI, Volume, Price) its
+                               rows: n, bars, r/p, BH p WITHIN THE SECTION, and
+                               filter gain
 
 A saved strategy stores the ORIGINAL FILE, not joined trades, so a load gets
 today's market data; see app/oo_backtest/store.py.
@@ -668,3 +672,38 @@ async def spx_metrics_values(body: dict = Body(...), pool=Depends(get_oi_pool)):
     return {"id": mid, "values": values, "present": present,
             "bar_times": bar_times if metric["join"] == "bar" else None,
             "report": {**parse_report, **join_report}, "join": metric["join"], "bar_rule": surface.BAR_RULE}
+
+
+@router.post("/spx-metrics/rank")
+async def spx_metrics_rank(body: dict = Body(...), pool=Depends(get_oi_pool)):
+    import numpy as np
+    try:
+        trades, parse_report = surface.parse_rank_request(body)
+        raw = body.get("from") or {}
+        if not isinstance(raw, dict):
+            raise ValueError("from must be an object {section: date or null}")
+        starts = {}
+        for k, v in raw.items():
+            if k not in {s["key"] for s in spx_metrics.SECTIONS}:
+                raise ValueError(f"unknown section in from: {k!r}")
+            starts[k] = date.fromisoformat(str(v)) if v else None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    cat = await _spx_catalog(pool)
+    metrics = cat["metrics"]
+    keys = sorted({(t[0], t[1]) for t in trades if t[0] is not None and t[1] is not None})
+    X, present, bar_time, query_s = await spx_metrics.bars_matrix(pool, keys, metrics)
+    pos = {k: i for i, k in enumerate(keys, start=1)}
+    gather = np.fromiter((pos.get((t[0], t[1]), 0) for t in trades), dtype=np.int64, count=len(trades))
+    t0 = _time.monotonic()
+    sections = await asyncio.to_thread(spx_metrics.rank_sections, metrics, X, trades, gather, present, bar_time, starts)
+    compute_s = round(_time.monotonic() - t0, 3)
+    g = gather.tolist()
+    not_present = {src: sum(1 for i in g if not present[src][i]) for src in spx_metrics.SOURCES}
+    log.info("oo-backtest spx metrics rank: %d trades, %d distinct entries, %d metrics; query %.2fs, stats %.3fs",
+             len(trades), len(keys), len(metrics), query_s, compute_s)
+    return {"sections": sections,
+            "report": {**parse_report, "distinct_entries": len(keys), "metrics": len(metrics),
+                       "not_present": not_present, "from": {k: (v.isoformat() if v else None) for k, v in starts.items()},
+                       "query_s": query_s, "compute_s": compute_s},
+            "bar_rule": surface.BAR_RULE, "catalog_built_at": cat["built_at"]}

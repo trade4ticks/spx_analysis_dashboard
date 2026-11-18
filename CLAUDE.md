@@ -1854,7 +1854,11 @@ trade_date), `spx_oi_5min`, `spx_price_5min` (per (trade_date, quote_time),
 Built by the user's Open_Interest project. Phases (agreed 2026-11-17):
 **P1** server, read-only — done; **P2** values into added-row histograms on
 the analyzer page — done (the main step); **P4** ranking per section on the
-server; **P5** four ranking sections (IV, OI, Volume, Price), ONE button;
+server, with FILTER GAIN — done 2026-11-18; **P5** four ranking sections
+(IV, OI, Volume, Price), ONE button, Filter gain in the sort toggle, and
+ONE combined "add a metric" dropdown over all 607 grouped IV / OI / Volume
+/ Price (the user's call, 2026-11-18 — not four scoped dropdowns: a metric
+must be findable without knowing its category; it keeps the panes small);
 **P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
 Price, "add a metric"); **P6** checks and docs. **What the user does with
 it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
@@ -1873,7 +1877,8 @@ histogram correctness (units, binning, counts) beats statistical polish.
   unsurfaced). No served name collides with the 452 (user, 2026-11-17).
   Row keys and canvas ids replace the `.` (`spx_oi_5min__pct_x`).
 - **Catalog read LIVE** (the user's decision): served = `surfaced` true PER
-  ROW (9 drifting raw levels are hidden inside surfaced families; 16
+  ROW (10 unsurfaced levels -- total_oi and nine that drift -- sit inside
+  surfaced families; 16
   `ingredient` rows), table one of the four, column present and numeric.
   Unsurfaced = not computed, not counted. Refusals are reported by name.
   Cache key: each table's first/last date and row count + an md5 of the
@@ -1925,9 +1930,65 @@ histogram correctness (units, binning, counts) beats statistical polish.
   cluster: per-row surfaced, refusals, coverage with NaN and a later gap,
   bar/date joins with `present`, 400/503, cache on catalog edit and new row;
   `--live` read-only on the VPS: the agreed counts, every coverage date
-  against its table, sampled real entries vs a per-key lookup). **Neither
-  SQL mode has run on the dev box that wrote it (no initdb)**; the first
-  `--live` run on the VPS is its test.
+  against its table, sampled real entries vs a per-key lookup; and the
+  rank endpoint per metric against the values endpoint + scipy + the
+  filter-gain reference, BH per section, with its timing). The temp-cluster
+  mode has not run on the dev box (no initdb). `--live` ran clean on the
+  VPS 2026-11-18 (P1/P2 part; its expected `not_surfaced` is 26: 16
+  ingredients + total_oi + the nine drifting levels).
+- **P4: `POST /spx-metrics/rank`** — /surface/rank's body plus optional
+  `from: {section: date|null}` (each section's own coverage start: only
+  trades entered on/after it are in that section's sample, and a start on
+  one section moves no other's figures). One SQL per source
+  (`spx_metrics.matrix_sql`, all its columns, chunked) into one matrix over
+  the distinct entries; `rank_sections` runs `surface_stats.stat_rows` per
+  source (distinct entries = DATES for a daily table, bars for a 5-minute
+  one) and `with_bh` per SECTION — each section its own BH family; a cross
+  metric is computed once per start and has the same r, p and filter gain in
+  OI and Volume but each section's own adjusted p. `surface_stats.rank()` is
+  now `stat_rows` + `with_bh` over every metric: the surface numbers are
+  unchanged (check_surface_stats), its rows just gain the filter-gain
+  fields. The page reads none of this until P5.
+- **FILTER GAIN** (the user's spec, 2026-11-18; `surface_stats.filter_gain`,
+  a third sort beside Pearson and Spearman — Spearman stays the default).
+  What the user acts on is a CUTTABLE EDGE, which whole-range correlations
+  miss (flat over 80 % and bad at one end scores poorly; a clean stairstep
+  whose worse side still makes money scores well and is not a filter).
+  `improvement = n_removed × (kept_mean − removed_mean) / n_total`, $/trade
+  — the rise in the average P/L per trade from not trading that block — over
+  20 cuts: left and right 5..40 % by 5, both-sides 5..20 % from EACH end.
+  **The 40 % cap is the mechanism** (removing nearly everything always
+  maximises the kept average and is never a filter) — never relax it.
+  Pairwise (trades with a value and a P/L), MIN_N as the correlations, below
+  it None. **Cuts are at VALUE boundaries** (tied trades — a daily metric's
+  whole date — fall on one side, as "metric < X" does): a nominal p % takes
+  the deepest boundary removing AT MOST p %, the ACTUAL share is reported,
+  repeats are one cut, an empty cut is none, a both-sides cut needs a block
+  at each end. **Sign flip**: each family is walked from its shallowest cut
+  and only the contiguous run with gap = removed_mean − kept_mean < 0
+  counts; the first gap ≥ 0 stops it, so a GOOD outermost bin in front of
+  bad ones scores 0 on that side. Family score = best in its run; metric
+  score = best of left/right/both; ties go to the shallower cut, then left,
+  right, both. Row fields: `filter_gain`, `fg_side`, `fg_removed_pct`
+  (actual), `fg_n_removed`, `fg_removed_mean`, `fg_n_kept`, `fg_kept_mean`,
+  and the rule `fg_lo` (skip value < it) / `fg_hi` (skip value ≥ it) — the
+  row reads "+$75/trade · right 30 % · removed 300 @ $25 · kept 700 @ $275".
+  Comparable WITHIN one backtest only (dollars per trade) — the header must
+  say so (P5). Train/Test: the page sends `rankIdx()`, so Train view ranks
+  train trades, as the correlations do. Computed per DISTINCT entry bar
+  (counts and P/L sums per bar, once per request), so a sweep costs its
+  bars. **Measured** (dev box): one log, 2,100 trades × 452 — correlations
+  0.16 s, filter gain 0.20 s (NOT noise: per-metric numpy overhead, ~0.45 ms
+  a metric; the argsort is not shared with Spearman, whose ranks come from
+  rankdata over a block); a sweep, 300,000 trades / 3,400 bars × 452 —
+  correlations 9.3 s, filter gain 0.35 s. Batching all columns in one sort
+  would cut the 0.2 s; not done, by judgement. Gates: `check_filter_gain`
+  (a literal per-trade reference, `scripts/filter_gain_reference.py`: the
+  worked example, sign flip both ends, both-sided, the cap, ties with the
+  actual share, two/three values, constant, below MIN_N, 250 random metrics
+  field by field, per-bar = per-trade) and `check_spx_rank_sections` (pure:
+  sections, cross identical but own BH, per-section BH, a start narrows only
+  its section, daily distinct entries = dates).
 - **The off-state recording differs by design** after P2: a new request
   (`/spx-metrics/catalog`, stubbed 404 there), the dropdown's aria-label,
   and a new (hidden) error line. Re-record under reason 2 only after the

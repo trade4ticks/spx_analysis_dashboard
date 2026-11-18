@@ -208,19 +208,183 @@ def benjamini_hochberg(pvalues: list) -> list:
     return out
 
 
+def stat_rows(X: np.ndarray, pnl: list, bar_ids, gather=None) -> list[dict]:
+    """Per column of X: n, bars, Pearson / Spearman r and p, and the filter
+    gain fields (filter_gains) -- everything rank() reports but the BH
+    adjustment, which belongs to whatever FAMILY of tests the caller
+    defines (one per page section). X is trades x columns, NaN where
+    missing, or with `gather` the DISTINCT rows each trade points at."""
+    p = np.array([np.nan if v is None else v for v in pnl], dtype=float)
+    X = np.asarray(X, dtype=float)
+    g = np.arange(X.shape[0]) if gather is None else np.asarray(gather)
+    res = (correlations(X, p, np.asarray(bar_ids)) if gather is None
+           else correlations_gathered(X, g, p, np.asarray(bar_ids)))
+    cols = {f: _none(res[f]) for f in ("pearson", "pearson_p", "spearman", "spearman_p")}
+    fg = filter_gains(X, g, p)
+    return [{"n": int(res["n"][j]), "bars": int(res["bars"][j]), **{f: cols[f][j] for f in cols}, **fg[j]}
+            for j in range(X.shape[1])]
+
+
+def with_bh(rows: list[dict]) -> list[dict]:
+    """Benjamini-Hochberg over exactly these rows, per method, in place."""
+    for method in ("pearson", "spearman"):
+        adj = benjamini_hochberg([r[f"{method}_p"] for r in rows])
+        for r, a in zip(rows, adj):
+            r[f"{method}_p_bh"] = a
+    return rows
+
+
 def rank(metrics: list[dict], X: np.ndarray, pnl: list, bar_ids, gather=None) -> list[dict]:
     """One result per metric, in catalog order (the page sorts). X is
     trades x len(metrics), NaN where missing, columns in `metrics` order --
-    or, with `gather`, the DISTINCT rows that each trade's gather points at."""
-    p = np.array([np.nan if v is None else v for v in pnl], dtype=float)
-    res = (correlations(X, p, np.asarray(bar_ids)) if gather is None
-           else correlations_gathered(X, gather, p, np.asarray(bar_ids)))
-    cols = {f: _none(res[f]) for f in ("pearson", "pearson_p", "spearman", "spearman_p")}
+    or, with `gather`, the DISTINCT rows that each trade's gather points at.
+    BH over every metric passed (the surface metrics are one family)."""
+    stats = stat_rows(X, pnl, bar_ids, gather)
     out = [{"column": m["column_name"], "family": m["family"], "tenor": m["tenor"], "wing": m["wing"],
-            "form": m["form"], "n": int(res["n"][j]), "bars": int(res["bars"][j]),
-            **{f: cols[f][j] for f in cols}} for j, m in enumerate(metrics)]
-    for method in ("pearson", "spearman"):
-        adj = benjamini_hochberg([r[f"{method}_p"] for r in out])
-        for r, a in zip(out, adj):
-            r[f"{method}_p_bh"] = a
+            "form": m["form"], **st} for m, st in zip(metrics, stats)]
+    return with_bh(out)
+
+
+# ── filter gain (2026-11-18, the user's spec) ───────────────────────────────
+#
+# Pearson and Spearman score the whole range; what the user acts on is a
+# CUTTABLE EDGE -- a contiguous block at one or both ends of the metric whose
+# trades are worse than the rest. Filter gain is how much the average P/L per
+# trade rises if that block is not traded:
+#
+#   improvement = n_removed * (kept_mean - removed_mean) / n_total   ($/trade)
+#
+# over twenty candidate cuts: left and right 5..40 % (step 5), both-sides
+# 5..20 % from EACH end. THE 40 % CAP IS THE MECHANISM, not a default:
+# removing nearly everything always maximises the kept average and is never a
+# filter. Do not relax it.
+#
+# Rules, each the user's:
+#   * Pairwise: only trades with a value (and a usable P/L); percentages are
+#     of THAT population. Below MIN_N there is no score (None).
+#   * A cut is at a VALUE boundary -- tied trades fall on the same side, as
+#     "metric < X" does. A nominal p % takes the deepest boundary removing AT
+#     MOST p % of the trades (so the cap holds exactly); the actual share is
+#     what is reported. Depths that land on the same cut are one cut; a cut
+#     that removes nothing is not a cut. A both-sides cut needs a block at
+#     EACH end.
+#   * Sign flip: walk each family from its shallowest cut inward and keep
+#     only the contiguous run where gap = removed_mean - kept_mean < 0;
+#     stop at the first gap >= 0. If the shallowest is already >= 0 the
+#     family scores 0. (A good outermost bin in front of bad ones is not
+#     filterable, however good a deeper cut averages.)
+#   * Family score = the largest improvement in its run; metric score = the
+#     largest of left / right / both. Ties prefer the SHALLOWER cut (fewer
+#     trades removed), then left, right, both.
+#   * Dollars per trade: comparable within one backtest, not across them.
+#
+# Computed per DISTINCT entry bar: trades sharing a bar share every metric
+# value, so the counts and P/L sums per bar are taken once per request and
+# each metric sorts its few thousand bars, never a sweep's 300,000 trades.
+
+FG_ONE_SIDED = (5, 10, 15, 20, 25, 30, 35, 40)
+FG_BOTH = (5, 10, 15, 20)
+FG_FIELDS = ("filter_gain", "fg_side", "fg_removed_pct", "fg_n_removed", "fg_removed_mean", "fg_n_kept",
+             "fg_kept_mean", "fg_lo", "fg_hi")
+
+
+def _fg_empty(score):
+    return {"filter_gain": score, "fg_side": None, "fg_removed_pct": None, "fg_n_removed": None,
+            "fg_removed_mean": None, "fg_n_kept": None, "fg_kept_mean": None, "fg_lo": None, "fg_hi": None}
+
+
+def filter_gain(values: np.ndarray, counts: np.ndarray, sums: np.ndarray) -> dict:
+    """Filter gain of one metric. values[i] is a metric value held by
+    counts[i] trades whose P/L sums to sums[i] (values may repeat). Returns
+    FG_FIELDS: filter_gain ($/trade; 0.0 when no cut qualifies, None below
+    MIN_N trades), fg_side left|right|both, fg_removed_pct (ACTUAL % of the
+    trades with a value), fg_n_removed / fg_removed_mean, fg_n_kept /
+    fg_kept_mean, and the cut as a rule: skip a trade whose value is
+    < fg_lo, or >= fg_hi (None where that side is not cut)."""
+    counts = np.asarray(counts, dtype=np.int64)
+    n = int(counts.sum())
+    if n < MIN_N:
+        return _fg_empty(None)
+    u, inv = np.unique(np.asarray(values, dtype=float), return_inverse=True)
+    c = np.bincount(inv, weights=counts).round().astype(np.int64)
+    sm = np.bincount(inv, weights=np.asarray(sums, dtype=float))
+    total = float(sm.sum())
+    k = len(u)
+    if k < 2:
+        return _fg_empty(0.0)
+    # Removing u[0..i] removes cl[i] trades with P/L sl[i]; removing the top
+    # j+1 values removes cr[j] / sr[j]. Index -1 = nothing from that end; a
+    # padded 0 at the front of each makes index -1 read as zero.
+    cl, sl = np.concatenate(([0], np.cumsum(c))), np.concatenate(([0.0], np.cumsum(sm)))
+    cr, sr = np.concatenate(([0], np.cumsum(c[::-1]))), np.concatenate(([0.0], np.cumsum(sm[::-1])))
+    # The deepest boundary removing AT MOST p % (integer arithmetic: cl * 100
+    # <= p * n), never every value: capped at k - 2.
+    one = np.array(FG_ONE_SIDED)
+    two = np.array(FG_BOTH)
+    lo1 = np.minimum(np.searchsorted(cl[1:] * 100, one * n, side="right") - 1, k - 2)
+    hi1 = np.minimum(np.searchsorted(cr[1:] * 100, one * n, side="right") - 1, k - 2)
+    lo2 = np.minimum(np.searchsorted(cl[1:] * 100, two * n, side="right") - 1, k - 2)
+    hi2 = np.minimum(np.searchsorted(cr[1:] * 100, two * n, side="right") - 1, k - 2)
+
+    def family(i, j):
+        """The family's distinct cuts in depth order -- i and j only grow
+        with the depth, so a repeat is always the one before -- and the best
+        of the contiguous run with gap < 0 from the shallowest (argmax: the
+        first maximum, i.e. the shallower on a tie). None when no run."""
+        if not len(i):
+            return None
+        keep = np.ones(len(i), dtype=bool)
+        keep[1:] = (i[1:] != i[:-1]) | (j[1:] != j[:-1])
+        i, j = i[keep], j[keep]
+        nr = cl[i + 1] + cr[j + 1]
+        s_r = sl[i + 1] + sr[j + 1]
+        nk = n - nr
+        rm, km = s_r / nr, (total - s_r) / nk
+        gap = rm - km
+        stop = np.flatnonzero(gap >= 0)
+        run = stop[0] if len(stop) else len(gap)
+        if run == 0:
+            return None
+        imp = nr[:run] * (km[:run] - rm[:run]) / n
+        b = int(np.argmax(imp))
+        return {"imp": float(imp[b]), "n_removed": int(nr[b]), "removed_mean": float(rm[b]), "n_kept": int(nk[b]),
+                "kept_mean": float(km[b]), "lo": float(u[i[b] + 1]) if i[b] >= 0 else None,
+                "hi": float(u[k - 1 - j[b]]) if j[b] >= 0 else None}
+
+    m1 = lo1 >= 0
+    m2 = hi1 >= 0
+    mb = (lo2 >= 0) & (hi2 >= 0) & (lo2 + 1 < k - 1 - hi2)   # a block at each end, something kept between
+    best, side = None, None
+    for name, b in (("left", family(lo1[m1], np.full(int(m1.sum()), -1))),
+                    ("right", family(np.full(int(m2.sum()), -1), hi1[m2])),
+                    ("both", family(lo2[mb], hi2[mb]))):
+        if b is None:
+            continue
+        if (best is None or b["imp"] > best["imp"]
+                or (b["imp"] == best["imp"] and b["n_removed"] < best["n_removed"])):
+            best, side = b, name
+    if best is None:
+        return _fg_empty(0.0)
+    return {"filter_gain": best["imp"], "fg_side": side,
+            "fg_removed_pct": 100.0 * best["n_removed"] / n, "fg_n_removed": best["n_removed"],
+            "fg_removed_mean": best["removed_mean"], "fg_n_kept": best["n_kept"],
+            "fg_kept_mean": best["kept_mean"], "fg_lo": best["lo"], "fg_hi": best["hi"]}
+
+
+def filter_gains(distinct: np.ndarray, gather: np.ndarray, pnl: np.ndarray) -> list[dict]:
+    """filter_gain per column of `distinct` (distinct rows x metrics), the
+    trades being gather[t] -> row with P/L pnl[t] (NaN: unusable, in no
+    sample). Counts and P/L sums per distinct row are taken once."""
+    distinct = np.asarray(distinct, dtype=float)
+    gather, pnl = np.asarray(gather), np.asarray(pnl, dtype=float)
+    keep = np.isfinite(pnl)
+    g, p = gather[keep], pnl[keep]
+    hits = np.bincount(g, minlength=distinct.shape[0])
+    psum = np.bincount(g, weights=p, minlength=distinct.shape[0])
+    on = hits > 0
+    out = []
+    for j in range(distinct.shape[1]):
+        col = distinct[:, j]
+        r = on & np.isfinite(col)
+        out.append(filter_gain(col[r], hits[r], psum[r]))
     return out
