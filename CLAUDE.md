@@ -1989,10 +1989,11 @@ histogram correctness (units, binning, counts) beats statistical polish.
   field by field, per-bar = per-trade) and `check_spx_rank_sections` (pure:
   sections, cross identical but own BH, per-section BH, a start narrows only
   its section, daily distinct entries = dates).
-- **The off-state recording differs by design** after P2: a new request
-  (`/spx-metrics/catalog`, stubbed 404 there), the dropdown's aria-label,
-  and a new (hidden) error line. Re-record under reason 2 only after the
-  user has seen P2 in the browser.
+- **The off-state recording** was re-recorded for P2 on 2026-11-18, after
+  the user approved it in the browser (see the off-state gate section): a
+  new request per load (`/spx-metrics/catalog`, stubbed 404 there) and the
+  new error line, nothing else. (The aria-label change is not something
+  the walker records.)
 
 ### What `main.index_ohlc` actually looks like
 
@@ -2270,7 +2271,15 @@ and after (old vs new recording): every DOM change inside the Parameter grid
 card (12–115 lines a step: the Across/Down controls and the single table
 out, the pair boxes and bands in), state only `grid` → `grids`, every chart,
 the export and every request identical; the check was first shown to flag a
-change outside the card. Reasons are only these two; never to make a failing
+change outside the card. **Re-recorded a third time, 2026-11-18,
+`--rerecord-from a24413d`** (reason 2: the OI / volume / price metrics' P2,
+seen and approved by the user in the browser). Old vs new: inputs
+identical; in every step exactly ONE added DOM line, the new `ob-err` line
+for the OI catalog (hidden before a load, the stub's 404 text after); every
+chart, figure and the export identical; the requests identical once the
+three `/spx-metrics/catalog` requests are set aside (the IV rank body
+unchanged). The one removed line per step is the nav's Equities Scan link,
+hidden 2026-11-06 — the nav is not compared. Reasons are only these two; never to make a failing
 comparison pass. **The topbar nav is not compared (2026-11-07, the
 user's call)**: `check_nav` guards it, and holding it to the recording made
 every site-wide menu change fail here. Its subtree is dropped from both the
