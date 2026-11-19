@@ -1859,8 +1859,7 @@ server, with FILTER GAIN — done 2026-11-18; **P5** four ranking sections
 ONE combined "add a metric" dropdown over all 607 grouped IV / OI / Volume
 / Price (the user's call, 2026-11-18 — not four scoped dropdowns: a metric
 must be findable without knowing its category; it keeps the panes small)
-— built 2026-11-18, awaiting the user's browser review (and then the
-off-state re-record);
+— done 2026-11-19 (used and approved by the user; off-state re-recorded);
 **P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
 Price, "add a metric"); **P6** checks and docs. **What the user does with
 it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
@@ -2024,8 +2023,8 @@ histogram correctness (units, binning, counts) beats statistical polish.
   p and filter gain, its own BH-adjusted p. The OI catalog unavailable: no
   OI / Volume / Price panes, the button ranks IV alone. Gate:
   `check_rank_panes` (node). Browser gates green (notes 21, sweep 152, split
-  262); off-state differs in DOM only (7 steps: every chart, figure, export
-  and request — the IV rank body included — identical).
+  262); off-state re-recorded 2026-11-19 after the user's review (see the
+  off-state gate section).
 - **The off-state recording** was re-recorded for P2 on 2026-11-18, after
   the user approved it in the browser (see the off-state gate section): a
   new request per load (`/spx-metrics/catalog`, stubbed 404 there) and the
@@ -2316,7 +2315,13 @@ for the OI catalog (hidden before a load, the stub's 404 text after); every
 chart, figure and the export identical; the requests identical once the
 three `/spx-metrics/catalog` requests are set aside (the IV rank body
 unchanged). The one removed line per step is the nav's Equities Scan link,
-hidden 2026-11-06 — the nav is not compared. Reasons are only these two; never to make a failing
+hidden 2026-11-06 — the nav is not compared. **Re-recorded a fourth time,
+2026-11-19, `--rerecord-from df9af7a`** (reason 2: P5's four-pane "Metrics
+vs P/L" card and its 168 px panes, used and approved by the user in the
+browser). Old vs new: inputs identical; every DOM change in every step
+inside that card (36→45 lines empty, 48→57 loaded); every chart, figure,
+the export and every request identical. The containment check was first
+shown to flag a change planted outside the card. Reasons are only these two; never to make a failing
 comparison pass. **The topbar nav is not compared (2026-11-07, the
 user's call)**: `check_nav` guards it, and holding it to the recording made
 every site-wide menu change fail here. Its subtree is dropped from both the
