@@ -255,9 +255,27 @@ def rank(metrics: list[dict], X: np.ndarray, pnl: list, bar_ids, gather=None) ->
 #   improvement = n_removed * (kept_mean - removed_mean) / n_total   ($/trade)
 #
 # over twenty candidate cuts: left and right 5..40 % (step 5), both-sides
-# 5..20 % from EACH end. THE 40 % CAP IS THE MECHANISM, not a default:
-# removing nearly everything always maximises the kept average and is never a
-# filter. Do not relax it.
+# 5..20 % from EACH end.
+#
+# THE TWO RULES BELOW LOOK ARBITRARY AND ARE NOT. Both are the user's, both
+# exist because the score without them prefers something that is not a
+# filter, and check_filter_gain fails if either goes. Do not "improve" them.
+#
+#   THE 40 % CAP (FG_ONE_SIDED stops at 40, FG_BOTH at 20 from each end) is
+#   the ONLY thing stopping the score preferring "remove 90 % of the trades":
+#   removing nearly everything always maximises the remaining average, and
+#   that is never a filter. It is not a tuning parameter -- raising it does
+#   not make the ranking more sensitive, it makes the top of it the metrics
+#   whose best trades happen to sit in one corner.
+#
+#   THE SIGN-FLIP WALK enforces "a contiguous block, starting at the edge".
+#   Without it, a metric whose OUTERMOST bin is GOOD but whose next few are
+#   bad scores well on a deeper cut, once the good bin is averaged away
+#   inside the removed block. That shape is real (the user has an example)
+#   and is not a trade the user would take: the rule "skip value < X" would
+#   throw out the best trades with the bad ones. So each family is walked
+#   from its shallowest cut and stops at the first cut whose removed block
+#   is not worse than what is kept.
 #
 # Rules, each the user's:
 #   * Pairwise: only trades with a value (and a usable P/L); percentages are

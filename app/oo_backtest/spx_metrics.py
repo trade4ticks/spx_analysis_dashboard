@@ -20,8 +20,10 @@ WHAT THIS CODE TAKES ON TRUST -- nothing on this side can check it:
     T at any time reads row T -- reading T-1 would be a session staler, not
     safer. The Open_Interest build asserts this on every run (every volume
     session contributing to row T is the prior NYSE session); THAT ASSERTION
-    IS THE ONLY GUARD. If it is ever dropped from the build, nothing here
-    will notice.
+    IS THE ONLY GUARD. Nothing on the dashboard side can verify it -- the
+    tables carry no as-of timestamp to check against -- and if it is ever
+    dropped from the build, nothing here will notice. Do not "fix" the join
+    to T-1: that reads a session staler, it does not remove lookahead.
   * THE 5-MINUTE ROWS ARE POINT-IN-TIME AT quote_time: a 14:45 row is built
     from inputs known at 14:45:00 (that bar's spx_open, yesterday's OI and
     volume). So the entry bar is the last row on the entry date with
@@ -38,9 +40,27 @@ endpoint reports, per bar, whether a row/bar was FOUND (`present`), and the
 page states three reasons apart: before the metric's data starts, no
 row/bar, a row/bar but no value.
 
+WHY THE SURFACE (IV) METRICS DO NOT NEED THAT THIRD REASON:
+surface_metrics_core has no nulls after a metric's coverage starts (verified
+by its data owner, 2026-09-15). So an IV null is always "before its data
+starts" or "no bar at the entry time" -- there is nothing a presence column
+could add, and the IV wording stays two reasons, word for word.
+
 Grid mismatch, documented not fixed: these 5-minute tables run 09:30-15:55,
-surface_metrics_core 09:35-16:00. A 09:30 entry gets these metrics and no
-surface metric; a 16:00 entry reads this table's 15:55 row.
+surface_metrics_core 09:35-16:00, so the two ends of the session disagree
+about what exists. A 09:30 entry gets these metrics and NO surface metric
+(counted as "no bar" there); a 16:00 entry reads this table's 15:55 row (the
+last row at or before it) while the surface has a 16:00 bar of its own.
+Neither is wrong for its table; they are two grids.
+
+UNSURFACED LEVELS: besides the 16 `ingredient` rows, ten LEVELS sit inside
+surfaced families with `surfaced = false` -- total_oi and nine others the
+Open_Interest build flags (the names are in spx_metric_catalog, not here).
+They are raw levels whose distribution drifts year over year: the yearly
+distributions barely overlap, so a percentile cut on one selects YEARS, not
+market states -- a date filter in disguise. Their transformed forms (z,
+changes, ratios) are the ones served. The flag is honoured per row and
+never second-guessed here.
 
 THE CATALOG IS READ LIVE (the user's decision, 2026-11-17): spx_metric_catalog,
 primary key (table_name, metric). A metric is served when `surfaced` is true,

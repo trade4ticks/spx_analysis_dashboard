@@ -970,7 +970,7 @@ value describing nothing, since `bpSpecs` walks the registry and not the
 filter map.
 
 **OI / volume / price metrics too (P3 of that feature, built after its
-P5).** The panel's picker is now "add a metric": ONE search box over both
+P5; approved by the user in the browser).** The panel's picker is now "add a metric": ONE search box over both
 catalogs (`/surface/catalog` and `/spx-metrics/catalog`, loaded together
 when a panel first opens), results in optgroups headed `IV · <family>`
 then `OI · ` / `Volume · ` / `Price · <family>` -- the OO page's grouping;
@@ -1889,11 +1889,42 @@ ONE combined "add a metric" dropdown over all 607 grouped IV / OI / Volume
 must be findable without knowing its category; it keeps the panes small)
 — done 2026-11-19 (used and approved by the user; off-state re-recorded);
 **P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
-Price, "add a metric") — built, awaiting the user's browser review (see
-the Backtest Portfolio section); **P6** checks and docs. **What the user does with
+Price, "add a metric") — done (approved by the user in the browser);
+**P6** checks and docs — done. **The feature is complete.** **What the user does with
 it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
 edge with a lower average and enough trades — p-values are not read, so
 histogram correctness (units, binning, counts) beats statistical polish.
+- **RULES THAT LOOK ARBITRARY AND ARE NOT** (the user asked for these to be
+  written down, 2026-11-19, so they are not "improved" away; each is also
+  stated at its code):
+  1. **Filter gain's 40 % cap** (`FG_ONE_SIDED` ends at 40, `FG_BOTH` at 20
+     from each end). It is the ONLY thing stopping the score preferring
+     "remove 90 % of the trades", which always maximises the remaining
+     average and is never a filter. NOT a tuning parameter.
+  2. **Filter gain's sign-flip walk** enforces "a contiguous block starting
+     at the edge". Without it, a metric whose OUTERMOST bin is GOOD but
+     whose next few are bad scores well on a deeper cut once the good bin is
+     averaged away -- a real shape the user has an example of and would not
+     trade (the rule would throw away the best trades with the bad).
+     `check_filter_gain` fails if either rule goes, and pins the cut lists.
+  3. **Row T for a trade on date T** is lookahead-free ONLY because the
+     Open_Interest build already shifted it: row T holds open interest as of
+     T-1's close and volume from session T-1. Nothing on the dashboard side
+     can verify this (no as-of stamp to check); it relies entirely on the
+     build's own assertion. Reading T-1 here would be a session staler, not
+     safer.
+  4. **The ten unsurfaced levels** (total_oi + nine; `surfaced = false`):
+     raw levels whose yearly distributions barely overlap, so a percentile
+     cut on one is a DATE filter in disguise. Their transformed forms are
+     served. Honoured per row, never recomputed.
+  5. **The grid mismatch**: surface is 09:35-16:00, these tables
+     09:30-15:55, so the two ends of the session disagree about what
+     exists -- a 09:30 entry has OI / volume / price values and no IV; a
+     16:00 entry reads the 15:55 row here and its own 16:00 bar there.
+  6. **Why only these metrics have a third missing-value reason**: they
+     have nulls AFTER coverage (the spot guard; per-bar-of-day z warm-up);
+     `surface_metrics_core` has none (its owner verified it), so an IV null
+     is only ever "before its data starts" or "no bar".
 - **Code:** `app/oo_backtest/spx_metrics.py`, `GET /spx-metrics/catalog`,
   `POST /spx-metrics/values` `{id, bars}`. The EXISTING open_interest pool
   (`get_oi_pool`, `OI_DATABASE_URL` — confirmed on the VPS). No pool or a

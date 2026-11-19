@@ -1786,6 +1786,11 @@ def check_filter_gain() -> None:
     check(f["fg_side"] == "both" and f["fg_n_removed"] == 300 and f["fg_lo"] == 150.0 and f["fg_hi"] == 850.0,
           f"bad at both ends: a both-sided cut, 15 % from each end ({f['fg_side']}, {f['fg_n_removed']} removed)")
 
+    # THE CUT LISTS, pinned by name: the cap is not a tuning parameter, and a
+    # changed constant should fail HERE, saying why, before any shape does.
+    check(ss.FG_ONE_SIDED == (5, 10, 15, 20, 25, 30, 35, 40) and ss.FG_BOTH == (5, 10, 15, 20),
+          f"the cuts stop at 40 % one-sided and 20 % from each end -- the cap is the only thing stopping "
+          f"'remove 90 %' winning; never relax it ({ss.FG_ONE_SIDED}, {ss.FG_BOTH})")
     # The cap: a metric bad over its lowest 70 % still removes at most 40 %.
     pn4 = [-50.0 if x < 700 else 400.0 for x in v]
     f = fast(v, pn4)
