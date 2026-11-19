@@ -22,6 +22,7 @@ what comes out is what a page can use.
 from __future__ import annotations
 
 import json
+import re
 
 TABLE = "backtest_portfolio_profiles"
 NAME_MAX = 200
@@ -121,15 +122,22 @@ def clean_filters(raw) -> dict:
 
 MAX_SURFACE_PER_STRATEGY = 20
 
+# A surface column (`iv_30d_atm`) or an OI / volume / price id
+# (`<source>.<metric>`, e.g. `oi_daily.pc_ratio`): word characters, at most
+# one dot, not at either end.
+_METRIC_ID = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$")
+
 
 def clean_surface(raw) -> list:
-    """The surface metrics ADDED to one strategy, as column names.
+    """The metrics ADDED to one strategy: surface column names and OI /
+    volume / price ids (`<source>.<metric>`) in one list -- the page's one
+    "add a metric" picker covers both, and the id's shape says which.
 
     NO METRIC NAMES HERE EITHER, for the same reason clean_filters holds
     none: the catalog owns which columns exist, and a second list in this
     table would drift from it. Only the SHAPE is enforced -- a string of a
-    sane length that looks like a column -- and an unknown one is rejected
-    by /surface/values at load time, where the catalog actually is.
+    sane length that looks like a column or an id -- and an unknown one is
+    rejected at load time by the catalog, where it actually is.
 
     A profile stores the LIST, not the values: values are fetched per
     strategy on load, so a saved profile cannot pin a metric to whatever the
@@ -146,7 +154,7 @@ def clean_surface(raw) -> list:
     for col in raw:
         if not isinstance(col, str) or not col or len(col) > 200:
             raise ValueError(f"{col!r} is not a surface column name.")
-        if not col.replace("_", "").isalnum():
+        if not _METRIC_ID.fullmatch(col):
             raise ValueError(f"{col!r} is not a surface column name.")
         if col not in out:
             out.append(col)

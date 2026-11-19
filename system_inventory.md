@@ -557,6 +557,12 @@ monthly and annual P/L, correlation, rolling risk — is computed in the
 browser by `static/js/backtest_core.js`, shared with `/oo-backtest` so the
 two pages cannot give different answers about the same strategy.
 
+Per-strategy added-metric filters call the OO page's own endpoints, not
+new ones: `/api/oo-backtest/surface/{catalog,values}` (MAIN DB) and
+`/api/oo-backtest/spx-metrics/{catalog,values}` (the open_interest DB via
+`get_oi_pool`). A profile stores the added metrics' ids (surface columns and
+`<source>.<metric>`) in each strategy's `surface` list, never their values.
+
 ### 3n. Replay (`/api/replay`) — 5 routes
 
 | Method | Path |

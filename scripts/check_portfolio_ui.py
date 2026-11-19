@@ -177,6 +177,30 @@ window.fetch = async (u) => ({ok: true, json: async () => {
                    zscore: {scale: 1, decimals: 2, suffix: ''}},
     default_unit_format: {scale: 1, decimals: 4, suffix: ''},
   };
+  // THE OO PAGE'S OI / VOLUME / PRICE CATALOG (P3): a daily table (date
+  // join), a 5-minute cross metric listed in BOTH OI and Volume, and a
+  // whole-number price metric. Units are the server's.
+  if (String(u).includes('/spx-metrics/catalog')) return {
+    metrics: [
+      {id: 'oi_daily.pc_ratio', metric: 'pc_ratio', source: 'oi_daily', join: 'date',
+       family: 'oi', form: 'level', units: 'ratio', description: 'Put/call open interest',
+       min_date: '2020-01-02', sections: ['oi']},
+      {id: 'oi_5min.vol_oi', metric: 'vol_oi', source: 'oi_5min', join: 'bar',
+       family: 'cross', form: 'level', units: 'pct', description: 'Volume as a share of OI',
+       min_date: '2020-01-02', sections: ['oi', 'volume']},
+      {id: 'price_5min.up_days', metric: 'up_days', source: 'price_5min', join: 'bar',
+       family: 'price_trend', form: 'level', units: 'int', description: 'Up closes in the last 20',
+       min_date: '2020-01-02', sections: ['price']}],
+    sections: [{key: 'oi', label: 'OI', families: ['oi', 'oi_spot', 'cross']},
+               {key: 'volume', label: 'Volume', families: ['volume', 'volume_spot', 'cross']},
+               {key: 'price', label: 'Price', families: ['price_trend', 'price_range', 'price_momentum', 'price_vol']}],
+    sources: {oi_daily: {label: 'OI daily', join: 'date'}, oi_5min: {label: 'OI 5-minute', join: 'bar'},
+              price_5min: {label: 'Price 5-minute', join: 'bar'}},
+    unit_formats: {ratio: {scale: 1, decimals: 3, suffix: ''},
+                   pct: {scale: 100, decimals: 2, suffix: '%%'},
+                   int: {scale: 1, decimals: 0, suffix: '', integer: true}},
+    default_unit_format: {scale: 1, decimals: 4, suffix: ''},
+  };
   if (String(u).includes('/load')) return {strategies: LOADED,
     load: {seconds: 0.2, n: 2, from_cache: 2, parsed: 0}};
   return {};
@@ -185,10 +209,33 @@ window.fetch = async (u) => ({ok: true, json: async () => {
 // A profile store, in memory, behaving like the endpoints: 409 on a name
 // that exists, and a load that reports which strategies are gone.
 window.__surfCalls = [];
+window.__spxCalls = [];
+window.__spxDown = false;
 window.__profiles = [];
 const realFetch = window.fetch;
 window.fetch = async (u, init) => {
   const url = String(u);
+  if (url.includes('/spx-metrics/catalog') && window.__spxDown) {
+    return {ok: false, status: 503, json: async () => ({detail: 'no open_interest database configured'})};
+  }
+  if (url.includes('/spx-metrics/values')) {
+    // ALL THREE MISSING REASONS: before coverage (null, no row), a row with
+    // no value in it (null, present), and no row at all after coverage.
+    const body = JSON.parse(init.body);
+    window.__spxCalls.push({id: body.id, n: body.bars.length, column: body.column});
+    const values = [], present = [];
+    body.bars.forEach((t, i) => {
+      if (t[0] < '2020-01-02') { values.push(null); present.push(false); return; }
+      if (i %% 11 === 3) { values.push(null); present.push(true); return; }
+      if (i %% 11 === 7) { values.push(null); present.push(false); return; }
+      present.push(true);
+      values.push(body.id === 'price_5min.up_days' ? (i %% 23)
+                  : body.id === 'oi_5min.vol_oi' ? 0.01 + (i %% 9) * 0.005
+                  : 0.8 + (i %% 9) * 0.05);
+    });
+    return {ok: true, status: 200, json: async () => ({id: body.id, values, present,
+      join: body.id.startsWith('oi_daily') ? 'date' : 'bar'})};
+  }
   if (url.includes('/surface/values')) {
     const body = JSON.parse(init.body);
     window.__surfCalls.push({column: body.column, n: body.bars.length});
@@ -1123,8 +1170,9 @@ window.addEventListener('load', () => setTimeout(async () => {
   // 452 metrics with unguessable names, so the query has to reach the
   // DESCRIPTION too -- matching column names only would be a list you can
   // already scroll.
-  ok('unfiltered, every metric is offered',
-     cS2.surfaceOptions().reduce((n, g) => n + g.options.length, 0), 3);
+  ok('the OI / volume / price catalog loaded beside it', (cS2.spx.catalog || []).length, 3);
+  ok('unfiltered, every metric is offered (one id each)',
+     new Set(cS2.surfaceOptions().flatMap(g => g.options.map(o => o.value))).size, 6);
   cS2.surfQuery = 'skew';
   ok('a name query narrows it',
      cS2.surfaceOptions().reduce((n, g) => n + g.options.length, 0), 1);
@@ -1137,10 +1185,25 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('no matches says so rather than showing an empty list',
      /nothing matches/.test(cS2.surfaceCount()), true);
   cS2.surfQuery = '';
-  ok('clearing the query restores the list', cS2.surfaceCount(), '3 metrics');
+  ok('clearing the query restores the list', cS2.surfaceCount(), '6 metrics');
 
-  ok('grouped by family, in the legend order',
-     cS2.surfaceOptions().map(g => g.label).join(' | '), 'IV · iv | Skew · skew');
+  // ONE PICKER, grouped under IV / OI / Volume / Price headers, IV first.
+  ok('grouped by section, then family',
+     cS2.surfaceOptions().map(g => g.label).join(' | '),
+     'IV · iv | IV · skew | OI · oi | OI · cross | Volume · cross | Price · price_trend');
+  ok('a cross metric is under OI AND Volume, one id',
+     cS2.surfaceOptions().filter(g => g.options.some(o => o.value === 'oi_5min.vol_oi'))
+       .map(g => g.label), ['OI · cross', 'Volume · cross']);
+  cS2.surfQuery = 'put/call';
+  ok('a description query reaches the OI metrics too',
+     cS2.surfaceOptions().flatMap(g => g.options.map(o => o.value)), ['oi_daily.pc_ratio']);
+  cS2.surfQuery = 'share of oi';
+  ok('a cross metric matched under two headers is counted once', cS2.surfaceCount(), '1 of 6');
+  cS2.surfQuery = '';
+  ok('the header says "add a metric"',
+     [...document.querySelectorAll('.ob-lbl')].some(el => el.textContent.trim() === 'add a metric'), true);
+  ok('and "add a surface metric" is gone',
+     [...document.querySelectorAll('.ob-lbl')].some(el => /surface metric/.test(el.textContent)), false);
 
   const sfBefore = cS2.rows.find(r => r.id === sfSid).n;
   const sfOtherBefore = cS2.rows.find(r => r.id === sfOther).n;
@@ -1229,6 +1292,96 @@ window.addEventListener('load', () => setTimeout(async () => {
   await wait(200);
   ok('re-adding is served from the cache', window.__surfCalls.length, sfCalls);
 
+  // ── OI / VOLUME / PRICE METRICS AS FILTERS (P3) ───────────────────
+  const spxN0 = window.__surfCalls.length;
+  const okAdd = await cS2.addSurfaceMetric(sfSid, 'oi_daily.pc_ratio');
+  await wait(200);
+  ok('an OI id is added', okAdd, true);
+  ok('it is fetched from /spx-metrics/values, by id, for every trade',
+     [window.__spxCalls.length, (window.__spxCalls[0] || {}).id, (window.__spxCalls[0] || {}).n],
+     [1, 'oi_daily.pc_ratio', BP_DATA.payloads[sfSid].n]);
+  ok('and NOT from /surface/values', window.__surfCalls.length, spxN0);
+  const oiM = sc.surface.find(x => x.surfColumn === 'oi_daily.pc_ratio');
+  ok('its cell is labelled by the metric name', oiM.label, 'pc_ratio');
+  ok('and says which table', oiM.description.startsWith('OI daily table'), true);
+  ok('it is in this strategy only',
+     (cS2.chosen.find(c => c.id === sfOther).surface || []).length, 0);
+  const oiVals = BP_DATA.payloads[sfSid].columns[oiM.column];
+  const oiPres = BP_DATA.payloads[sfSid].columns[oiM.presentColumn];
+  ok('values and presence are one per trade',
+     [oiVals.length, oiPres.length], [BP_DATA.payloads[sfSid].n, BP_DATA.payloads[sfSid].n]);
+  // THREE REASONS, each against a hand count.
+  const oiCost = cS2.surfaceCost(sc, oiM);
+  const hand = { before: 0, noBar: 0, noValue: 0 };
+  oiVals.forEach((v, i) => {
+    if (v !== null) return;
+    if (sfDates[i] < '2020-01-02') hand.before++;
+    else if (oiPres[i]) hand.noValue++;
+    else hand.noBar++;
+  });
+  ok('the three reasons match a hand count',
+     [oiCost.before, oiCost.noBar, oiCost.noValue], [hand.before, hand.noBar, hand.noValue]);
+  ok('all three occur in the fixture', hand.before > 0 && hand.noBar > 0 && hand.noValue > 0, true);
+  ok('and add up to every trade with no value',
+     oiCost.dropped, oiVals.filter(v => v === null).length);
+  const oiTxt = cS2.surfaceCostText(sc, oiM);
+  ok('a daily table says "no row for the entry date"', oiTxt.includes('with no row for the entry date'), true);
+  ok('and names the third reason', oiTxt.includes('with a row for the entry date but no value in it'), true);
+  ok('the surface metric keeps its two reasons word for word',
+     /no bar at the entry time/.test(cS2.surfaceCostText(sc, sfM)) && !/no value in it/.test(cS2.surfaceCostText(sc, sfM)), true);
+
+  const oiBefore = cS2.rows.find(r => r.id === sfSid).n;
+  sc.filters[oiM.key] = { on: true, lo: oiM.min, hi: oiM.max };
+  cS2.recompute();
+  await wait(150);
+  // The other filters are on too, so the drop is the trades THIS one alone
+  // removes: no value here, a value in every filter already on.
+  const others = sc.surface.filter(x => x !== oiM && (sc.filters[x.key] || {}).on);
+  const oiOnly = oiVals.filter((v, i) => v === null && others.every(x => {
+    const col = BP_DATA.payloads[sfSid].columns[x.column][i];
+    const f = sc.filters[x.key];
+    return col !== null && col >= f.lo && col <= f.hi;
+  })).length;
+  ok('turning it on drops exactly the trades only it has no value for',
+     oiBefore - cS2.rows.find(r => r.id === sfSid).n, oiOnly);
+  ok('the other strategy is untouched', cS2.rows.find(r => r.id === sfOther).n, sfOtherBefore);
+  ok("the shade's key knows an OI filter is on", (cS2.unfilteredKey() || {}).spx, true);
+  ok('the badge names it',
+     cS2.badges(sc).some(b => b.key === oiM.key && b.text.startsWith('pc_ratio: ')), true);
+
+  // UNITS: pct is x100 with "%%", int steps by whole numbers.
+  await cS2.addSurfaceMetric(sfSid, 'oi_5min.vol_oi');
+  await cS2.addSurfaceMetric(sfSid, 'price_5min.up_days');
+  await wait(200);
+  const pctM = sc.surface.find(x => x.surfColumn === 'oi_5min.vol_oi');
+  const intM = sc.surface.find(x => x.surfColumn === 'price_5min.up_days');
+  const pctV = BP_DATA.payloads[sfSid].columns[pctM.column].filter(v => v !== null);
+  ok('a pct metric is in percent', [Math.min(...pctV) >= 1, Math.max(...pctV) <= 5], [true, true]);
+  ok('with a %% suffix', pctM.format.suffix, '%%');
+  const intV = BP_DATA.payloads[sfSid].columns[intM.column].filter(v => v !== null);
+  ok('an int metric holds whole numbers', intV.every(Number.isInteger), true);
+  ok('and its slider steps by a whole number',
+     Number.isInteger(intM.step) && intM.step >= 1, true);
+  ok('a 5-minute table says "bar at the entry time"',
+     /bar at the entry time/.test(cS2.surfaceCostText(sc, intM)), true);
+
+  // REMOVING drops the value AND the presence column.
+  cS2.removeSurfaceMetric(sfSid, intM.key);
+  await wait(120);
+  ok('removing an OI / price metric drops both its columns',
+     [BP_DATA.payloads[sfSid].columns[intM.column], BP_DATA.payloads[sfSid].columns[intM.presentColumn]],
+     [undefined, undefined]);
+  cS2.removeSurfaceMetric(sfSid, pctM.key);
+  await wait(120);
+  const spxCallsNow = window.__spxCalls.length;
+  await cS2.addSurfaceMetric(sfSid, 'price_5min.up_days');
+  await wait(150);
+  ok('re-adding is served from the cache, presence included',
+     [window.__spxCalls.length, (BP_DATA.payloads[sfSid].columns[intM.presentColumn] || []).length],
+     [spxCallsNow, BP_DATA.payloads[sfSid].n]);
+  cS2.removeSurfaceMetric(sfSid, sc.surface.find(x => x.surfColumn === 'price_5min.up_days').key);
+  await wait(120);
+
   // ── A PROFILE CARRIES THE ADDED METRICS ───────────────────────────
   // The filter VALUE always survived. Without the list beside it the value
   // came back describing nothing: bpSpecs walks the registry, not the
@@ -1251,6 +1404,8 @@ window.addEventListener('load', () => setTimeout(async () => {
   ok('it carries the metric list',
      savedStrat.surface.includes('iv_30d_atm')
      && savedStrat.surface.includes('z_iv_30d_atm'), true);
+  ok('the OI id is in the same list', savedStrat.surface.includes('oi_daily.pc_ratio'), true);
+  const oiSaved = { ...sc.filters[oiM.key] };
   ok('and the strategy with none carries an empty list',
      (saved.payload.strategies.find(x => x.id === sfOther).surface || []).length, 0);
 
@@ -1263,7 +1418,11 @@ window.addEventListener('load', () => setTimeout(async () => {
   await wait(400);
   const sc2 = cS2.chosen.find(c => c.id === sfSid);
   ok('the strategies came back', cS2.chosen.length, 3);
-  ok('with their added metrics', (sc2.surface || []).length, 2);
+  ok('with their added metrics', (sc2.surface || []).length, 3);
+  ok('the OI metric came back with its saved bounds',
+     JSON.stringify(sc2.filters[oiM.key]), JSON.stringify(oiSaved));
+  ok('as an OI entry, presence column and all',
+     (BP_DATA.payloads[sfSid].columns[oiM.presentColumn] || []).length, BP_DATA.payloads[sfSid].n);
   ok('as real registry entries, not orphan filter keys',
      cS2.registryFor(sc2).some(x => x.key === sfM.key), true);
   ok('their values were refetched for this strategy',
@@ -1277,6 +1436,26 @@ window.addEventListener('load', () => setTimeout(async () => {
      cS2.rows.find(r => r.id === sfSid).n, sfNarrowed);
   ok('and the badge is back on its card',
      cS2.badges(sc2).some(b => b.key === sfM.key), true);
+  ok('a full restore says nothing about lost metrics',
+     /could not be restored/.test(cS2.profileMsg), false);
+
+  // THE OI DATABASE UNAVAILABLE: the surface metrics come back, the OI one
+  // cannot, and the page SAYS so rather than leaving an inert filter.
+  window.__spxDown = true;
+  cS2.spx.catalog = null;
+  cS2.clearAll();
+  await wait(100);
+  cS2.profilePick = saved.id;
+  await cS2.loadProfile();
+  await wait(400);
+  ok('the catalog refusal is a state on the page', /unavailable/.test(cS2.spx.error), true);
+  ok('the surface metrics still come back',
+     (cS2.chosen.find(c => c.id === sfSid).surface || []).map(x => x.surfColumn).sort(),
+     ['iv_30d_atm', 'z_iv_30d_atm']);
+  ok('the lost OI metric is named, with the reason',
+     /1 added metric could not be restored \(oi_daily\.pc_ratio\) — OI, volume and price metrics unavailable/
+       .test(cS2.profileMsg), true);
+  window.__spxDown = false;
 
   } catch (e) {
     // A THROW IS A FINDING, not a lost run: without this the page simply

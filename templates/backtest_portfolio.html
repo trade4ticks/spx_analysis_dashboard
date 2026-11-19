@@ -514,22 +514,25 @@
           <span class="ob-card-sub" x-text="editingSummary()"></span>
         </div>
         <div class="ob-card-body">
-          {# SURFACE METRICS, added to the strategy whose panel this is.
-             452 of them, so a picker rather than 452 standing filters, and
-             the values are fetched for that strategy alone. #}
+          {# ADDED METRICS, for the strategy whose panel this is: the 452
+             surface (IV) metrics and the OI / volume / price ones in ONE
+             picker, grouped IV / OI / Volume / Price, so a metric is
+             findable without knowing its table. A picker rather than 607
+             standing filters, and the values are fetched for that strategy
+             alone. #}
           <div class="ob-row" style="margin-top:0;margin-bottom:8px">
-            <span class="ob-lbl">add a surface metric</span>
+            <span class="ob-lbl">add a metric</span>
             {# The query NARROWS THE LIST BELOW rather than being a second
-               control: 452 metrics with unguessable names, matched on the
-               description as well as the column, and the list stays a plain
+               control: 607 metrics with unguessable names, matched on the
+               description as well as the name, and the list stays a plain
                <select> so the browser's own keyboard handling applies. #}
             <input class="bp-sel" style="width:220px" type="search"
-                   x-model="surfQuery" :disabled="!surf.catalog"
+                   x-model="surfQuery" :disabled="!surf.catalog && !spx.catalog"
                    placeholder="search name or description…"
-                   aria-label="Filter the surface metric list">
+                   aria-label="Filter the metric list">
             <select class="bp-sel" style="flex:1;min-width:0"
-                    :disabled="!surf.catalog"
-                    aria-label="Add a surface metric to this strategy"
+                    :disabled="!surf.catalog && !spx.catalog"
+                    aria-label="Add a metric to this strategy"
                     @change="addSurfaceMetric(editing, $event.target.value); $event.target.value = ''">
               <option value="">choose a metric…</option>
               <template x-for="g in surfaceOptions()" :key="g.label">
@@ -541,8 +544,9 @@
               </template>
             </select>
             <span class="ob-note" x-text="surfaceCount()"></span>
-            <span class="ob-note" x-show="surf.loading" x-cloak>loading the catalog…</span>
+            <span class="ob-note" x-show="surf.loading || spx.loading" x-cloak>loading the catalog…</span>
             <span class="ob-note warn" x-show="surf.error" x-cloak x-text="surf.error"></span>
+            <span class="ob-note warn" x-show="spx.error" x-cloak x-text="spx.error"></span>
           </div>
           <div class="bp-fgrid">
             <template x-for="m in registryFor(editingRow())" :key="m.key">
@@ -783,7 +787,9 @@
                   <span>
                     A further
                     <span x-text="((unfilteredKey() || {}).noBar || 0).toLocaleString()"></span>
-                    entered after it with no bar at their entry time; those
+                    <span x-text="(unfilteredKey() || {}).spx
+                      ? 'entered after it with no value at their entry (no bar or row, or one with no value in it); those'
+                      : 'entered after it with no bar at their entry time; those'"></span>
                     are scattered rather than a stretch, so they are dropped
                     here exactly as the table drops them.
                   </span>

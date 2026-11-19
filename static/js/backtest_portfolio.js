@@ -394,6 +394,12 @@ document.addEventListener('alpine:init', () => {
      * index walk on the VPS, so a portfolio nobody filters never pays it. */
     surf: { catalog: null, groups: [], other: null, unitFormats: {},
             defaultUnit: null, loading: false, error: '' },
+    /* The OI / volume / price catalog (the OO page's /spx-metrics/catalog),
+     * loaded beside the surface one. Unavailable (no open_interest pool, the
+     * database down) is a STATE said beside the picker, not an error: the
+     * surface metrics keep working. */
+    spx: { catalog: null, sections: [], sources: {}, unitFormats: {},
+           defaultUnit: null, loading: false, error: '' },
     colors: [],
     maxStrategies: 12,
     chosen: [],           // [{id, name, qty, capital, savedCapital, filters}]
@@ -536,9 +542,10 @@ document.addEventListener('alpine:init', () => {
         // -- a filter you can see in the payload and not on the page.
         const want = new Map(pf.payload.strategies.map(x => [x.id, x.surface || []]));
         if ([...want.values()].some(v => v.length)) await this.loadSurfaceCatalog();
+        const lost = [];
         for (const c of this.chosen) {
           for (const col of (want.get(c.id) || [])) {
-            await this.addSurfaceMetric(c.id, col, s0 => {
+            const back = await this.addSurfaceMetric(c.id, col, s0 => {
               // Restore the SAVED bounds, not the data's: a profile that
               // reopens with every slider at full range has not restored
               // anything.
@@ -546,6 +553,7 @@ document.addEventListener('alpine:init', () => {
                 .filters || {};
               if (saved[s0.key]) c.filters[s0.key] = { ...saved[s0.key] };
             });
+            if (!back) lost.push(col);
           }
         }
         for (const c of this.chosen) this.ensureFilters(c.id);
@@ -553,11 +561,21 @@ document.addEventListener('alpine:init', () => {
         this.rollWeeks = pf.payload.roll_weeks || 26;
         this.profileName = pf.name;
         this.editing = 0;
-        this.profileMsg = missing.size
+        this.profileMsg = (missing.size
           ? `Loaded "${pf.name}" — ${missing.size} strateg`
             + `${missing.size === 1 ? 'y has' : 'ies have'} been deleted since `
             + `and could not be loaded.`
-          : `Loaded "${pf.name}".`;
+          : `Loaded "${pf.name}".`)
+          // A SAVED METRIC NO CATALOG KNOWS (the OI database unavailable, or
+          // a metric gone upstream) is said, never dropped silently: its
+          // filter would otherwise be a value describing nothing.
+          + (lost.length
+            ? ` ${lost.length} added metric${lost.length === 1 ? '' : 's'} could not be `
+              + `restored (${lost.join(', ')})`
+              + (lost.some(x => x.includes('.')) && this.spx.error ? ` — ${this.spx.error}` : '')
+              + ', so the strategy is not filtered on '
+              + (lost.length === 1 ? 'it.' : 'them.')
+            : '');
         ok = true;
       } catch (e) {
         this.profileMsg = 'Not loaded: ' + (e.message || e);
@@ -711,7 +729,36 @@ document.addEventListener('alpine:init', () => {
         ? [...this.registry, ...c.surface] : this.registry;
     },
 
+    /* BOTH catalogs the one picker lists, side by side. */
     async loadSurfaceCatalog() {
+      await Promise.all([this.loadIvCatalog(), this.loadSpxCatalog()]);
+    },
+
+    async loadSpxCatalog() {
+      if (this.spx.catalog || this.spx.loading) return;
+      this.spx.loading = true;
+      this.spx.error = '';
+      const unavailable = msg => `OI, volume and price metrics unavailable: ${msg}`;
+      try {
+        const r = await fetch('/api/oo-backtest/spx-metrics/catalog');
+        const b = await r.json().catch(() => ({}));
+        // A refusal is the page's state, not a logged error: an
+        // unconfigured open_interest database is a supported setup.
+        if (!r.ok) { this.spx.error = unavailable(b.detail || `HTTP ${r.status}`); return; }
+        this.spx.catalog = b.metrics || [];
+        this.spx.sections = b.sections || [];
+        this.spx.sources = b.sources || {};
+        this.spx.unitFormats = b.unit_formats || {};
+        this.spx.defaultUnit = b.default_unit_format || null;
+      } catch (e) {
+        this.spx.error = unavailable(e.message || e);
+      } finally {
+        this.spx.loading = false;
+        this.tick++;
+      }
+    },
+
+    async loadIvCatalog() {
       if (this.surf.catalog || this.surf.loading) return;
       this.surf.loading = true;
       this.surf.error = '';
@@ -747,13 +794,26 @@ document.addEventListener('alpine:init', () => {
      * own keyboard handling is better than one I would write, and the list
      * stays a list for a screen reader.
      */
+    /* ONE picker over every metric, its groups headed by section -- IV (the
+     * surface metrics) first, then OI, Volume and Price -- as the OO page's
+     * add-a-metric list is: a metric must be findable without knowing which
+     * table it lives in. A `cross` metric is listed under OI AND Volume
+     * (one id either way). */
     surfaceOptions() {
       void this.tick;
+      return this.ivOptions().concat(this.spxOptions());
+    },
+
+    metricQueryHit(name, desc) {
+      const q = (this.surfQuery || '').trim().toLowerCase();
+      return !q || name.toLowerCase().includes(q)
+          || String(desc || '').toLowerCase().includes(q);
+    },
+
+    ivOptions() {
       const cat = this.surf.catalog || [];
       if (!cat.length) return [];
-      const q = (this.surfQuery || '').trim().toLowerCase();
-      const hit = m => !q || m.column_name.toLowerCase().includes(q)
-                    || String(m.description || '').toLowerCase().includes(q);
+      const hit = m => this.metricQueryHit(m.column_name, m.description);
       const fams = new Set(cat.map(m => m.family));
       const groups = (this.surf.groups || [])
         .map(g => ({ ...g, families: (g.families || []).filter(f => fams.has(f)) }))
@@ -767,7 +827,7 @@ document.addEventListener('alpine:init', () => {
           const ms = cat.filter(m => m.family === f && hit(m))
             .sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
           if (!ms.length) continue;
-          out.push({ label: `${g.label} · ${f}`, options: ms.map(m => ({
+          out.push({ label: `IV · ${f}`, options: ms.map(m => ({
             value: m.column_name,
             label: m.column_name + (m.description ? ' — ' + String(m.description).slice(0, 60) : ''),
           })) });
@@ -776,25 +836,89 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
-    surfaceCount() {
-      void this.tick;
-      const total = (this.surf.catalog || []).length;
-      if (!total) return '';
-      const shown = this.surfaceOptions().reduce((n, g) => n + g.options.length, 0);
-      if (!this.surfQuery) return `${total} metrics`;
-      return shown ? `${shown} of ${total}` : `nothing matches "${this.surfQuery}"`;
+    /* One optgroup per section and family, in the server's section order; a
+     * family in no section goes under "Other". */
+    spxOptions() {
+      const cat = this.spx.catalog || [];
+      if (!cat.length) return [];
+      const hit = m => this.metricQueryHit(m.metric, m.description);
+      const byName = (a, b) => (a.metric < b.metric ? -1 : a.metric > b.metric ? 1
+                                : (a.id < b.id ? -1 : 1));
+      const opt = m => ({ value: m.id,
+        label: m.metric + (m.description ? ' — ' + String(m.description).slice(0, 60) : '') });
+      const out = [];
+      for (const sec of this.spx.sections || []) {
+        for (const f of sec.families || []) {
+          const ms = cat.filter(m => m.family === f && hit(m)).sort(byName);
+          if (ms.length) out.push({ label: `${sec.label} · ${f}`, options: ms.map(opt) });
+        }
+      }
+      const rest = cat.filter(m => !(m.sections || []).length && hit(m)).sort(byName);
+      if (rest.length) out.push({ label: 'Other', options: rest.map(opt) });
+      return out;
     },
 
+    /* "607 metrics" / "12 of 607" -- a cross metric listed twice counts
+     * once. */
+    surfaceCount() {
+      void this.tick;
+      const total = (this.surf.catalog || []).length + (this.spx.catalog || []).length;
+      if (!total) return '';
+      const shown = new Set(this.surfaceOptions().flatMap(g => g.options.map(o => o.value))).size;
+      if (!(this.surfQuery || '').trim()) return `${bpFmtInt(total)} metrics`;
+      return shown ? `${bpFmtInt(shown)} of ${bpFmtInt(total)}`
+                   : `nothing matches "${this.surfQuery.trim()}"`;
+    },
+
+    /* Adds a surface column or an OI / volume / price id to ONE strategy.
+     * True when it is there afterwards (added now or already), false when
+     * neither catalog knows it -- a profile restore reports those. */
     async addSurfaceMetric(id, column, after) {
-      if (!column) return;
+      if (!column) return false;
       const c = this.chosen.find(x => x.id === id);
       const meta = (this.surf.catalog || []).find(m => m.column_name === column);
-      if (!c || !meta) return;
+      const sm = meta ? null : (this.spx.catalog || []).find(m => m.id === column);
+      if (!c || (!meta && !sm)) return false;
       if (!c.surface) c.surface = [];
-      if (c.surface.some(m => m.surfColumn === column)) return;
+      if (c.surface.some(m => m.surfColumn === column)) return true;
+      const entry = meta ? this.ivEntry(column, meta) : this.spxEntry(column, sm);
+      c.surface = [...c.surface, entry];
+      this.tick++;
+      await this.fetchSurface(c, entry);
+      if (after) { after(entry); this.recompute(); }
+      return true;
+    },
+
+    /* An OI / volume / price metric as a filter: the surface entry's shape
+     * plus what these tables need. `presentColumn` holds, per trade, whether
+     * the entry's row (daily) or bar (5-minute) was found -- these tables have
+     * values missing AFTER their data starts (a missing spot, a z-score
+     * warming up at that bar of day), which is neither "before its data
+     * starts" nor "no bar". Key and column are one name (the id's `.` made
+     * safe), so removal finds the column by the key. */
+    spxEntry(id, sm) {
+      const u = (this.spx.unitFormats || {})[sm.units] || this.spx.defaultUnit
+             || { scale: 1, decimals: 4, suffix: '' };
+      const src = (this.spx.sources || {})[sm.source] || {};
+      const safe = id.replace(/[^A-Za-z0-9_-]/g, '__');
+      return {
+        key: `surface__${safe}`, column: `surface__${safe}`,
+        presentColumn: `surfpresent__${safe}`, spx: true, joinKind: sm.join,
+        surfColumn: id, label: sm.metric, type: 'range', filter: true,
+        categories: null, min: null, max: null, step: null,
+        format: { decimals: u.decimals, suffix: u.suffix }, scale: u.scale,
+        integer: !!u.integer,
+        minDate: sm.min_date || null,
+        description: [src.label ? `${src.label} table` : '', sm.description || '']
+          .filter(Boolean).join(' — '),
+        family: sm.family, removable: true, loading: true, error: '',
+      };
+    },
+
+    ivEntry(column, meta) {
       const u = this.surf.unitFormats[meta.units] || this.surf.defaultUnit
              || { scale: 1, decimals: 4, suffix: '' };
-      const entry = {
+      return {
         key: `surface__${column}`, column: `surface__${column}`,
         surfColumn: column, label: column, type: 'range', filter: true,
         categories: null, min: null, max: null, step: null,
@@ -805,19 +929,19 @@ document.addEventListener('alpine:init', () => {
         minDate: meta.min_date || null, description: meta.description || '',
         family: meta.family, removable: true, loading: true, error: '',
       };
-      c.surface = [...c.surface, entry];
-      this.tick++;
-      await this.fetchSurface(c, entry);
-      if (after) { after(entry); this.recompute(); }
     },
 
     removeSurfaceMetric(id, key) {
       const c = this.chosen.find(x => x.id === id);
       if (!c || !c.surface) return;
+      const gone = c.surface.find(m => m.key === key);
       c.surface = c.surface.filter(m => m.key !== key);
       if (c.filters) delete c.filters[key];
       const p = BP_DATA.payloads[c.id];
-      if (p && p.columns) delete p.columns[key];
+      if (p && p.columns) {
+        delete p.columns[key];
+        if (gone && gone.presentColumn) delete p.columns[gone.presentColumn];
+      }
       delete BP_DATA.extents[c.id + ':' + key];
       delete BP_DATA.scaled[c.id];
       this.recompute();
@@ -839,6 +963,7 @@ document.addEventListener('alpine:init', () => {
       const hit = BP_DATA.surface[cacheKey];
       if (hit && hit.n === p.n) {
         p.columns[entry.column] = hit.values;
+        if (entry.presentColumn) p.columns[entry.presentColumn] = hit.present;
         this.finishSurface(c, entry, hit.report);
         return;
       }
@@ -846,27 +971,44 @@ document.addEventListener('alpine:init', () => {
       // Each distinct entry bar once (obEntryBars); values come back per bar.
       const eb = obEntryBars(cols, cols.date_opened.map((_, i) => i));
       try {
-        const r = await fetch('/api/oo-backtest/surface/values', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ column: entry.surfColumn, bars: eb.bars }),
-        });
+        // An OI / volume / price id goes to its own endpoint, which matches
+        // the entry DATE's row (daily tables) or the entry BAR (5-minute)
+        // and says per bar whether that row/bar was found.
+        const r = entry.spx
+          ? await fetch('/api/oo-backtest/spx-metrics/values', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ id: entry.surfColumn, bars: eb.bars }),
+            })
+          : await fetch('/api/oo-backtest/surface/values', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ column: entry.surfColumn, bars: eb.bars }),
+            });
         const b = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(b.detail || `HTTP ${r.status}`);
         // A LOAD SINCE THIS WAS ASKED FOR, or the row removed meanwhile:
         // writing now would put a column on the wrong trades.
         if (token !== BP_DATA.loadToken || !(c.surface || []).includes(entry)) return;
-        if (!Array.isArray(b.values) || b.values.length !== eb.bars.length) {
+        if (!Array.isArray(b.values) || b.values.length !== eb.bars.length
+            || (entry.spx && (b.present || []).length !== eb.bars.length)) {
           throw new Error(`server returned ${(b.values || []).length} values `
                         + `for ${eb.bars.length} entry bars`);
         }
         const perBar = b.values.map(v => (v === null || v === undefined ? null : v * entry.scale));
         const vals = eb.barOf.map(k => perBar[k]);
-        const bt = b.bar_times || [];
-        // The report is per TRADE, as the page states it.
-        const report = { ...(b.report || {}), bars: eb.bars.length,
-                         no_bar: eb.barOf.reduce((n, k) => n + (bt[k] == null ? 1 : 0), 0) };
+        let report, present = null;
+        if (entry.spx) {
+          present = eb.barOf.map(k => !!b.present[k]);
+          report = { ...(b.report || {}), bars: eb.bars.length,
+                     no_bar: present.reduce((n, x) => n + (x ? 0 : 1), 0) };
+          p.columns[entry.presentColumn] = present;
+        } else {
+          const bt = b.bar_times || [];
+          // The report is per TRADE, as the page states it.
+          report = { ...(b.report || {}), bars: eb.bars.length,
+                     no_bar: eb.barOf.reduce((n, k) => n + (bt[k] == null ? 1 : 0), 0) };
+        }
         p.columns[entry.column] = vals;
-        BP_DATA.surface[cacheKey] = { values: vals, n: p.n, report };
+        BP_DATA.surface[cacheKey] = { values: vals, present, n: p.n, report };
         this.finishSurface(c, entry, report);
       } catch (e) {
         if (token !== BP_DATA.loadToken) return;
@@ -884,6 +1026,9 @@ document.addEventListener('alpine:init', () => {
       entry.report = report || {};
       if (ext) {
         entry.step = bpNiceStep(ext.max - ext.min);
+        // A WHOLE-NUMBER metric (units `int`) steps by whole numbers: a
+        // slider at 0.5 on a count offers bounds no trade can sit between.
+        if (entry.integer) entry.step = Math.max(1, Math.floor(entry.step));
         entry.min = Math.min(obClampStep(ext.min, entry.step, 'floor'), ext.min);
         entry.max = Math.max(obClampStep(ext.max, entry.step, 'ceil'), ext.max);
       }
@@ -903,28 +1048,37 @@ document.addEventListener('alpine:init', () => {
      * the single-backtest page splits it: trades that entered before the
      * metric's data starts, and trades whose entry had no bar. The first is
      * a stretch of history, the second is scattered -- and a filter drops
-     * both, which is why it is said before the slider moves and not after. */
+     * both, which is why it is said before the slider moves and not after.
+     * An OI / volume / price metric has a THIRD reason, told apart by its
+     * presence column: the row or bar was there with no value in it. */
     surfaceCost(c, m) {
       void this.tick;
       const p = c && BP_DATA.payloads[c.id];
       const vals = p && p.columns && p.columns[m.column];
       if (!vals) return null;
       const dates = p.columns.date_opened;
-      let before = 0, noBar = 0;
+      const pres = m.presentColumn ? p.columns[m.presentColumn] : null;
+      let before = 0, noBar = 0, noValue = 0;
       for (let i = 0; i < vals.length; i++) {
         if (vals[i] !== null && vals[i] !== undefined) continue;
-        if (m.minDate && dates[i] && dates[i] < m.minDate) before++; else noBar++;
+        if (m.minDate && dates[i] && dates[i] < m.minDate) before++;
+        else if (pres && pres[i]) noValue++;
+        else noBar++;
       }
-      return { n: vals.length, dropped: before + noBar, before, noBar };
+      return { n: vals.length, dropped: before + noBar + noValue, before, noBar, noValue };
     },
 
     surfaceCostText(c, m) {
       const k = this.surfaceCost(c, m);
       if (!k) return '';
       if (!k.dropped) return 'every trade in this strategy has a value';
+      // A daily table's "no bar" is "no row for the entry date"; a surface
+      // metric keeps its two reasons word for word.
+      const date = m.joinKind === 'date';
       const why = [
         k.before ? `${bpFmtInt(k.before)} entered before its data starts (${m.minDate})` : '',
-        k.noBar ? `${bpFmtInt(k.noBar)} with no bar at the entry time` : '',
+        k.noBar ? `${bpFmtInt(k.noBar)} with no ${date ? 'row for the entry date' : 'bar at the entry time'}` : '',
+        k.noValue ? `${bpFmtInt(k.noValue)} with ${date ? 'a row for the entry date' : 'a bar at the entry time'} but no value in it` : '',
       ].filter(Boolean).join(', ');
       const verb = (c.filters[m.key] || {}).on ? 'is dropping' : 'would drop';
       return `Filtering on this ${verb} ${bpFmtInt(k.dropped)} of `
@@ -2000,7 +2154,14 @@ document.addEventListener('alpine:init', () => {
           if (f && f.on && m.minDate === c.coverageFrom) label = m.label;
         }
       }
-      return { to: c.unfilteredTo, from: c.coverageFrom, label,
+      let spx = false;
+      for (const ch of this.chosen) {
+        for (const m of (ch.surface || [])) {
+          const f = ch.filters && ch.filters[m.key];
+          if (m.spx && f && f.on) spx = true;
+        }
+      }
+      return { to: c.unfilteredTo, from: c.coverageFrom, label, spx,
                n: c.unfilteredN || 0, noBar: c.noBarN || 0,
                bg: `rgba(${BP_SHADE},${BP_SHADE_METRIC})` };
     },

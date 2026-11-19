@@ -759,7 +759,8 @@ with a published Sharpe.
   intersection available.
 - **Sharpe** is kept from the old app, with the rolling Sharpe/Sortino
   section (P6).
-- **Surface metrics are not in v1.**
+- **Surface metrics are not in v1.** (Added since as per-strategy
+  filters, below, and the OI / volume / price metrics with them.)
 
 **P3's decisions.** Equity and drawdown sit SIDE BY SIDE sharing an x axis
 (stacked, the pair is two screens apart and the trough no longer lines up
@@ -967,6 +968,33 @@ values (`clean_surface`, shape-checked only — the catalog owns what exists),
 and re-fetches on load; without the list the saved filter came back as a
 value describing nothing, since `bpSpecs` walks the registry and not the
 filter map.
+
+**OI / volume / price metrics too (P3 of that feature, built after its
+P5).** The panel's picker is now "add a metric": ONE search box over both
+catalogs (`/surface/catalog` and `/spx-metrics/catalog`, loaded together
+when a panel first opens), results in optgroups headed `IV · <family>`
+then `OI · ` / `Volume · ` / `Price · <family>` -- the OO page's grouping;
+a `cross` metric under OI AND Volume, one id; the count is of distinct ids
+("6 metrics", "1 of 6"). An OI id is the same per-strategy registry entry
+as a surface column (`spxEntry`: label = metric name, the description
+names the table, key = column = `surface__<id with . made safe>`) plus
+`presentColumn` and `joinKind`, fetched from `/spx-metrics/values {id,
+bars}`; the cache holds the presence column too. **Coverage cost has the
+three reasons** (before its data starts / no row for the entry date or no
+bar at the entry time / a row or bar with no value in it); surface metrics
+keep their two word for word. The metric shade's key says "no value at
+their entry" when an OI filter is on. `int` units step the slider by whole
+numbers. **Profiles store the id in the same `surface` list**
+(`clean_surface` now accepts `<source>.<metric>`: word characters, one
+dot); a restore that cannot find a saved metric -- the OI database
+unavailable, or a metric gone upstream -- SAYS so in the profile message,
+naming it and the catalog's refusal, instead of leaving an inert filter
+value (this was silent for surface metrics too). The OI catalog
+unavailable is a state beside the picker; the surface metrics keep
+working. Gate: `check_portfolio_ui` (picker groups and counts, the three
+reasons against a hand count, units, removal of both columns, cache,
+profile round trip, the refusal); planted -- no third reason, no
+whole-number step, a silent loss -- each fails it.
 
 Three bugs the browser gate caught here, all of which would have shipped:
 `scaledCols` caches a COPY of the columns so a column added after it was
@@ -1861,7 +1889,8 @@ ONE combined "add a metric" dropdown over all 607 grouped IV / OI / Volume
 must be findable without knowing its category; it keeps the panes small)
 — done 2026-11-19 (used and approved by the user; off-state re-recorded);
 **P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
-Price, "add a metric"); **P6** checks and docs. **What the user does with
+Price, "add a metric") — built, awaiting the user's browser review (see
+the Backtest Portfolio section); **P6** checks and docs. **What the user does with
 it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
 edge with a lower average and enough trades — p-values are not read, so
 histogram correctness (units, binning, counts) beats statistical polish.

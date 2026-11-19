@@ -1044,7 +1044,10 @@ async def check_portfolio_profiles(pool) -> None:
                       (["a" * 201], "an absurd name"),
                       ([f"m{i}" for i in range(25)], "more than the cap"),
                       ("iv_30d_atm", "a bare string instead of a list"),
-                      ([123], "a number")]:
+                      ([123], "a number"),
+                      (["oi_daily.pc.ratio"], "an id with two dots"),
+                      ([".pc_ratio"], "an id with no source"),
+                      (["iv_30d_atm\n"], "a trailing newline")]:
         try:
             await ps.save_profile(pool, name=f"bad surf {what}", notes="",
                                   payload={"strategies": [{"id": 1, "surface": bad}]})
@@ -1059,8 +1062,15 @@ async def check_portfolio_profiles(pool) -> None:
     check((await ps.load_profile(pool, okd["id"]))["payload"]["strategies"][0]["surface"]
           == ["not_a_column_yet"],
           "an unknown column is stored as given, for the catalog to refuse later")
+    # AN OI / VOLUME / PRICE ID shares the list (P3: one "add a metric").
+    oid = await ps.save_profile(pool, name="oi metric", notes="",
+                                payload={"strategies": [{"id": 1, "surface": ["iv_30d_atm", "oi_daily.pc_ratio"]}]})
+    check((await ps.load_profile(pool, oid["id"]))["payload"]["strategies"][0]["surface"]
+          == ["iv_30d_atm", "oi_daily.pc_ratio"],
+          "a <source>.<metric> id is stored beside a surface column")
     await ps.delete_profile(pool, surf["id"])
     await ps.delete_profile(pool, okd["id"])
+    await ps.delete_profile(pool, oid["id"])
 
     lst = await ps.list_profiles(pool)
     check([x["name"] for x in lst][:1] == ["future metric"],
