@@ -254,6 +254,10 @@ GATES = [
        note="export metric values by key, bins, missing; min strike NaN-safe (needs initdb)"),
     _s("check_spx_metrics_sql.py", can_skip=True,
        note="OI/volume/price metrics: catalog per-row surfaced, coverage, date & bar joins, cache (needs initdb)"),
+    _s("check_heatmap.py", can_skip=True,
+       note="heatmap IV z-score: window, thresholds, 400s; fixed +/-3 colour, blank reasons, cache (node)"),
+    _s("check_heatmap_sql.py", can_skip=True,
+       note="heatmap IV z-score SQL vs a Python reference, every blank case (needs initdb)"),
     _s("check_strategy_signal.py",
        note="decision, percentile, one clock, one fetch per source, store"),
     _s("check_strategy_signal_ui.py", can_skip=True,
@@ -385,6 +389,8 @@ COVERS = {
     "check_ft_filters_ui":       [(r"(\d+) assertions, failures", 24)],             # 32 (+ min strike, export values; 2026-11-07)
     "check_ft_values_sql":       [("ok", 11)],                                      # 15
     "check_spx_metrics_sql":     [("ok", 22)],                                      # 29 (+ rank, 2026-11-18; temp mode not yet run here -- no initdb)
+    "check_heatmap":             [(r"heatmap: (\d+) ok", 28)],                     # 38 (2026-11-19)
+    "check_heatmap_sql":         [("ok", 17)],                                      # 23 (2026-11-19; temp mode not yet run here -- no initdb)
     "check_ft_sectors":          [(r"check_ft_sectors: (\d+) ok", 82)],             # 109 (+ cap provenance, exit avg_ret; 2026-11-07)
     "check_ft_sectors_ui":       [(r"(\d+) assertions, failures", 53)],             # 71 (+ exit pane layout; 2026-11-07)
     "check_strategy_signal":     [("ok", 85)],                                      # 112

@@ -4,8 +4,8 @@ Heatmap endpoints — full IV surface grid for a single snapshot.
 GET /api/heatmap/iv          — raw IV per (dte, put_delta)
 GET /api/heatmap/skew        — skew slope vs ATM forward per node
 GET /api/heatmap/term        — forward vol anchored at 30 DTE per node
-GET /api/heatmap/node_stats  — historical IV percentiles per node (for coloring),
-                               ?lookback=90d|1y
+GET /api/heatmap/iv_zscore   — IV z-score per node vs its own 15:45 history,
+                               ?lookback=90d|1y, window ending on the viewed date
 """
 import logging
 import math
@@ -21,11 +21,21 @@ router = APIRouter(tags=["heatmap"])
 # module-level logger would be silently dropped. Log through uvicorn's.
 log = logging.getLogger("uvicorn.error")
 
-# Percentile-shading lookback, in calendar days ending at the newest trade_date
-# present in spx_surface -- not today -- so a pipeline running a day or two
-# behind still yields a full window. A closed set on purpose: anything else is
-# a 400, never a fall-through to an unbounded scan of all history.
-NODE_STATS_LOOKBACK_DAYS = {"90d": 90, "1y": 365}
+# Z-score lookback, in calendar days ending on (and including) the trade_date
+# being viewed, so scrolling back gives the z-score as it read that day. A
+# closed set on purpose: anything else is a 400, never a fall-through to an
+# unbounded scan of all history.
+ZSCORE_LOOKBACK_DAYS = {"90d": 90, "1y": 365}
+
+# Fewest 15:45 observations a node needs before its z-score is reported.
+# stddev_samp is defined from 2, but a z built on a handful of days swings on
+# noise. Below this the node's z is null; its n is still returned.
+ZSCORE_MIN_DAYS = 20
+
+# A stdev at or below this is float rounding over identical values, not
+# dispersion (IV is ~0.05-1.0, so 1e-6 is a ten-thousandth of a vol point).
+# Treated as zero: z is null rather than an enormous or infinite number.
+ZSCORE_MIN_STDEV = 1e-6
 
 
 # ── IV ────────────────────────────────────────────────────────────────────────
@@ -182,76 +192,122 @@ async def _fetch_term(conn, date: str, time: str) -> list[dict]:
     return result
 
 
-# ── Per-node IV statistics for colour scaling ─────────────────────────────────
+# ── IV z-score vs each node's own history ─────────────────────────────────────
 
-# CURRENTLY UNUSED BY THE FRONTEND. IV shading is relative to the displayed
-# snapshot (computed in heatmap.js); this is kept as the starting point for a
-# separate historical z-score view.
-@router.get("/node_stats")
-async def heatmap_node_stats(
+@router.get("/iv_zscore")
+async def heatmap_iv_zscore(
+    date:     str = Query(...),
+    time:     str = Query(...),
     lookback: str = Query("90d"),
     pool=Depends(get_pool),
 ) -> dict:
     """
-    IV percentiles (p05, p50, p95) per (dte, put_delta) over the lookback
-    window, using each trade date's exact 15:45 snapshot. Days without one
-    (holidays, half-days) drop out of the sample; there is no fallback.
-    p50 is used as the grey midpoint; p05/p95 pin the colour extremes.
+    Per (dte, put_delta): (iv at the viewed snapshot − mean) / stddev_samp,
+    where mean and stdev come from that node's exact-15:45 IV on each trade
+    date in the lookback window. The window ends on — and includes — the
+    viewed date. Days without a 15:45 row (holidays, half-days) drop out; no
+    fallback. z is null when n < ZSCORE_MIN_DAYS or the stdev is ~zero.
+
+    Viewing a 15:45 snapshot, the viewed value is IN its own history (the
+    window includes the viewed date), which pulls z slightly toward 0 --
+    by design: the window is "as it read that day". The page colours z on a
+    FIXED +/-3 scale, so a colour means the same on every date (heatmap.js
+    header). Gates: check_heatmap (handler + page), check_heatmap_sql
+    (real SQL; --live read-only on the VPS).
     """
-    days = NODE_STATS_LOOKBACK_DAYS.get(lookback)
+    days = ZSCORE_LOOKBACK_DAYS.get(lookback)
     if days is None:
         raise HTTPException(
             status_code=400,
-            detail=f"lookback must be one of {list(NODE_STATS_LOOKBACK_DAYS)}; "
+            detail=f"lookback must be one of {list(ZSCORE_LOOKBACK_DAYS)}; "
                    f"got {lookback!r}",
         )
 
+    # A malformed date or time is the caller's error (400), not a 500.
+    try:
+        end_day   = date_type.fromisoformat(date)
+        snap_time = time_type.fromisoformat(time)
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail=f"date must be YYYY-MM-DD and time HH:MM; got {date!r}, {time!r}")
+    # Inclusive on both ends, so the window is exactly `days` calendar days.
+    start_day = end_day - timedelta(days=days - 1)
+
     t0 = perf_counter()
-    last_day = first_day = None
     try:
         async with pool.acquire() as conn:
-            last_day = await conn.fetchval("SELECT MAX(trade_date) FROM spx_surface")
-            if last_day is None:
-                return {}
-            # Inclusive on both ends, so the window is exactly `days` calendar days.
-            first_day = last_day - timedelta(days=days - 1)
             t1 = perf_counter()
             rows = await conn.fetch(
                 """
-                SELECT dte, put_delta,
-                       PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY iv) AS p05,
-                       PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY iv) AS p50,
-                       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY iv) AS p95
-                FROM spx_surface
-                WHERE trade_date BETWEEN $1 AND $2
-                  AND quote_time = '15:45'
-                GROUP BY dte, put_delta
-                ORDER BY dte, put_delta
+                WITH hist AS (
+                    SELECT dte, put_delta,
+                           count(iv)               AS n,
+                           avg(iv::float8)         AS mean,
+                           stddev_samp(iv::float8) AS sd
+                    FROM spx_surface
+                    WHERE trade_date BETWEEN $1 AND $2
+                      AND quote_time = '15:45'
+                    GROUP BY dte, put_delta
+                )
+                SELECT s.dte, s.put_delta, s.iv::float8 AS iv, h.n, h.mean, h.sd,
+                       CASE WHEN h.n >= $4::int AND h.sd > $5::float8
+                            THEN (s.iv::float8 - h.mean) / h.sd
+                       END AS z
+                FROM spx_surface s
+                LEFT JOIN hist h ON h.dte = s.dte AND h.put_delta = s.put_delta
+                WHERE s.trade_date = $2
+                  AND s.quote_time = $3::time
+                ORDER BY s.dte, s.put_delta
                 """,
-                first_day,
-                last_day,
+                start_day,
+                end_day,
+                snap_time,
+                ZSCORE_MIN_DAYS,
+                ZSCORE_MIN_STDEV,
             )
     except Exception as exc:
         # uvicorn logs the traceback itself; this adds what it can't know.
         log.error(
-            "node_stats failed: lookback=%s window=%s..%s after %.0f ms — %s: %s",
-            lookback, first_day, last_day, (perf_counter() - t0) * 1000,
+            "iv_zscore failed: lookback=%s window=%s..%s time=%s after %.0f ms — %s: %s",
+            lookback, start_day, end_day, snap_time, (perf_counter() - t0) * 1000,
             type(exc).__name__, exc,
         )
         raise
     t2 = perf_counter()
+
+    current = [
+        {
+            "dte":       r["dte"],
+            "put_delta": r["put_delta"],
+            "v":         r["z"],
+            "iv":        r["iv"],
+            "mean":      r["mean"],
+            "sd":        r["sd"],
+            "n":         r["n"] or 0,
+        }
+        for r in rows
+    ]
+    # Most 15:45 observations any node has: the number of days in the window
+    # with a 15:45 snapshot, unless a day is missing every node. Cheaper than a
+    # second pass for count(DISTINCT trade_date).
+    max_n = max((c["n"] for c in current), default=0)
+    null_z = sum(1 for c in current if c["v"] is None)
+
     log.info(
-        "node_stats lookback=%s window=%s..%s nodes=%d "
-        "acquire+max_date=%.0f ms stats_query=%.0f ms",
-        lookback, first_day, last_day, len(rows),
+        "iv_zscore lookback=%s window=%s..%s time=%s nodes=%d days=%d null_z=%d "
+        "acquire=%.0f ms query=%.0f ms",
+        lookback, start_day, end_day, snap_time, len(current), max_n, null_z,
         (t1 - t0) * 1000, (t2 - t1) * 1000,
     )
 
     return {
-        f"{r['dte']}_{r['put_delta']}": {
-            "p05": float(r["p05"]) if r["p05"] is not None else None,
-            "p50": float(r["p50"]) if r["p50"] is not None else None,
-            "p95": float(r["p95"]) if r["p95"] is not None else None,
-        }
-        for r in rows
+        "mode":     "iv_zscore",
+        "lookback": lookback,
+        "window": {
+            "start":    start_day.isoformat(),
+            "end":      end_day.isoformat(),
+            "days":     max_n,
+            "min_days": ZSCORE_MIN_DAYS,
+        },
+        "current": current,
     }

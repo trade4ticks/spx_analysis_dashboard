@@ -88,7 +88,13 @@
     <div class="seg">
       <div class="seg-btn" :class="{on: submode==='raw'}"    @click="onSubmodeChange('raw')">Raw</div>
       <div class="seg-btn" :class="{on: submode==='change'}" @click="onSubmodeChange('change')">1D Chg</div>
+      <!-- IV-only: z vs each node's own 15:45 history, window ending on the viewed date -->
+      <div class="seg-btn" x-show="mode==='iv'" :class="{on: submode==='z3m'}" @click="onSubmodeChange('z3m')"
+           title="IV z-score vs this node's 15:45 history, 90 calendar days ending on the viewed date">3mZ</div>
+      <div class="seg-btn" x-show="mode==='iv'" :class="{on: submode==='z1y'}" @click="onSubmodeChange('z1y')"
+           title="IV z-score vs this node's 15:45 history, 365 calendar days ending on the viewed date">1yZ</div>
     </div>
+    <span class="ctrl-lbl" x-show="zInfo" x-text="zInfo"></span>
 
     <div class="ctrl-div"></div>
 

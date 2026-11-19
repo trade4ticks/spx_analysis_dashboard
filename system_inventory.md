@@ -261,7 +261,8 @@ Grouped by router. Status: **active** = wired to JS or polled; **internal-only**
 | GET | `/api/skew_slope` | parquet | app.js | IV Analysis - Skew slope | active |
 | GET | `/api/term_slope` | parquet | app.js | IV Analysis - Term slope | active |
 | GET | `/api/raw/{expirations,skew,term,historical}` | parquet | today.js, app.js | Today + IV Analysis raw mode | active |
-| GET | `/api/heatmap/{iv,skew,term,node_stats}` | parquet/aggregate | heatmap.js `loadGrid` | Heatmap page (mode-switched) | active |
+| GET | `/api/heatmap/{iv,skew,term}` | R: `spx_surface` (+ `spx_atm` for skew/term) | heatmap.js `loadGrid` | Heatmap page (mode-switched) | active |
+| GET | `/api/heatmap/iv_zscore?date&time&lookback=90d\|1y` | R: `spx_surface` (the viewed snapshot + each node's 15:45 history over the 90 / 365 calendar days ending ON the viewed date) | heatmap.js `loadZscore` | Heatmap IV **3mZ / 1yZ** views: per node (iv − mean) / stddev_samp, blank under 20 days or a stdev ≤ 1e-6; drawn on a FIXED ±3 colour scale. Replaced `/node_stats` (per-node p05/p50/p95 over the window ending at the table's newest date — unused by the page since IV shading moved to the snapshot's own shape). Gates: `check_heatmap` (handler + page, node), `check_heatmap_sql` (real SQL; `--live` read-only on the VPS) | active |
 | GET | `/api/today/{iv_grid,scatter}` | parquet | today.js | Today page IV grid + scatter | active |
 
 ### 3b. AI Explorer (`/api/ai-explorer`)

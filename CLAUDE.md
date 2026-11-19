@@ -2091,6 +2091,25 @@ histogram correctness (units, binning, counts) beats statistical polish.
   new error line, nothing else. (The aria-label change is not something
   the walker records.)
 
+### Heatmap: the IV z-score views (3mZ / 1yZ)
+
+Found uncommitted, dated 2026-10-25, author not remembered; kept by the user
+on 2026-11-19 ON CONDITION it is gated like the rest. `GET
+/api/heatmap/iv_zscore` (replaced the unused `/node_stats`): per node,
+(IV at the viewed snapshot − mean) / stddev_samp of that node's **15:45**
+IV over the 90 / 365 calendar days ending ON the viewed date ("as it read
+that day" — so at 15:45 the viewed value is in its own sample, and |z| can
+never exceed (n−1)/√n; the live gate asserts exactly that). Blank z, each
+named in the hover: no IV at the node, n under 20, stdev ≤ 1e-6. **The colour
+is a FIXED ±3 scale** (clamped; `zCell` in heatmap.js): a scale stretched to
+each snapshot would make a colour mean a different thing on every date — the
+same reason the drifting OI raw levels are unsurfaced on the OO page. The
+user's reasoning; never make it adaptive. A malformed date/time is a 400
+(was a 500). Gates: `check_heatmap` (handler on a recording fake pool, page
+in node; planted window-off-by-one, a ±6 scale and swapped blank reasons each
+fail it), `check_heatmap_sql` (a temporary Postgres vs a Python reference;
+not yet run on the dev box — no initdb) and its `--live`.
+
 ### What `main.index_ohlc` actually looks like
 
 5-minute bars, SPX/VIX/VIX3M/VIX9D full OHLC, 2017-01-01 → present.
@@ -2261,9 +2280,10 @@ a gate that could not run is a FAIL.
   server binaries (the DB is elsewhere), so the SQL gate can never run there.
 
 One-time VPS setup for the gates: the `gates.py` docstring (its one copy).
-**The three Postgres gates have `--live` for the VPS** (root, no initdb; by
-hand, not in `gates.py`): `check_ft_values_sql --live` is READ-ONLY against
-OI_DATABASE_URL; `check_oo_market_sql --live` and `check_strategy_signal_sql
+**The Postgres gates have `--live` for the VPS** (root, no initdb; by
+hand, not in `gates.py`): `check_ft_values_sql --live` and
+`check_spx_metrics_sql --live` are READ-ONLY against OI_DATABASE_URL,
+`check_heatmap_sql --live` READ-ONLY against DATABASE_URL; `check_oo_market_sql --live` and `check_strategy_signal_sql
 --live` WRITE, so they run in a throwaway schema of DATABASE_URL
 (`run_in_scratch`): created new (never adopted), every connection's
 search_path that schema ALONE with an `init` guard refusing any other, the

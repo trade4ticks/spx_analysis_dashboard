@@ -9,6 +9,24 @@
  *   snapshot p99 IV    → blue  #1a8cff   (anything higher clamps to blue)
  *   Interpolated linearly between these stops.
  *
+ * IV 3mZ / 1yZ (each node vs its OWN 15:45 history — fixed scale, so a colour
+ * means the same thing on every date; never recomputed per snapshot):
+ *   z ≤ −3 → pink  #ff1a8c   (IV low vs its history; clamped)
+ *   z =  0 → dark  #2a2a2a
+ *   z ≥ +3 → blue  #1a8cff   (IV high vs its history; clamped)
+ *   Same direction as IV Raw: low → pink, high → blue.
+ *
+ *   WHY A FIXED ±3 AND NOT THE SNAPSHOT'S OWN RANGE (the user's reasoning,
+ *   2026-11-19 -- do not "improve" it into an adaptive scale). A scale
+ *   stretched to each snapshot's spread makes pink mean "lowest TODAY", so
+ *   the same colour means a different thing on every date and two dates
+ *   cannot be compared by eye. The z-score already does the per-node
+ *   normalising; the colour must not normalise a second time. It is the
+ *   same reason the OI / volume / price raw levels whose distributions
+ *   drift year to year are unsurfaced on the OO Backtest page: a scale or a
+ *   percentile cut on a moving distribution measures WHEN, not WHAT. (IV
+ *   Raw above is deliberately the other kind -- the shape of one snapshot.)
+ *
  * SKEW / TERM Raw:
  *   min → pink, 0 → dark, max → blue (fixed ranges below)
  *
@@ -27,6 +45,10 @@ const TERM_RAW_MIN =  0.10, TERM_RAW_MAX = 0.35;
 const IV_CHG_RANGE   = 0.10;
 const SKEW_CHG_RANGE = 0.30;
 const TERM_CHG_RANGE = 0.05;
+
+// IV z-score: fixed symmetric bound, and submode → /api/heatmap/iv_zscore lookback
+const Z_RANGE    = 3;
+const Z_LOOKBACK = { z3m: '90d', z1y: '1y' };
 
 // Color stops
 const COLOR_LOW  = [255, 26, 140];   // #ff1a8c  pink
@@ -106,6 +128,40 @@ function fmtNum(v, decimals = 3) {
     return v.toFixed(decimals);
 }
 
+function fmtZ(v) {
+    if (v == null || isNaN(v)) return '—';
+    return (v > 0 ? '+' : '') + v.toFixed(2);
+}
+
+/**
+ * One z-score cell: its colour, its text and the hover lines after the
+ * node's name. `zr` is the node's row from /api/heatmap/iv_zscore (or
+ * undefined), `win` that response's window. A blank z says WHICH of the
+ * three reasons: no IV at the node, too few days (n below min_days), or a
+ * deviation of ~zero. The colour depends on z alone -- never on the other
+ * cells (see the header).
+ */
+function zCell(zr, win, zName) {
+    const z = zr?.v ?? null;
+    const n = zr?.n ?? 0;
+    let why = '';
+    if (z == null) {
+        why = !zr || zr.iv == null        ? '  (no IV at this node)'
+            : win && n < win.min_days     ? `  (n below ${win.min_days}, not reported)`
+            :                               '  (stdev ≈ 0, not reported)';
+    }
+    const text = fmtZ(z);
+    return {
+        bg: colorForRaw(z, -Z_RANGE, 0, Z_RANGE),
+        text,
+        lines: [
+            `${zName}: ${text}${why}`,
+            `IV: ${fmtPct(zr?.iv)}  mean: ${fmtPct(zr?.mean)}  sd: ${fmtPct(zr?.sd, 2)}`,
+            `n=${n} days at 15:45` + (win ? `  (${win.start} → ${win.end})` : ''),
+        ],
+    };
+}
+
 /** Format display value per mode/submode */
 function fmtCell(mode, submode, v) {
     if (v == null || isNaN(v)) return '—';
@@ -124,7 +180,7 @@ document.addEventListener('alpine:init', () => {
     Alpine.data('heatmap', () => ({
         // ── State ────────────────────────────────────────────────────────────
         mode:    'iv',       // iv | skew | term
-        submode: 'raw',      // raw | change
+        submode: 'raw',      // raw | change | z3m | z1y  (z* are IV-only)
 
         dates:  [],
         times:  [],
@@ -137,6 +193,7 @@ document.addEventListener('alpine:init', () => {
         // Raw grid data from API
         current: [],  // [{dte, put_delta, v}, …]
         prev:    [],  // for 1D change
+        zCache:  {},  // {'date|time|lookback': iv_zscore response} — keyed so a z never shows another snapshot's
 
         // Derived sorted axis values
         dtes:       [],
@@ -187,12 +244,27 @@ document.addEventListener('alpine:init', () => {
 
         async onModeChange(m) {
             this.mode = m;
+            // z-scores exist for IV only; never carry a z submode into Skew/Term
+            if (m !== 'iv' && Z_LOOKBACK[this.submode]) this.submode = 'raw';
             await this.loadGrid();
         },
 
         async onSubmodeChange(s) {
+            if (Z_LOOKBACK[s] && this.mode !== 'iv') return;
             this.submode = s;
-            this.renderGrid();   // data already loaded; just recolor
+            if (this.zLookback) {
+                this.loading = true;
+                this.error   = null;
+                try {
+                    await this.loadZscore();
+                } catch(e) {
+                    this.error = 'Failed to load z-scores';
+                    console.error(e);
+                } finally {
+                    this.loading = false;
+                }
+            }
+            this.renderGrid();   // raw / change: data already loaded; just recolor
         },
 
         // ── Data loading ─────────────────────────────────────────────────────
@@ -224,6 +296,8 @@ document.addEventListener('alpine:init', () => {
                 this.dtes      = [...dteSet].sort((a, b) => a - b);
                 this.putDeltas = [...pdSet].sort((a, b) => a - b);
 
+                if (this.zLookback) await this.loadZscore();
+
                 this.renderGrid();
             } catch(e) {
                 this.error = 'Failed to load heatmap data';
@@ -231,6 +305,37 @@ document.addEventListener('alpine:init', () => {
             } finally {
                 this.loading = false;
             }
+        },
+
+        // ── IV z-score ───────────────────────────────────────────────────────
+        get zLookback() {
+            return this.mode === 'iv' ? (Z_LOOKBACK[this.submode] ?? null) : null;
+        },
+
+        get zData() {
+            const lb = this.zLookback;
+            return lb ? (this.zCache[`${this.date}|${this.time}|${lb}`] ?? null) : null;
+        },
+
+        /** One-line window summary for the controls strip, so a thin window is visible. */
+        get zInfo() {
+            const w = this.zData?.window;
+            if (!w) return '';
+            const thin = w.days < w.min_days ? ` — thin: under ${w.min_days}, z suppressed` : '';
+            return `${w.start} → ${w.end} · ${w.days} days at 15:45${thin}`;
+        },
+
+        async loadZscore() {
+            const lb = this.zLookback;
+            if (!lb || !this.date || !this.time) return;
+            // Key captured before the await, so a response lands under the
+            // snapshot it was requested for even if the selection moves on.
+            const key = `${this.date}|${this.time}|${lb}`;
+            if (this.zCache[key]) return;
+            const url = `/api/heatmap/iv_zscore?date=${this.date}&time=${this.time}&lookback=${lb}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+            this.zCache[key] = await res.json();
         },
 
         // ── Grid rendering ────────────────────────────────────────────────────
@@ -270,6 +375,14 @@ document.addEventListener('alpine:init', () => {
                 }
             }
 
+            // IV z-score rows by node (null outside a z submode)
+            const zLb   = this.zLookback;
+            const zWin  = this.zData?.window ?? null;
+            const zMap  = zLb
+                ? new Map((this.zData?.current ?? []).map(r => [`${r.dte}_${r.put_delta}`, r]))
+                : null;
+            const zName = zLb === '90d' ? '3mZ' : '1yZ';
+
             // Choose change half-range
             const chgRange = mode === 'iv' ? IV_CHG_RANGE
                            : mode === 'skew' ? SKEW_CHG_RANGE
@@ -308,6 +421,12 @@ document.addEventListener('alpine:init', () => {
                             `Prev:    ${fmtCell(mode, 'raw', prv)}`,
                         ];
                         title = parts.join('\n');
+                    } else if (zMap) {
+                        // IV z-score: fixed ±Z_RANGE scale, zero at the dark midpoint
+                        const zc   = zCell(zMap.get(key), zWin, zName);
+                        bg         = zc.bg;
+                        displayVal = zc.text;
+                        title = [`DTE=${dte}  Δ=${pdLabel(pd)}`, ...zc.lines].join('\n');
                     } else {
                         // Raw mode
                         if (mode === 'iv') {
