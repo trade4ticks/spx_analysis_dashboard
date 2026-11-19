@@ -2009,8 +2009,11 @@ histogram correctness (units, binning, counts) beats statistical polish.
   `spxSecs()` with their own functions (`spxView`, `spxHeadline`,
   `spxFooter`, `spxCommonText`, `spxStale`, per-pane hidden families in
   `rk.hidden[s]`), ids `ob-rank-chart-<s>` etc., rows in
-  `OB_DATA.rankSec[s]` (each row's `column` is its id, `label` its name), and
-  240 px charts. Both draw through ONE `drawRankChart(o)` (the old
+  `OB_DATA.rankSec[s]` (each row's `column` is its id, `label` its name).
+  **Every pane is 168 px** (2026-11-19, the user's call — was IV 320, the
+  sections 240; the scroll down to a histogram row and back was the cost).
+  Height is bar LENGTH only: bars are 12 px wide and the pane scrolls
+  sideways, so 452 bars fit at any height. Both draw through ONE `drawRankChart(o)` (the old
   renderRanking body, parameterised; the IV config is unchanged). Filter
   gain: bars by $/trade from 0, zeros counted not drawn, no BH line, no "what
   is BH?", footers say "$/trade, comparable within this backtest only"; the

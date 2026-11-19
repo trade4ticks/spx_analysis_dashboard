@@ -88,7 +88,10 @@
     .ob-rank-swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
     .ob-rank-fam { color:var(--text); text-decoration:none; }
     .ob-rank-fam.off { color:var(--dim); text-decoration:line-through; }
-    .ob-rank-wrap { display:flex; height:320px; }
+    /* Every ranking pane the same height (2026-11-19, the user's call: was
+       320 for IV, 240 for the sections). Bars are fixed 12 px wide and the
+       pane scrolls sideways, so height sets bar LENGTH only, never how many fit. */
+    .ob-rank-wrap { display:flex; height:168px; }
     /* Fixed width that the axis canvas cannot push: a flex item's default
        min-width is its content, and a canvas's intrinsic width once grew this
        column to ~290 px, shifting every bar right. */
@@ -100,7 +103,6 @@
     .ob-rank-pane { border-top:1px solid var(--border); padding-top:10px; margin-top:10px; }
     .ob-rank-pane-hdr { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; }
     .ob-rank-pane-title { font-size:13px; font-weight:700; color:var(--text); }
-    .ob-rank-wrap.small { height:240px; }
     .ob-rank-foot { margin-top:6px; }
     .ob-help { color:var(--accent); cursor:help; border-bottom:1px dotted var(--accent); margin-left:6px; }
     .ob-rank-bhwarn { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px; font-weight:600;
@@ -942,7 +944,7 @@
               </div>
               <div class="ob-placeholder" x-show="!rk.result && !rk.busy"
                    x-text="'Press Rank metrics to rank every ' + sec.label + ' metric against the filtered trades\' P/L'"></div>
-              <div class="ob-rank-wrap small" x-show="rk.result">
+              <div class="ob-rank-wrap" x-show="rk.result">
                 <div class="ob-rank-axis"><canvas :id="'ob-rank-axis-' + sec.key"></canvas></div>
                 <div class="ob-rank-scroll">
                   <div :id="'ob-rank-inner-' + sec.key" class="ob-rank-inner">
