@@ -1858,7 +1858,9 @@ server, with FILTER GAIN — done 2026-11-18; **P5** four ranking sections
 (IV, OI, Volume, Price), ONE button, Filter gain in the sort toggle, and
 ONE combined "add a metric" dropdown over all 607 grouped IV / OI / Volume
 / Price (the user's call, 2026-11-18 — not four scoped dropdowns: a metric
-must be findable without knowing its category; it keeps the panes small);
+must be findable without knowing its category; it keeps the panes small)
+— built 2026-11-18, awaiting the user's browser review (and then the
+off-state re-record);
 **P3** Backtest Portfolio (one search box, results grouped IV/OI/Volume/
 Price, "add a metric"); **P6** checks and docs. **What the user does with
 it**: ranking is triage; the HISTOGRAMS are read for a run of bars at one
@@ -1989,6 +1991,38 @@ histogram correctness (units, binning, counts) beats statistical polish.
   field by field, per-bar = per-trade) and `check_spx_rank_sections` (pure:
   sections, cross identical but own BH, per-section BH, a start narrows only
   its section, daily distinct entries = dates).
+- **P5: the "Metrics vs P/L" card** (was "Surface metrics vs P/L"; the split
+  gate finds it by that title). ONE controls row for every pane: the button
+  (`rankAll()` — /surface/rank and, when the OI catalog loaded,
+  /spx-metrics/rank, side by side, the SAME `rankIdx()` trades, so Train
+  view ranks train trades everywhere; its label stays "Rank metrics" /
+  "Recompute", which the gates click by), Spearman | Pearson | **Filter
+  gain** (`surf.method`, shared), the form toggle (shared; the union of all
+  four catalogs' forms), Common coverage only (shared toggle, each pane its
+  OWN start — `spxCoverage(s)` from that section's metrics in view, sent as
+  `from[section]`). Then "Add a metric": a search box (`addQuery`, name or
+  description) narrowing the ONE dropdown, optgroups `<section> · <family>`
+  (IV first; a cross metric under OI and Volume), and a count. Then the panes:
+  **IV keeps every function, id and state it had** (`surf`, `surfView`,
+  `surfFooter`, `#ob-rank-chart` / `-axis` / `-inner`, OB_CHARTS.rank) — the
+  gates drive those; the OI / Volume / Price panes are an `x-for` over
+  `spxSecs()` with their own functions (`spxView`, `spxHeadline`,
+  `spxFooter`, `spxCommonText`, `spxStale`, per-pane hidden families in
+  `rk.hidden[s]`), ids `ob-rank-chart-<s>` etc., rows in
+  `OB_DATA.rankSec[s]` (each row's `column` is its id, `label` its name), and
+  240 px charts. Both draw through ONE `drawRankChart(o)` (the old
+  renderRanking body, parameterised; the IV config is unchanged). Filter
+  gain: bars by $/trade from 0, zeros counted not drawn, no BH line, no "what
+  is BH?", footers say "$/trade, comparable within this backtest only"; the
+  hover leads with `obFgLines` ("Filter gain +$75.00/trade · right 30.0% ·
+  removed 300 @ $25.00 · kept 700 @ $275.00" and the rule in display units)
+  — under Spearman/Pearson the same line follows the correlations. A cross
+  metric's hover (`spxCrossNote`): also ranked in the other section, same r,
+  p and filter gain, its own BH-adjusted p. The OI catalog unavailable: no
+  OI / Volume / Price panes, the button ranks IV alone. Gate:
+  `check_rank_panes` (node). Browser gates green (notes 21, sweep 152, split
+  262); off-state differs in DOM only (7 steps: every chart, figure, export
+  and request — the IV rank body included — identical).
 - **The off-state recording** was re-recorded for P2 on 2026-11-18, after
   the user approved it in the browser (see the off-state gate section): a
   new request per load (`/spx-metrics/catalog`, stubbed 404 there) and the

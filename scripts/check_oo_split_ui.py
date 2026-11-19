@@ -359,7 +359,7 @@ __SNAPSHOT__
   };
   const emptyShown = () => { const e = [...document.querySelectorAll('.ob-main .ob-empty')].find(shown); return e ? txt(e) : ''; };
   const sumSub = () => { const e = document.querySelector('.ob-summary .ob-card-sub'); return e ? txt(e) : ''; };
-  const rankSub = () => [...document.querySelectorAll('.ob-main .ob-card')].filter(e => /Surface metrics vs P\/L/.test(txt(e.querySelector('.ob-card-title'))))
+  const rankSub = () => [...document.querySelectorAll('.ob-main .ob-card')].filter(e => /^Metrics vs P\/L$/.test(txt(e.querySelector('.ob-card-title'))))
                           .map(e => [...e.querySelectorAll('.ob-card-hdr .ob-card-sub')].map(txt)).flat();
   try {
     let c = null;

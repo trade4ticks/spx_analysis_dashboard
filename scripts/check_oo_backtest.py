@@ -1396,7 +1396,7 @@ global.fetch = async (url, init) => {
   out.afterPageRowRemoved = c.filteredCount;
   out.removed = { rows: c.surfRows.length, col: 'surface__iv_30d_atm' in OBD.columns,
                   present: c.presentColumns.includes('surface__iv_30d_atm'), sections: Object.keys(c.sections).filter(k => k.startsWith('surf_')) };
-  c.surfClickBar(0);
+  c.rankClickBar(c.surfView(), 0);
   await new Promise(r => setTimeout(r, 0));
   out.clicked = c.surfRows.map(r => r.surfColumn);
 
@@ -1498,8 +1498,8 @@ def check_surface_rows() -> None:
           f"a metric whose coverage starts after every trade says so instead of drawing nothing ({o['z']['skipped']})")
     check(o["broken"]["state"] == "error" and "Unknown or unranked" in o["broken"]["error"],
           "a failed fetch leaves an error row (removable), not a silent empty section")
-    check(o["groups"] == ["IV · iv:+iv_30d_atm,+z_iv_30d_atm", "Skew · skew:+broken"],
-          f"dropdown: optgroups per family in legend order, added metrics marked ({o['groups']})")
+    check(o["groups"] == ["IV · iv:+iv_30d_atm,+z_iv_30d_atm", "IV · skew:+broken"],
+          f"dropdown: optgroups '<section> · <family>' in legend order, added metrics marked ({o['groups']})")
     r = o["removed"]
     check(r == {"rows": 0, "col": False, "present": False, "sections": []},
           "remove drops the row, its client column and its section state")
@@ -1948,6 +1948,209 @@ def check_spx_rank_sections() -> None:
     check(late["price"][0]["n"] == ref["n"] and late["price"][0]["spearman"] == ref["spearman"]
           and late["price"][0]["n"] < out["price"][0]["n"],
           f"Price with a start ranks only trades entered on/after it ({late['price'][0]['n']} of {out['price'][0]['n']})")
+
+
+PANES_DRIVER = r"""
+const fs = require('fs');
+let factory;
+global.document = { addEventListener: (e, fn) => fn(), getElementById: () => null };
+global.Alpine = { data: (_n, f) => { factory = f; } };
+global.requestAnimationFrame = f => f();
+eval(fs.readFileSync(process.argv[2], 'utf8') + String.fromCharCode(10)
+     + fs.readFileSync(process.argv[1], 'utf8') + ';globalThis.OBD = OB_DATA;');
+const job = JSON.parse(fs.readFileSync(0, 'utf8'));
+const out = { iv: [], spx: [] };
+global.console.error = () => {};
+const expand = b => b.bar_of.map((k, i) => [b.bars[k][0], b.bars[k][1], b.pnl[i]]);
+global.fetch = async (url, init) => {
+  const j = (b, ok = true) => ({ ok, status: ok ? 200 : 503, json: async () => b });
+  if (url.endsWith('/surface/catalog')) return j(job.ivCatalog);
+  if (url.endsWith('/spx-metrics/catalog')) return job.down ? j({ detail: 'OI, volume and price metrics unavailable: x' }, false) : j(job.catalog);
+  if (url.endsWith('/surface/rank')) { const b = JSON.parse(init.body); out.iv.push(expand(b)); return j({ rows: job.ivRows, report: { with_bar: 6, no_bar: 0, distinct_entries: 6 } }); }
+  if (url.endsWith('/spx-metrics/rank')) {
+    const b = JSON.parse(init.body);
+    out.spx.push({ trades: expand(b), from: b.from, keys: Object.keys(b).sort() });
+    return j({ sections: job.sections, report: { not_present: { oi_daily: 0, oi_5min: 2, price_daily: 1, price_5min: 0 }, distinct_entries: 6 } });
+  }
+  throw new Error('unexpected ' + url);
+};
+(async () => {
+  const c = factory();
+  c.$nextTick = f => f && f();
+  c.registry = job.registry;
+  c.setTrades(job.payload);
+  await new Promise(r => setTimeout(r, 0));
+  out.secs = c.spxSecs().map(x => x.key);
+  if (job.down) {
+    await c.rankAll();
+    out.err = c.spx.error;
+    process.stdout.write(JSON.stringify(out));
+    return;
+  }
+  out.headBefore = c.spxHeadline('oi');
+  out.label = await (async () => { return c.rankBusy(); })();
+  await c.rankAll();
+  out.after = { busy: c.rankBusy(), stale: c.rankStale(), staleOi: c.spxStale('oi') };
+  const names = s => (c.spxView(s) || { bars: [] }).bars.map(b => b.column);
+  out.spear = { oi: names('oi'), volume: names('volume'), price: names('price') };
+  out.headOi = c.spxHeadline('oi');
+  out.footOi = c.spxFooter('oi');
+  out.cross = c.spxCrossNote('oi', { column: 'oi_daily.x' });
+  out.crossNone = c.spxCrossNote('oi', { column: 'oi_daily.a' });
+  c.setSurfMethod('filter_gain');
+  const fg = c.spxView('oi');
+  out.fg = { names: fg.bars.map(b => b.column), values: fg.bars.map(b => b.value), zero: fg.zeroInView,
+             undef: fg.undefinedInView, survives: fg.bars.some(b => b.survives), foot: c.spxFooter('oi') };
+  out.fgIv = (c.surfView() || { bars: [] }).bars.map(b => b.column);
+  out.fgIvFoot = c.surfFooter();
+  const xrow = OBD.rankSec.oi.find(r => r.column === 'oi_daily.x');
+  out.fgLines = obFgLines(xrow, { scale: 100, decimals: 2, suffix: '%' });
+  out.fgZero = obFgLines({ filter_gain: 0, fg_side: null }, null);
+  out.fgNull = obFgLines({ filter_gain: null }, null);
+  out.fgNone = obFgLines({ n: 3 }, null);
+  c.setSurfMethod('spearman');
+  c.toggleSpxFamily('oi', 'cross');
+  out.hideCross = { oi: names('oi'), volume: names('volume'), ivHidden: Object.keys(c.surf.hidden).length };
+  c.toggleSpxFamily('oi', 'cross');
+  c.filters.dateFrom = '2021-03-01'; c.recompute();
+  out.staleAfterFilter = { any: c.rankStale(), oi: c.spxStale('oi'), price: c.spxStale('price'), iv: c.surfStale() };
+  c.resetAllFilters(); c.recompute();
+  c.toggleCommon();
+  out.commonOn = { oi: c.spxStale('oi'), price: c.spxStale('price'), cost: c.spxCommonText('price') };
+  await c.rankAll();
+  out.fromSent = out.spx[out.spx.length - 1].from;
+  c.addQuery = 'momentum';
+  out.search = { groups: c.surfOptionGroups().map(g => g.label + ':' + g.options.map(o => o.value).join(',')), count: c.addCount() };
+  c.addQuery = '';
+  out.countAll = c.addCount();
+  c.setTrades(job.payload);
+  out.cleared = { rk: c.rk.result === null, rows: OBD.rankSec === null };
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stderr.write(e.stack); process.exit(1); });
+"""
+
+
+def check_rank_panes() -> None:
+    """P5 in node with the shipped JS: ONE button ranks the IV pane and the
+    OI / Volume / Price panes (two requests, the same trades); each section's
+    common-coverage start travels in `from`; filter gain sorts by $/trade with
+    no BH, zeros counted not drawn, its hover line as the user reads it; a
+    cross metric says it is also in the other section with its own adjusted
+    p; hidden families are per pane; staleness per pane; the one dropdown's
+    search spans all four; an unavailable OI database ranks IV alone."""
+    print("ranking panes: IV + OI / Volume / Price, one button (shipped JS)")
+    import shutil
+    if shutil.which("node") is None:
+        print("  SKIP  node is not installed")
+        NOT_RUN.append("ranking panes (node not installed)")
+        return
+    from app.oo_backtest import spx_metrics as sm, surface
+    dates = ["2020-01-06", "2020-06-01", "2021-01-04", "2021-06-01", "2022-01-03", "2022-06-01"]
+    cols = {"date_opened": dates, "date_closed": dates, "time_opened": ["10:00:00"] * 6,
+            "pnl": [10.0, -5.0, 20.0, 0.0, 7.0, -3.0], "days_in_trade": [1] * 6, "day_of_week": [0, 0, 0, 0, 1, 2]}
+    payload = {"n": 6, "columns": cols, "date_min": dates[0], "date_max": dates[-1], "notes": {},
+               "suggested_name": "t", "market": {"joined": True, "spx_sessions": []}}
+
+    def meta(src, metric, fam, form, md, desc):
+        return {"id": f"{src}.{metric}", "metric": metric, "table_name": sm.SOURCES[src]["table"], "source": src,
+                "join": sm.SOURCES[src]["join"], "family": fam, "form": form, "units": "pct", "description": desc,
+                "formula": "", "base_column": None, "min_date": md,
+                "sections": [x["key"] for x in sm.SECTIONS if fam in x["families"]]}
+    metrics = [meta("oi_daily", "a", "oi", "level", "2020-01-02", "open interest a"),
+               meta("oi_5min", "b", "oi_spot", "z", "2021-01-04", "spot-relative b"),
+               meta("oi_daily", "x", "cross", "level", "2020-01-02", "volume over oi"),
+               meta("oi_daily", "v", "volume", "level", "2020-01-02", "volume v"),
+               meta("price_daily", "r", "price_momentum", "level", "2020-01-02", "rsi momentum"),
+               meta("price_5min", "q", "price_vol", "z", "2022-01-03", "price vol q")]
+    catalog = {"metrics": metrics, "sections": sm.SECTIONS, "family_groups": sm.FAMILY_GROUPS, "sources": sm.SOURCES,
+               "unit_formats": surface.UNIT_FORMATS, "default_unit_format": surface.DEFAULT_UNIT_FORMAT,
+               "row_auto_bins": surface.ROW_AUTO_BINS}
+
+    def r(mid, metric, fam, form, sp, pbh, fg, n=6, side="right"):
+        row = {"id": mid, "metric": metric, "source": mid.split(".")[0], "family": fam, "form": form, "units": "pct",
+               "n": n, "bars": n, "spearman": sp, "spearman_p": pbh, "spearman_p_bh": pbh,
+               "pearson": sp, "pearson_p": pbh, "pearson_p_bh": pbh, "filter_gain": fg,
+               "fg_side": side if fg else None, "fg_removed_pct": 30.0 if fg else None, "fg_n_removed": 300 if fg else None,
+               "fg_removed_mean": 25.0 if fg else None, "fg_n_kept": 700 if fg else None, "fg_kept_mean": 275.0 if fg else None,
+               "fg_lo": None, "fg_hi": 0.2473 if fg else None}
+        return row
+    sections = {
+        "oi": [r("oi_daily.a", "a", "oi", "level", 0.10, 0.5, 12.0), r("oi_5min.b", "b", "oi_spot", "z", -0.40, 0.01, 0.0),
+               r("oi_daily.x", "x", "cross", "level", 0.30, 0.04, 75.0)],
+        "volume": [r("oi_daily.x", "x", "cross", "level", 0.30, 0.03, 75.0), r("oi_daily.v", "v", "volume", "level", -0.05, 0.9, None, n=2)],
+        "price": [r("price_daily.r", "r", "price_momentum", "level", 0.2, 0.2, 5.0), r("price_5min.q", "q", "price_vol", "z", 0.25, 0.2, 9.0)],
+    }
+    iv_cat = {"metrics": [{"column_name": "iv_a", "family": "iv", "form": "level", "units": "vol_decimal",
+                           "description": "momentum of iv", "formula": "", "min_date": "2020-01-02"}],
+              "family_groups": surface.FAMILY_GROUPS, "other_group": surface.OTHER_GROUP, "form_labels": surface.FORM_LABELS,
+              "unit_formats": surface.UNIT_FORMATS, "default_unit_format": surface.DEFAULT_UNIT_FORMAT,
+              "row_auto_bins": surface.ROW_AUTO_BINS}
+    iv_rows = [{"column": "iv_a", "family": "iv", "form": "level", "tenor": None, "wing": None, "n": 6, "bars": 6,
+                "spearman": 0.2, "spearman_p": 0.3, "spearman_p_bh": 0.3, "pearson": 0.2, "pearson_p": 0.3,
+                "pearson_p_bh": 0.3, "filter_gain": 4.0, "fg_side": "left", "fg_removed_pct": 16.7, "fg_n_removed": 1,
+                "fg_removed_mean": -5.0, "fg_n_kept": 5, "fg_kept_mean": 6.8, "fg_lo": 0.1, "fg_hi": None}]
+    reg = json.loads(json.dumps(REGISTRY))
+    base = {"registry": reg, "payload": payload, "catalog": catalog, "ivCatalog": iv_cat, "ivRows": iv_rows,
+            "sections": sections}
+
+    def run(job):
+        p = subprocess.run(["node", "-e", PANES_DRIVER, str(JS), str(CORE)], input=json.dumps(job),
+                           capture_output=True, text=True, encoding="utf-8")
+        if p.returncode:
+            check(False, f"panes driver ran ({p.stderr.strip()[:400]})")
+            return None
+        return json.loads(p.stdout)
+    o = run(base)
+    if o is None:
+        return
+    check(o["secs"] == ["oi", "volume", "price"], f"three panes below IV, in the server's order ({o['secs']})")
+    check(len(o["iv"]) == 2 and len(o["spx"]) == 2 and o["spx"][0]["trades"] == o["iv"][0]
+          and o["spx"][0]["keys"] == ["bar_of", "bars", "from", "pnl"] and o["spx"][0]["from"] == {"oi": None, "volume": None, "price": None},
+          "ONE button: both requests, carrying exactly the same trades (so Train view ranks train trades in every pane)")
+    check(o["after"] == {"busy": False, "stale": False, "staleOi": False}, "after ranking nothing is busy or stale")
+    check(o["spear"] == {"oi": ["oi_5min.b", "oi_daily.x", "oi_daily.a"], "volume": ["oi_daily.x", "oi_daily.v"],
+                         "price": ["price_5min.q", "price_daily.r"]},
+          f"each pane draws its own section's rows by |rho| ({o['spear']})")
+    check("survive Benjamini-Hochberg" in o["footOi"] and "BH over this section's 3 metrics only" in o["footOi"],
+          f"the pane's footer says BH is over its own section ({o['footOi'][:120]})")
+    check(o["cross"] is not None and "Also ranked in Volume" in o["cross"] and "BH-adjusted p differs" in o["cross"]
+          and o["crossNone"] is None,
+          "a cross metric's hover says it is also in Volume with its own adjusted p; other metrics say nothing")
+    fg = o["fg"]
+    check(fg["names"] == ["oi_daily.x", "oi_daily.a"] and fg["values"] == [75.0, 12.0] and fg["zero"] == 1
+          and fg["undef"] == 0 and not fg["survives"],
+          f"filter gain: $/trade descending, a 0 score counted not drawn, no BH marks ({fg['names']}, zero {fg['zero']})")
+    check("comparable within this backtest only" in fg["foot"] and "Benjamini" not in fg["foot"]
+          and "1 in view with no edge cut that helps" in fg["foot"],
+          f"its footer says $/trade is comparable within this backtest only, and counts the zeros ({fg['foot'][:110]})")
+    check(o["fgIv"] == ["iv_a"] and "comparable within this backtest only" in o["fgIvFoot"]
+          and "Benjamini" not in o["fgIvFoot"] and "Pearson" not in o["fgIvFoot"],
+          f"the IV pane sorts by filter gain too, and its footer says $/trade, not BH ({o['fgIvFoot'][:90]})")
+    check(o["fgLines"] == ["Filter gain +$75.00/trade · right 30.0% · removed 300 @ $25.00 · kept 700 @ $275.00",
+                           "  skip if ≥ 24.73 %"]
+          and o["fgZero"] == ["Filter gain $0 — no edge cut raises the average"]
+          and o["fgNull"][0].startswith("Filter gain —") and o["fgNone"] == [],
+          f"the hover line reads as specified, the cut as a rule in display units ({o['fgLines']})")
+    h = o["hideCross"]
+    check("oi_daily.x" not in h["oi"] and "oi_daily.x" in h["volume"] and h["ivHidden"] == 0,
+          "hiding a family hides it in that pane only -- the same cross metric stays in Volume")
+    st = o["staleAfterFilter"]
+    check(st == {"any": True, "oi": True, "price": True, "iv": True}, f"a filter change marks every pane stale ({st})")
+    co = o["commonOn"]
+    check(co["oi"] is True and co["price"] is True and "common coverage from 2022-01-03" in co["cost"],
+          f"common coverage: each pane's own start, and its cost ({co})")
+    check(o["fromSent"] == {"oi": "2021-01-04", "volume": "2020-01-02", "price": "2022-01-03"},
+          f"each section's start travels in `from`, from ITS metrics only ({o['fromSent']})")
+    se = o["search"]
+    check(se["groups"] == ["IV · iv:iv_a", "Price · price_momentum:price_daily.r"] and se["count"] == "2 of 7",
+          f"the one dropdown's search spans IV and the sections, on name or description ({se})")
+    check(o["countAll"] == "7 metrics", f"with no search it counts every metric ({o['countAll']})")
+    check(o["cleared"] == {"rk": True, "rows": True}, "a new log clears the panes' ranking")
+    d = run({**base, "down": True})
+    if d is None:
+        return
+    check(d["secs"] == [] and len(d["iv"]) == 1 and d["spx"] == [] and d["err"].startswith("OI, volume and price"),
+          "OI database unavailable: no OI / Volume / Price panes, the button ranks IV alone")
 
 
 DEPLOY_DRIVER = r"""
@@ -2410,7 +2613,7 @@ def check_export_csv() -> None:
 CHECKS = [
     "check_registry", "check_against_source", "check_binning", "check_stats_parity", "check_section_parity",
     "check_auto_bins", "check_component_filters", "check_export_csv", "check_deployment_and_extra_stats",
-    "check_surface_ranking_ui", "check_surface_rows", "check_spx_rows", "check_filter_gain", "check_spx_rank_sections", "check_dropped_scope", "check_parsers",
+    "check_surface_ranking_ui", "check_surface_rows", "check_spx_rows", "check_filter_gain", "check_spx_rank_sections", "check_rank_panes", "check_dropped_scope", "check_parsers",
     "check_real_mesosim", "check_surface_stats",
 ]
 # Files the checks read. Missing, they are a FAIL naming the file -- never an

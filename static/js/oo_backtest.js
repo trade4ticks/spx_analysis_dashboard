@@ -229,8 +229,12 @@ function obSurfGroupOf(family, groups, other) {
  * alpha is obBarAlpha against the largest n IN VIEW. */
 function obRankView(rows, opts) {
   const m = opts.method;
+  // Filter gain is a score, not a correlation: never negative, and 0 means no
+  // edge cut helps -- those are counted (zeroInView), not drawn.
+  const fg = m === 'filter_gain';
   const inView = rows.filter(r => (opts.form === 'all' || r.form === opts.form) && !opts.hidden.has(r.family));
-  const bars = inView.filter(r => r[m] !== null && r[m] !== undefined);
+  const bars = inView.filter(r => r[m] !== null && r[m] !== undefined && (!fg || r[m] > 0));
+  const zeroInView = fg ? inView.filter(r => r[m] === 0).length : 0;
   bars.sort((a, b) => Math.abs(b[m]) - Math.abs(a[m]) || (a.column < b.column ? -1 : a.column > b.column ? 1 : 0));
   const maxN = bars.reduce((x, r) => Math.max(x, r.n), 0);
   return {
@@ -238,11 +242,29 @@ function obRankView(rows, opts) {
                            survives: r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q,
                            alpha: obBarAlpha(r.n, maxN), group: obSurfGroupOf(r.family, opts.groups, opts.other) })),
     inView: inView.length,
-    undefinedInView: inView.length - bars.length,
+    undefinedInView: inView.length - bars.length - zeroInView,
+    zeroInView,
     survivorsInView: bars.filter(r => r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q).length,
     survivorsAll: rows.filter(r => r[`${m}_p_bh`] !== null && r[`${m}_p_bh`] < OB_BH_Q).length,
     computedAll: rows.filter(r => r[m] !== null && r[m] !== undefined).length,
   };
+}
+
+/* The filter-gain hover line for a rank row, as the user reads it:
+ * "+$75/trade · right 30.0% · removed 300 @ $25.00 · kept 700 @ $275.00",
+ * then the cut as a rule in the metric's display units (u: {scale,
+ * decimals, suffix}). [] when the row has no filter-gain fields. */
+function obFgLines(b, u) {
+  if (!b || b.filter_gain === undefined) return [];
+  if (b.filter_gain === null) return ['Filter gain —  (too few trades with a value)'];
+  if (!b.fg_side) return ['Filter gain $0 — no edge cut raises the average'];
+  const show = x => (u ? (x * (u.scale || 1)).toFixed(u.decimals ?? 4) + (u.suffix ? ' ' + u.suffix : '') : String(x));
+  const rule = b.fg_side === 'left' ? `skip if < ${show(b.fg_lo)}`
+    : b.fg_side === 'right' ? `skip if ≥ ${show(b.fg_hi)}`
+    : `skip if < ${show(b.fg_lo)} or ≥ ${show(b.fg_hi)}`;
+  return [`Filter gain +${obMoney(b.filter_gain, 2)}/trade · ${b.fg_side} ${b.fg_removed_pct.toFixed(1)}% · ` +
+          `removed ${b.fg_n_removed.toLocaleString()} @ ${obMoney(b.fg_removed_mean, 2)} · ` +
+          `kept ${b.fg_n_kept.toLocaleString()} @ ${obMoney(b.fg_kept_mean, 2)}`, `  ${rule}`];
 }
 
 /* What "common coverage only" would cost, over the given trades. minDates:
@@ -913,6 +935,13 @@ document.addEventListener('alpine:init', () => {
      * metric's id is "<source>.<metric>"; the surface ids stay bare. */
     spx: { catalog: null, busy: false, error: '', sections: [], groups: [], sources: {},
            unitFormats: {}, defaultUnitFormat: null, rowAutoBins: null },
+    /* Their ranking (P5): ONE request for the three sections, rows in
+     * OB_DATA.rankSec[section]. Method, form and common coverage are the
+     * surface ranking's (one set of controls for all four panes); hidden
+     * families are per pane. */
+    rk: { busy: false, error: '', result: null, hidden: { oi: {}, volume: {}, price: {} } },
+    // The add-a-metric search: narrows the one dropdown over all 607.
+    addQuery: '',
     // Bumped on every recompute. The filtered rows live outside the proxy
     // (OB_DATA.idx), so anything derived from them reads this to re-render
     // when they change -- without it the coverage headline stayed blank.
@@ -1045,6 +1074,9 @@ document.addEventListener('alpine:init', () => {
       // A new log invalidates any ranking of the previous one.
       OB_DATA.rank = null;
       this.surf.result = null;
+      OB_DATA.rankSec = null;
+      this.rk.result = null;
+      this.rk.error = '';
       this.loaded = true;
       this.loadSurfaceCatalog();
       this.loadSpxCatalog();
@@ -1912,7 +1944,8 @@ document.addEventListener('alpine:init', () => {
 
     surfaceForms() {
       const labels = this.surf.formLabels || {};
-      const present = new Set((this.surf.catalog || []).map(m => m.form));
+      // One form toggle for every pane: the forms of all four sections.
+      const present = new Set([...(this.surf.catalog || []), ...(this.spx.catalog || [])].map(m => m.form));
       return [{ value: 'all', label: 'All forms' },
               ...Object.keys(labels).filter(f => present.has(f)).map(f => ({ value: f, label: labels[f] })),
               ...[...present].filter(f => !(f in labels)).sort().map(f => ({ value: f, label: f }))];
@@ -2136,6 +2169,13 @@ document.addEventListener('alpine:init', () => {
     surfFooter() {
       const v = this.surfView();
       if (!v) return '';
+      // Filter gain is a score with no p-value: no BH to report.
+      if (this.surf.method === 'filter_gain') {
+        return `${v.bars.length} bars by filter gain ($/trade, comparable within this backtest only)` +
+               (v.undefinedInView ? ` · ${v.undefinedInView} in view with no score (too few values)` : '') +
+               (v.zeroInView ? ` · ${v.zeroInView} in view with no edge cut that helps (filter gain 0)` : '') +
+               ' · opacity by n · click a bar to add its section below';
+      }
       if (this.surfPooled()) {
         return `${v.bars.length} bars · ${this.surf.result.variants} variants pooled, no significance marked` +
                (v.undefinedInView ? ` · ${v.undefinedInView} in view with no correlation (too few values or constant)` : '') +
@@ -2205,6 +2245,13 @@ document.addEventListener('alpine:init', () => {
                  'false discoveries' + (n ? `, against ~${Math.round(n * 0.05)} of ${n} looking "significant" by chance at raw p < 0.05` : '') + '. ' +
                  'It is not a cutoff on |r|: the adjusted p also depends on each metric\'s n. The p-values assume ' +
                  'independent trades; trades sharing an entry bar share a value (see distinct bars in the hover).';
+        case 'filter_gain':
+          return 'Filter gain: how much the AVERAGE P/L PER TRADE rises if a contiguous block at one or both ends of ' +
+                 'the metric is not traded -- improvement = removed × (kept avg − removed avg) ÷ all, in $/trade. ' +
+                 'Cuts tried: 5–40% from the low end, 5–40% from the high end, 5–20% from each end; never more than ' +
+                 '40% removed. A cut falls between two values (tied trades stay together), and only the run of cuts ' +
+                 'from the edge inward whose removed block is WORSE than the rest counts. Dollars per trade: it ranks ' +
+                 'metrics within THIS backtest; it is not comparable across backtests.';
         case 'common':
           return 'Each metric is correlated over the trades that have a value for it, and metrics start on different ' +
                  'dates' + (startText ? ` (${startText})` : '') + ', so without this a z-score bar and a level ' +
@@ -2215,36 +2262,70 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* Every pane: the surface (IV) pane and the three below it. */
     renderRanking() {
+      this.renderRankingIv();
+      for (const sec of this.spxSecs()) this.renderSpxRanking(sec.key);
+    },
+
+    renderRankingIv() {
       if (typeof Chart === 'undefined') return;
       const v = this.surfView();
-      const el = document.getElementById('ob-rank-chart');
-      const axisEl = document.getElementById('ob-rank-axis');
-      const inner = document.getElementById('ob-rank-inner');
-      if (!v || !el || !axisEl || !inner) return;
+      if (!v) return;
       const cat = new Map((this.surf.catalog || []).map(m => [m.column_name, m]));
+      this.drawRankChart({
+        v, cat, method: this.surf.method, pooled: this.surfPooled(),
+        ids: { chart: 'ob-rank-chart', axis: 'ob-rank-axis', inner: 'ob-rank-inner' }, keys: ['rank', 'rankAxis'],
+        unit: m => this.surfUnitFormat(m.units), note: () => null,
+      });
+    },
+
+    /* One ranking chart. o: v (obRankView), cat (key -> catalog entry), method,
+     * pooled, ids {chart, axis, inner}, keys [bar chart, axis chart] in
+     * OB_CHARTS, unit(meta) -> display format, note(bar) -> extra hover line
+     * or null. A click on a bar adds that metric's section row. */
+    drawRankChart(o) {
+      const { v, cat, method, pooled } = o;
+      const el = document.getElementById(o.ids.chart);
+      const axisEl = document.getElementById(o.ids.axis);
+      const inner = document.getElementById(o.ids.inner);
+      if (!v || !el || !axisEl || !inner) return;
+      const fg = method === 'filter_gain';
       const BAR_PX = 12, AXIS_PX = 52;
       inner.style.width = Math.max(inner.parentElement.clientWidth, v.bars.length * BAR_PX + 16) + 'px';
-      const maxAbs = Math.max(0.05, ...v.bars.map(b => Math.abs(b.value))) * 1.1;
-      const lim = Math.ceil(maxAbs * 20) / 20;
-      const yScale = { min: -lim, max: lim, border: { display: false } };
-      const method = this.surf.method;
-      const pooled = this.surfPooled();
+      let yScale, tickFmt;
+      if (fg) {
+        // Dollars per trade, never negative: zero at the bottom.
+        const top = Math.max(1, ...v.bars.map(b => b.value)) * 1.1;
+        const mag = Math.pow(10, Math.floor(Math.log10(top)));
+        yScale = { min: 0, max: Math.ceil(top / mag) * mag, border: { display: false } };
+        tickFmt = x => obMoney(x);
+      } else {
+        const maxAbs = Math.max(0.05, ...v.bars.map(b => Math.abs(b.value))) * 1.1;
+        const lim = Math.ceil(maxAbs * 20) / 20;
+        yScale = { min: -lim, max: lim, border: { display: false } };
+        tickFmt = x => x.toFixed(2);
+      }
       const tipLines = b => {
         const m = cat.get(b.column) || {};
         // Pooled variants: no p, no BH, no tick -- they would be wrong.
         const sig = (p, bh) => (pooled ? '' : ` (p ${obP(p)}, BH ${obP(bh)})`);
         const pr = `Pearson r ${b.pearson === null ? '—' : b.pearson.toFixed(3)}${sig(b.pearson_p, b.pearson_p_bh)}`;
         const sp = `Spearman ρ ${b.spearman === null ? '—' : b.spearman.toFixed(3)}${sig(b.spearman_p, b.spearman_p_bh)}`;
+        const note = o.note(b);
         return [...obWrap(m.description, 60), ...(m.formula ? obWrap('= ' + m.formula, 60) : []),
                 `n ${b.n.toLocaleString()} · ${b.bars.toLocaleString()} distinct bars · from ${m.min_date || '—'}`,
+                ...(fg ? obFgLines(b, o.unit(m)) : []),
                 method === 'spearman' ? sp + (b.survives && !pooled ? '  ✓ BH' : '') : sp,
                 method === 'pearson' ? pr + (b.survives && !pooled ? '  ✓ BH' : '') : pr,
+                ...(fg ? [] : obFgLines(b, o.unit(m))),
+                ...(note ? obWrap(note, 60) : []),
                 `${b.family} · ${b.form}${b.tenor ? ' · ' + b.tenor : ''}${b.wing ? ' · ' + b.wing : ''}`];
       };
       // The BH boundary: a faint vertical line after the last surviving bar,
       // drawn by a per-chart plugin (no outline on the bars themselves).
-      const bh = pooled ? { index: null } : obBhBoundary(v.bars);
+      // Filter gain has no p-value, so no line.
+      const bh = pooled || fg ? { index: null } : obBhBoundary(v.bars);
       const bhLine = {
         id: 'obBhLine',
         afterDatasetsDraw(chart) {
@@ -2267,10 +2348,11 @@ document.addEventListener('alpine:init', () => {
           ctx.restore();
         },
       };
+      const [barKey, axisKey] = o.keys;
       const cfg = {
         type: 'bar',
         plugins: [bhLine],
-        data: { labels: v.bars.map(b => b.column), datasets: [{
+        data: { labels: v.bars.map(b => b.label || b.column), datasets: [{
           data: v.bars.map(b => b.value),
           backgroundColor: v.bars.map(b => obRgba(b.group.color, b.alpha)),
           borderSkipped: false, barPercentage: 0.8, categoryPercentage: 1.0 }] },
@@ -2279,17 +2361,17 @@ document.addEventListener('alpine:init', () => {
           layout: { padding: { top: 6, bottom: 6 } },
           // Click a bar: add that metric's section row below the ranking.
           onClick: (evt, _els, chart) => {
-            const hit = (chart || OB_CHARTS.rank).getElementsAtEventForMode(evt, 'nearest', { intersect: true }, false);
-            if (hit.length) this.surfClickBar(hit[0].index);
+            const hit = (chart || OB_CHARTS[barKey]).getElementsAtEventForMode(evt, 'nearest', { intersect: true }, false);
+            if (hit.length) this.rankClickBar(v, hit[0].index);
           },
-          onHover: (evt, els, chart) => { (chart || OB_CHARTS.rank).canvas.style.cursor = els.length ? 'pointer' : 'default'; },
+          onHover: (evt, els, chart) => { (chart || OB_CHARTS[barKey]).canvas.style.cursor = els.length ? 'pointer' : 'default'; },
           scales: {
             x: { display: false },
             y: { ...yScale, ticks: { display: false }, afterFit: sc => { sc.width = 0; },
                  grid: { color: ctx => (ctx.tick && ctx.tick.value === 0 ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.05)') } },
           },
           plugins: { legend: { display: false },
-                     tooltip: { callbacks: { title: it => v.bars[it[0].dataIndex].column,
+                     tooltip: { callbacks: { title: it => v.bars[it[0].dataIndex].label || v.bars[it[0].dataIndex].column,
                                              label: it => tipLines(v.bars[it.dataIndex]) } } },
         },
       };
@@ -2303,17 +2385,207 @@ document.addEventListener('alpine:init', () => {
                    scales: { x: { display: false },
                              y: { ...yScale, grid: { display: false },
                                   afterFit: sc => { sc.width = AXIS_PX; },
-                                  ticks: { color: '#9a9a9a', font: { size: 10 }, callback: x => x.toFixed(2) } } },
+                                  ticks: { color: '#9a9a9a', font: { size: 10 }, callback: tickFmt } } },
                    plugins: { legend: { display: false }, tooltip: { enabled: false } } },
       };
-      for (const [key, node, c] of [['rank', el, cfg], ['rankAxis', axisEl, axisCfg]]) {
+      for (const [key, node, c] of [[barKey, el, cfg], [axisKey, axisEl, axisCfg]]) {
         const ch = OB_CHARTS[key];
         // Plugins are fixed at construction, and the BH line closes over this
         // render's bars: rebuild the bar chart rather than update it.
-        if (ch && (ch.canvas !== node || key === 'rank')) { ch.destroy(); OB_CHARTS[key] = null; }
+        if (ch && (ch.canvas !== node || key === barKey)) { ch.destroy(); OB_CHARTS[key] = null; }
         if (OB_CHARTS[key]) { OB_CHARTS[key].data = c.data; OB_CHARTS[key].options = c.options; OB_CHARTS[key].resize(); OB_CHARTS[key].update('none'); }
         else OB_CHARTS[key] = new Chart(node.getContext('2d'), c);
       }
+    },
+
+    /* ── the OI / Volume / Price ranking panes (P5) ─────────────────────── */
+
+    /* The three sections, in the server's order, when their catalog loaded. */
+    spxSecs() { return this.spx.catalog ? (this.spx.sections || []) : []; },
+    spxSecLabel(s) { return ((this.spx.sections || []).find(x => x.key === s) || {}).label || s; },
+
+    /* A section's metrics, shaped like surface catalog rows (column_name =
+     * the id) so the shared view and coverage code reads them unchanged. */
+    spxSecCatalog(s) {
+      return (this.spx.catalog || []).filter(m => (m.sections || []).includes(s))
+        .map(m => ({ ...m, column_name: m.id }));
+    },
+    spxViewMetrics(s) {
+      const hidden = this.rk.hidden[s] || {};
+      return this.spxSecCatalog(s).filter(m => (this.surf.form === 'all' || m.form === this.surf.form) && !hidden[m.family]);
+    },
+    spxGroups(s) {
+      const fams = new Set(this.spxSecCatalog(s).map(m => m.family));
+      const order = ((this.spx.sections || []).find(x => x.key === s) || {}).families || [];
+      return (this.spx.groups || []).filter(g => g.families.some(f => fams.has(f)))
+        .map(g => ({ ...g, families: g.families.filter(f => fams.has(f)) }))
+        .sort((a, b) => order.indexOf(a.families[0]) - order.indexOf(b.families[0]));
+    },
+    spxFamilyCount(s, f) {
+      return this.spxSecCatalog(s).filter(m => m.family === f && (this.surf.form === 'all' || m.form === this.surf.form)).length;
+    },
+    spxFamilyHidden(s, f) { return !!(this.rk.hidden[s] || {})[f]; },
+    toggleSpxFamily(s, f) {
+      this.rk.hidden = { ...this.rk.hidden, [s]: { ...(this.rk.hidden[s] || {}), [f]: !this.spxFamilyHidden(s, f) } };
+      this.renderSpxRanking(s);
+    },
+    spxCoverage(s) {
+      void this.idxTick;
+      if (!OB_DATA.columns) return null;
+      return obCommonCoverage(OB_DATA.columns.date_opened, this.rankIdx(), this.spxViewMetrics(s).map(m => m.min_date));
+    },
+    /* What the pane's ranking was computed on: the shared signature (rows,
+     * variant, split) plus THIS section's common-coverage start. */
+    spxSig(s) {
+      const base = this.surfSignature().split(':').slice(0, 3).join(':');
+      const cov = this.surf.common ? (this.spxCoverage(s) || {}).commonStart : '';
+      return `${base}:${cov || ''}` + (this.splitOn() ? `:train<=${this.split.cutoff}` : '');
+    },
+    spxStale(s) {
+      const r = this.rk.result;
+      return !!r && !!r.sigs && r.sigs[s] !== this.spxSig(s);
+    },
+    rankStale() { return this.surfStale() || this.spxSecs().some(x => this.spxStale(x.key)); },
+    rankBusy() { return this.surf.busy || this.rk.busy; },
+
+    /* ONE button for every pane: the surface ranking and, when their catalog
+     * loaded, the three sections -- two requests, side by side. */
+    async rankAll() {
+      await Promise.all([this.rankSurface(), this.spx.catalog ? this.rankSpx() : null]);
+    },
+
+    async rankSpx() {
+      if (!OB_DATA.columns || this.rk.busy || !this.spx.catalog) return;
+      const rIdx = this.rankIdx();
+      if (this.splitOn() && !rIdx.length) {
+        this.rk.error = 'No filtered trades in the train period to rank.';
+        return;
+      }
+      // Every filtered trade goes; each section's coverage start travels
+      // with it and the server narrows that section alone.
+      const body0 = obRankBody(OB_DATA.columns, rIdx, null);
+      const from = {}, sigs = {};
+      for (const sec of this.spxSecs()) {
+        const cov = this.spxCoverage(sec.key);
+        from[sec.key] = this.surf.common && cov ? cov.commonStart : null;
+        sigs[sec.key] = this.spxSig(sec.key);
+      }
+      this.rk.busy = true;
+      this.rk.error = '';
+      try {
+        const t0 = performance.now();
+        const r = await fetch('/api/oo-backtest/spx-metrics/rank', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body0, from }) });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+        const secs = {};
+        for (const [k, rows] of Object.entries(body.sections || {})) {
+          secs[k] = rows.map(x => ({ ...x, column: x.id, label: x.metric }));
+        }
+        OB_DATA.rankSec = secs;
+        const n = {};
+        for (const [k, rows] of Object.entries(secs)) {
+          const ns = rows.map(x => x.n).filter(x => x > 0);
+          n[k] = { min: ns.length ? Math.min(...ns) : 0, max: ns.length ? Math.max(...ns) : 0 };
+        }
+        this.rk.result = {
+          sigs, from, sent: body0.pnl.length, report: body.report, n,
+          at: new Date().toTimeString().slice(0, 5), ms: Math.round(performance.now() - t0),
+          variants: this.splitOn() ? this.variantsIn(rIdx) : (OB_DATA.vm ? OB_DATA.vm.length : 1),
+        };
+        this.$nextTick(() => requestAnimationFrame(() => { for (const sec of this.spxSecs()) this.renderSpxRanking(sec.key); }));
+      } catch (e) {
+        console.error('oo-backtest spx metrics rank', e);
+        this.rk.error = `OI / Volume / Price ranking failed: ${e.message}`;
+      } finally {
+        this.rk.busy = false;
+      }
+    },
+
+    spxPooled() { return !!this.rk.result && this.rk.result.variants > 1; },
+
+    spxView(s) {
+      void this.rk.result;
+      const rows = OB_DATA.rankSec && OB_DATA.rankSec[s];
+      if (!rows) return null;
+      const hidden = this.rk.hidden[s] || {};
+      return obRankView(rows, { method: this.surf.method, form: this.surf.form,
+                                hidden: new Set(Object.keys(hidden).filter(k => hidden[k])),
+                                groups: this.spx.groups, other: { label: 'Other', color: '#8a8a8a' } });
+    },
+
+    /* The pane's prominent line: what the trades sent could be measured on. */
+    spxHeadline(s) {
+      const res = this.rk.result;
+      if (!res || !res.n[s]) {
+        const cov = this.spxCoverage(s);
+        if (!cov || !cov.earliestStart) return '';
+        const n = this.rankIdx().length;
+        return `${cov.beforeEarliest.toLocaleString()} of ${n.toLocaleString()} filtered trades entered before the ` +
+               `${this.spxSecLabel(s)} metrics in view start (${cov.earliestStart}) and will have no value`;
+      }
+      const from = res.from && res.from[s];
+      const srcs = [...new Set(this.spxSecCatalog(s).map(m => m.source))];
+      const miss = (res.report.not_present || {});
+      const parts = srcs.filter(x => miss[x]).map(x => {
+        const src = (this.spx.sources || {})[x] || {};
+        return `${miss[x].toLocaleString()} with no ${src.join === 'date' ? 'row for the entry date' : 'bar at the entry time'} ` +
+               `in ${src.label || x}`;
+      });
+      return `${res.n[s].min.toLocaleString()}–${res.n[s].max.toLocaleString()} of ${res.sent.toLocaleString()} trades ` +
+             `have a value, per metric` + (from ? ` (only trades from ${from}: common coverage)` : '') +
+             (parts.length ? ` — ${parts.join('; ')}` : '');
+    },
+
+    spxCommonText(s) {
+      const cov = this.spxCoverage(s);
+      if (!this.surf.common || !cov || !cov.commonStart) return '';
+      if (cov.commonStart === cov.earliestStart) return `every metric in view starts ${cov.commonStart}; no cost`;
+      return `common coverage from ${cov.commonStart}: drops ${cov.dropped.toLocaleString()} of ` +
+             `${(cov.dropped + cov.kept).toLocaleString()} covered trades`;
+    },
+
+    spxFooter(s) {
+      const v = this.spxView(s);
+      if (!v) return '';
+      const rows = (OB_DATA.rankSec || {})[s] || [];
+      const tail = (v.undefinedInView ? ` · ${v.undefinedInView} in view with no ${this.surf.method === 'filter_gain' ? 'score (too few values)' : 'correlation (too few values or constant)'}` : '') +
+                   (v.zeroInView ? ` · ${v.zeroInView} in view with no edge cut that helps (filter gain 0)` : '') +
+                   ' · opacity by n · click a bar to add its section below';
+      if (this.surf.method === 'filter_gain') {
+        return `${v.bars.length} bars by filter gain ($/trade, comparable within this backtest only)` + tail;
+      }
+      if (this.spxPooled()) return `${v.bars.length} bars · ${this.rk.result.variants} variants pooled, no significance marked` + tail;
+      const name = this.surf.method === 'spearman' ? 'Spearman' : 'Pearson';
+      const bh = obBhBoundary(v.bars);
+      const line = bh.index === null ? 'none in view survive, so no line' : 'left of the dashed line';
+      return `${v.bars.length} bars · ${v.survivorsInView} in view survive Benjamini-Hochberg at q ${OB_BH_Q} (${name}; ` +
+             `${v.survivorsAll} of ${v.computedAll} computed — BH over this section's ${rows.length} metrics only), ${line}` + tail;
+    },
+
+    /* A metric in two sections (the cross metrics): same r, p and filter
+     * gain in both, a different adjusted p -- each section is its own BH
+     * family. Said where it is shown. */
+    spxCrossNote(s, b) {
+      const m = (this.spx.catalog || []).find(x => x.id === b.column);
+      const others = ((m && m.sections) || []).filter(x => x !== s).map(x => this.spxSecLabel(x));
+      if (!others.length) return null;
+      return `Also ranked in ${others.join(', ')}: the same r, p and filter gain there, but its BH-adjusted p differs — ` +
+             `each section is its own Benjamini-Hochberg family.`;
+    },
+
+    renderSpxRanking(s) {
+      if (typeof Chart === 'undefined') return;
+      const v = this.spxView(s);
+      if (!v) return;
+      const cat = new Map(this.spxSecCatalog(s).map(m => [m.id, m]));
+      this.drawRankChart({
+        v, cat, method: this.surf.method, pooled: this.spxPooled(),
+        ids: { chart: `ob-rank-chart-${s}`, axis: `ob-rank-axis-${s}`, inner: `ob-rank-inner-${s}` },
+        keys: [`rank_${s}`, `rankAxis_${s}`],
+        unit: m => (this.spx.unitFormats || {})[m.units] || this.spx.defaultUnitFormat || { scale: 1, decimals: 4, suffix: '' },
+        note: b => this.spxCrossNote(s, b),
+      });
     },
 
 
@@ -2335,13 +2607,27 @@ document.addEventListener('alpine:init', () => {
     surfRowFor(column) { return this.surfRows.find(r => r.surfColumn === column) || null; },
 
     /* The dropdown: families in legend order, each an optgroup of its metrics. */
+    /* "607 metrics" / "12 of 607" / nothing matches, beside the search box. */
+    addCount() {
+      const total = (this.surf.catalog || []).length + (this.spx.catalog || []).length;
+      if (!total) return '';
+      const unique = new Set();
+      for (const g of this.surfOptionGroups()) for (const o of g.options) unique.add(o.value);
+      if (!(this.addQuery || '').trim()) return `${total.toLocaleString()} metrics`;
+      return unique.size ? `${unique.size.toLocaleString()} of ${total.toLocaleString()}` : `nothing matches "${this.addQuery.trim()}"`;
+    },
+
     surfOptionGroups() {
       const cat = this.surf.catalog || [];
       const out = [];
+      const q = (this.addQuery || '').trim().toLowerCase();
+      const hit = (name, desc) => !q || name.toLowerCase().includes(q) || String(desc || '').toLowerCase().includes(q);
       for (const g of this.surfaceGroups()) {
         for (const f of g.families) {
-          const ms = cat.filter(m => m.family === f).sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
-          out.push({ label: `${g.label} · ${f}`, options: ms.map(m => ({
+          const ms = cat.filter(m => m.family === f && hit(m.column_name, m.description))
+            .sort((a, b) => (a.column_name < b.column_name ? -1 : 1));
+          if (!ms.length) continue;
+          out.push({ label: `IV · ${f}`, options: ms.map(m => ({
             value: m.column_name, added: !!this.surfRowFor(m.column_name),
             label: `${m.column_name}${m.description ? ' — ' + String(m.description).slice(0, 70) : ''}` })) });
         }
@@ -2359,19 +2645,23 @@ document.addEventListener('alpine:init', () => {
       const opt = m => ({ value: m.id, added: !!this.surfRowFor(m.id),
                           label: `${m.metric}${m.description ? ' — ' + String(m.description).slice(0, 70) : ''}` });
       const byName = (a, b) => (a.metric < b.metric ? -1 : a.metric > b.metric ? 1 : (a.id < b.id ? -1 : 1));
+      const q = (this.addQuery || '').trim().toLowerCase();
+      const hit = m => !q || m.metric.toLowerCase().includes(q) || String(m.description || '').toLowerCase().includes(q);
       for (const sec of this.spx.sections) {
         for (const f of sec.families) {
-          const ms = cat.filter(m => m.family === f).sort(byName);
+          const ms = cat.filter(m => m.family === f && hit(m)).sort(byName);
           if (ms.length) out.push({ label: `${sec.label} · ${f}`, options: ms.map(opt) });
         }
       }
-      const rest = cat.filter(m => !(m.sections || []).length).sort(byName);
+      const rest = cat.filter(m => !(m.sections || []).length && hit(m)).sort(byName);
       if (rest.length) out.push({ label: 'Other', options: rest.map(opt) });
       return out;
     },
 
-    surfClickBar(index) {
-      const v = this.surfView();
+    /* A click on bar `index` of a pane's view (any pane: IV or a section)
+     * adds that metric's section row -- its column is the surface name or
+     * the "<source>.<metric>" id, which addSurfRow tells apart. */
+    rankClickBar(v, index) {
       if (v && v.bars[index]) this.addSurfRow(v.bars[index].column);
     },
 

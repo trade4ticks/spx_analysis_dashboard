@@ -96,6 +96,11 @@
     .ob-rank-scroll { flex:1; min-width:0; overflow-x:auto; overflow-y:hidden; }
     .ob-rank-inner { height:100%; position:relative; }
     .ob-rank-add { width:auto; max-width:320px; }
+    .ob-rank-search { width:220px; }
+    .ob-rank-pane { border-top:1px solid var(--border); padding-top:10px; margin-top:10px; }
+    .ob-rank-pane-hdr { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; }
+    .ob-rank-pane-title { font-size:13px; font-weight:700; color:var(--text); }
+    .ob-rank-wrap.small { height:240px; }
     .ob-rank-foot { margin-top:6px; }
     .ob-help { color:var(--accent); cursor:help; border-bottom:1px dotted var(--accent); margin-left:6px; }
     .ob-rank-bhwarn { margin-top:6px; padding:6px 10px; border-radius:4px; font-size:12px; font-weight:600;
@@ -811,25 +816,24 @@
         </template>
         </div>
       </template>
-      <!-- Surface metrics ranking (P6b): correlation of every surface metric
-           with P/L, computed on the server for the CURRENT filtered trades when
-           Rank is pressed -- not on every filter change. -->
+      <!-- Metrics vs P/L: FOUR panes -- IV (the surface metrics, P6b) and the
+           OI / Volume / Price sections (P5) -- ranked against the CURRENT
+           filtered trades when Rank is pressed, by ONE button. Method, form and
+           common coverage are shared; hidden families are per pane. -->
       <div class="ob-card" x-show="loaded && filteredCount > 0">
         <div class="ob-card-hdr">
-          <span class="ob-card-title">Surface metrics vs P/L</span>
+          <span class="ob-card-title">Metrics vs P/L</span>
           <template x-if="splitOn()"><span class="ob-card-sub">ranked on train only</span></template>
-          <span class="ob-card-sub" x-text="surfSubline()"></span>
         </div>
         <div class="ob-card-body">
-          <div class="ob-rank-headline" :class="{ muted: !surf.result }" x-show="surfHeadline()" x-text="surfHeadline()"></div>
-
           <div class="ob-rank-controls">
-            <button class="btn primary" @click="rankSurface()" :disabled="surf.busy || surf.catalogBusy"
-                    x-text="surf.busy ? 'Ranking…' : (surf.result ? 'Recompute' : 'Rank metrics')"></button>
-            <span class="ob-rank-stale" x-show="surfStale()">stale — filters or coverage changed since this ranking</span>
+            <button class="btn primary" @click="rankAll()" :disabled="rankBusy() || surf.catalogBusy"
+                    x-text="rankBusy() ? 'Ranking…' : (surf.result || rk.result ? 'Recompute' : 'Rank metrics')"></button>
+            <span class="ob-rank-stale" x-show="rankStale()">stale — filters or coverage changed since this ranking</span>
             <div class="seg">
               <div class="seg-btn" :class="{on: surf.method==='spearman'}" @click="setSurfMethod('spearman')" :title="surfTip('spearman')">Spearman</div>
               <div class="seg-btn" :class="{on: surf.method==='pearson'}" @click="setSurfMethod('pearson')" :title="surfTip('pearson')">Pearson</div>
+              <div class="seg-btn" :class="{on: surf.method==='filter_gain'}" @click="setSurfMethod('filter_gain')" :title="surfTip('filter_gain')">Filter gain</div>
             </div>
             <div class="seg">
               <template x-for="f in surfaceForms()" :key="f.value">
@@ -839,10 +843,15 @@
             <label class="ob-check" :title="surfTip('common')">
               <input type="checkbox" :checked="surf.common" @change="toggleCommon()">
               <span>Common coverage only</span>
-              <span class="ob-dim" x-text="surfCommonText()"></span>
             </label>
-            <!-- The alternative to clicking a bar: any ranked metric, by family,
-                 then the OI / Volume / Price metrics by section and family. -->
+          </div>
+          <!-- ONE way to add any of the metrics -- IV, OI, Volume or Price --
+               without knowing its category first: the search narrows the one
+               list (name or description), grouped "<section> · <family>". -->
+          <div class="ob-rank-controls">
+            <span class="ob-lbl">Add a metric</span>
+            <input class="ob-sel ob-rank-search" type="search" x-model="addQuery" :disabled="!surf.catalog && !spx.catalog"
+                   placeholder="search name or description…" aria-label="Filter the metric list">
             <select class="ob-sel ob-rank-add" x-show="surf.catalog || spx.catalog" aria-label="Add a metric section"
                     @change="addSurfRow($event.target.value); $event.target.value = ''">
               <option value="">Add a metric section…</option>
@@ -854,46 +863,97 @@
                 </optgroup>
               </template>
             </select>
+            <span class="ob-dim" x-text="addCount()"></span>
           </div>
 
           <div class="ob-err" x-show="surf.catalogError" x-text="surf.catalogError"></div>
           <div class="ob-err" x-show="surf.error" x-text="surf.error"></div>
           <div class="ob-err" x-show="spx.error" x-text="spx.error"></div>
+          <div class="ob-err" x-show="rk.error" x-text="rk.error"></div>
 
-          <div class="ob-rank-legend" x-show="surf.catalog">
-            <template x-for="g in surfaceGroups()" :key="g.label">
-              <span class="ob-rank-group">
-                <span class="ob-rank-swatch" :style="'background:' + g.color"></span>
-                <span class="ob-dim" x-text="g.label"></span>
-                <template x-for="f in g.families" :key="f">
-                  <a href="#" class="ob-rank-fam" :class="{ off: familyHidden(f) }" @click.prevent="toggleFamily(f)"
-                     :title="familyHidden(f) ? 'show ' + f : 'hide ' + f"
-                     x-text="f + ' ' + familyCount(f)"></a>
-                </template>
-              </span>
-            </template>
-          </div>
+          <!-- IV: the surface metrics (P6b). -->
+          <div class="ob-rank-pane">
+            <div class="ob-rank-pane-hdr">
+              <span class="ob-rank-pane-title">IV</span>
+              <span class="ob-card-sub" x-text="surfSubline()"></span>
+            </div>
+            <div class="ob-rank-headline" :class="{ muted: !surf.result }" x-show="surfHeadline()" x-text="surfHeadline()"></div>
+            <div class="ob-dim" x-show="surf.common && surfCommonText()" x-text="surfCommonText()"></div>
 
-          <div class="ob-placeholder" x-show="!surf.result && !surf.busy">
-            Press Rank metrics to correlate every surface metric with the filtered trades' P/L
-          </div>
-          <!-- Kept in the DOM (x-show) so the canvases exist before a render. -->
-          <div class="ob-rank-wrap" x-show="surf.result">
-            <div class="ob-rank-axis"><canvas id="ob-rank-axis"></canvas></div>
-            <div class="ob-rank-scroll">
-              <div id="ob-rank-inner" class="ob-rank-inner">
-                <canvas id="ob-rank-chart" role="img"
-                        aria-label="Surface metrics ranked by absolute correlation with P/L"></canvas>
+            <div class="ob-rank-legend" x-show="surf.catalog">
+              <template x-for="g in surfaceGroups()" :key="g.label">
+                <span class="ob-rank-group">
+                  <span class="ob-rank-swatch" :style="'background:' + g.color"></span>
+                  <span class="ob-dim" x-text="g.label"></span>
+                  <template x-for="f in g.families" :key="f">
+                    <a href="#" class="ob-rank-fam" :class="{ off: familyHidden(f) }" @click.prevent="toggleFamily(f)"
+                       :title="familyHidden(f) ? 'show ' + f : 'hide ' + f"
+                       x-text="f + ' ' + familyCount(f)"></a>
+                  </template>
+                </span>
+              </template>
+            </div>
+
+            <div class="ob-placeholder" x-show="!surf.result && !surf.busy">
+              Press Rank metrics to rank every surface metric against the filtered trades' P/L
+            </div>
+            <!-- Kept in the DOM (x-show) so the canvases exist before a render. -->
+            <div class="ob-rank-wrap" x-show="surf.result">
+              <div class="ob-rank-axis"><canvas id="ob-rank-axis"></canvas></div>
+              <div class="ob-rank-scroll">
+                <div id="ob-rank-inner" class="ob-rank-inner">
+                  <canvas id="ob-rank-chart" role="img"
+                          aria-label="Surface metrics ranked against P/L"></canvas>
+                </div>
               </div>
             </div>
+            <div class="ob-dim ob-rank-foot" x-show="surf.result">
+              <span x-text="surfFooter()"></span>
+              <span class="ob-help" x-show="surf.method !== 'filter_gain'" :title="surfTip('bh')">what is BH?</span>
+            </div>
+            <!-- Prominent, not folded into the footer: later-starting forms sit
+                 systematically at low n and can fail BH left of the line. -->
+            <div class="ob-rank-bhwarn" x-show="surf.result && surfBhWarning()" x-text="'⚠ ' + surfBhWarning()"></div>
           </div>
-          <div class="ob-dim ob-rank-foot" x-show="surf.result">
-            <span x-text="surfFooter()"></span>
-            <span class="ob-help" :title="surfTip('bh')">what is BH?</span>
-          </div>
-          <!-- Prominent, not folded into the footer: later-starting forms sit
-               systematically at low n and can fail BH left of the line. -->
-          <div class="ob-rank-bhwarn" x-show="surf.result && surfBhWarning()" x-text="'⚠ ' + surfBhWarning()"></div>
+
+          <!-- OI / Volume / Price (P5): one pane per section, one request for
+               the three. A cross metric is in OI and Volume; each section is its
+               own Benjamini-Hochberg family. -->
+          <template x-for="sec in spxSecs()" :key="sec.key">
+            <div class="ob-rank-pane">
+              <div class="ob-rank-pane-hdr">
+                <span class="ob-rank-pane-title" x-text="sec.label"></span>
+                <span class="ob-rank-stale" x-show="spxStale(sec.key)">stale</span>
+              </div>
+              <div class="ob-rank-headline" :class="{ muted: !rk.result }" x-show="spxHeadline(sec.key)" x-text="spxHeadline(sec.key)"></div>
+              <div class="ob-dim" x-show="spxCommonText(sec.key)" x-text="spxCommonText(sec.key)"></div>
+              <div class="ob-rank-legend">
+                <template x-for="g in spxGroups(sec.key)" :key="g.label">
+                  <span class="ob-rank-group">
+                    <span class="ob-rank-swatch" :style="'background:' + g.color"></span>
+                    <span class="ob-dim" x-text="g.label"></span>
+                    <template x-for="f in g.families" :key="f">
+                      <a href="#" class="ob-rank-fam" :class="{ off: spxFamilyHidden(sec.key, f) }" @click.prevent="toggleSpxFamily(sec.key, f)"
+                         :title="spxFamilyHidden(sec.key, f) ? 'show ' + f : 'hide ' + f"
+                         x-text="f + ' ' + spxFamilyCount(sec.key, f)"></a>
+                    </template>
+                  </span>
+                </template>
+              </div>
+              <div class="ob-placeholder" x-show="!rk.result && !rk.busy"
+                   x-text="'Press Rank metrics to rank every ' + sec.label + ' metric against the filtered trades\' P/L'"></div>
+              <div class="ob-rank-wrap small" x-show="rk.result">
+                <div class="ob-rank-axis"><canvas :id="'ob-rank-axis-' + sec.key"></canvas></div>
+                <div class="ob-rank-scroll">
+                  <div :id="'ob-rank-inner-' + sec.key" class="ob-rank-inner">
+                    <canvas :id="'ob-rank-chart-' + sec.key" role="img"
+                            :aria-label="sec.label + ' metrics ranked against P/L'"></canvas>
+                  </div>
+                </div>
+              </div>
+              <div class="ob-dim ob-rank-foot" x-show="rk.result" x-text="spxFooter(sec.key)"></div>
+            </div>
+          </template>
           <div class="ob-rank-pooled" x-show="surfPooled()" x-text="surfPooledNote()"></div>
         </div>
       </div>
